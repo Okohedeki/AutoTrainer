@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem in AutoTrainer.
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Include the smallest reproducible task or environment manifest.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, GPU, driver, Python, Node, model, and checkpoint revision.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell

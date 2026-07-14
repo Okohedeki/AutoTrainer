@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotrainer-trainer"
+version = "0.1.0"
+description = "Single-GPU QLoRA and reinforcement-learning runtime for AutoTrainer"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+training = [
+  "accelerate",
+  "bitsandbytes",
+  "datasets",
+  "peft",
+  "torch",
+  "transformers",
+  "trl"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,15 @@
+{
+  "name": "autotrainer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*"],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace @autotrainer/web",
+    "build": "npm run build --workspace @autotrainer/web",
+    "test": "npm run check --workspace @autotrainer/web"
+  }
+}
