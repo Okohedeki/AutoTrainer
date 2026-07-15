@@ -95,6 +95,31 @@ def _deduplicate(values: Sequence[str]) -> list[str]:
     return sorted(dict.fromkeys(value for value in values if value))
 
 
+def _project_path(project_root: Path, value: Any) -> Path | None:
+    text = _string(value)
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    return candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
+
+
+def _adapter_artifact_blockers(path: Path) -> list[str]:
+    if not path.exists():
+        return [f"candidate adapter does not exist: {path}"]
+    if path.is_file():
+        if path.suffix not in {".bin", ".safetensors"}:
+            return [f"candidate adapter path is not a PEFT weight file or directory: {path}"]
+        return []
+    missing: list[str] = []
+    if not (path / "adapter_config.json").is_file():
+        missing.append("adapter_config.json")
+    if not any((path / name).is_file() for name in ("adapter_model.safetensors", "adapter_model.bin")):
+        missing.append("adapter_model.safetensors or adapter_model.bin")
+    if missing:
+        return [f"candidate adapter is incomplete at {path}; missing " + ", ".join(missing)]
+    return []
+
+
 def build_plan(
     config: Mapping[str, Any], project_root: Path, scan: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -348,6 +373,28 @@ def build_plan(
     evaluation_reference = evaluation_config.get("task_pack")
     evaluation_source: Mapping[str, Any] | None = None
     evaluation_candidates = evaluation_config.get("candidates")
+    evaluation_arms_value = evaluation_config.get("arms")
+    evaluation_arms = (
+        evaluation_arms_value if isinstance(evaluation_arms_value, Mapping) else {}
+    )
+    evaluation_suites_value = evaluation_config.get("suites")
+    evaluation_suites = (
+        evaluation_suites_value if isinstance(evaluation_suites_value, Mapping) else {}
+    )
+    evaluation_repetitions = evaluation_config.get("repetitions")
+    evaluation_seeds = evaluation_config.get("seeds")
+    project_config = _mapping(config.get("project"))
+    artifact_reference = project_config.get(
+        "artifact_dir", project_config.get("output_dir", ".autotrainer")
+    )
+    artifact_path = _project_path(root, artifact_reference)
+    compiled_evaluation_path = (
+        artifact_path / "compiled" / "rl" / "evaluation.jsonl"
+        if artifact_path is not None
+        else None
+    )
+    arm_plans: dict[str, dict[str, Any]] = {}
+    suite_plans: dict[str, dict[str, Any]] = {}
     if evaluation_requested:
         if evaluation_reference:
             evaluation_source = _select_source(
@@ -378,6 +425,91 @@ def build_plan(
                 )
         if not isinstance(evaluation_candidates, list) or not evaluation_candidates:
             evaluation_blockers.append("evaluation.candidates must be a non-empty list")
+        if not evaluation_arms:
+            evaluation_blockers.append("evaluation.arms must declare runtime model identities")
+        elif isinstance(evaluation_candidates, list) and set(evaluation_candidates) != set(
+            evaluation_arms
+        ):
+            evaluation_blockers.append(
+                "evaluation.candidates must contain exactly the declared arm ids"
+            )
+        if set(evaluation_suites) != {"model_benchmark", "fable_ab"}:
+            evaluation_blockers.append(
+                "evaluation.suites must declare model_benchmark and fable_ab"
+            )
+        if not isinstance(evaluation_repetitions, int) or isinstance(
+            evaluation_repetitions, bool
+        ) or evaluation_repetitions < 1:
+            evaluation_blockers.append("evaluation.repetitions must be a positive integer")
+        if not isinstance(evaluation_seeds, list) or not evaluation_seeds:
+            evaluation_blockers.append("evaluation.seeds must be a non-empty list")
+        elif (
+            isinstance(evaluation_repetitions, int)
+            and not isinstance(evaluation_repetitions, bool)
+            and len(evaluation_seeds) != evaluation_repetitions
+        ):
+            evaluation_blockers.append(
+                "evaluation.seeds length must equal evaluation.repetitions"
+            )
+
+        for arm_id, arm_value in evaluation_arms.items():
+            arm = _mapping(arm_value)
+            role = _string(arm.get("role"))
+            model = arm.get("model")
+            adapter = _mapping(arm.get("adapter"))
+            arm_plan: dict[str, Any] = {
+                "label": _string(arm.get("label")) or str(arm_id),
+                "role": role or None,
+                "parameter_class": _string(arm.get("parameter_class")) or None,
+                "model": dict(model) if isinstance(model, Mapping) else model,
+                "adapter": None,
+            }
+            if isinstance(model, Mapping):
+                external_id = _string(model.get("id"))
+                external_revision = _string(model.get("revision"))
+                if not external_id or external_id.upper().startswith("REPLACE_"):
+                    evaluation_blockers.append(
+                        f"arm {arm_id!r} has an unresolved external model id"
+                    )
+                if not re.fullmatch(r"[0-9a-fA-F]{40,64}", external_revision) or not set(
+                    external_revision
+                ) - {"0"}:
+                    evaluation_blockers.append(
+                        f"arm {arm_id!r} external model revision must be a non-placeholder immutable commit SHA"
+                    )
+            if role == "candidate":
+                adapter_reference = adapter.get("path")
+                adapter_path = _project_path(root, adapter_reference)
+                arm_plan["adapter"] = {
+                    "path": str(adapter_path) if adapter_path is not None else None,
+                    "stage": _string(adapter.get("stage")) or None,
+                    "sha256": _string(adapter.get("sha256")) or None,
+                }
+                if adapter_path is None:
+                    evaluation_blockers.append(
+                        f"candidate arm {arm_id!r} must declare adapter.path"
+                    )
+                else:
+                    evaluation_blockers.extend(_adapter_artifact_blockers(adapter_path))
+            arm_plans[str(arm_id)] = arm_plan
+
+        if compiled_evaluation_path is None:
+            evaluation_blockers.append(
+                "project.artifact_dir is required to locate compiled evaluation tasks"
+            )
+        elif not compiled_evaluation_path.is_file():
+            evaluation_blockers.append(
+                f"compiled evaluation task dataset is missing: {compiled_evaluation_path}"
+            )
+        else:
+            try:
+                compiled_size = compiled_evaluation_path.stat().st_size
+            except OSError:
+                compiled_size = 0
+            if compiled_size < 1:
+                evaluation_blockers.append(
+                    f"compiled evaluation task dataset is empty: {compiled_evaluation_path}"
+                )
         if evaluation_source is not None:
             if evaluation_source.get("partition") != "evaluation":
                 evaluation_blockers.append(
@@ -434,6 +566,97 @@ def build_plan(
                 f"{holdout_unit} holdout is violated by source(s): " + ", ".join(leaked)
             )
 
+    repetitions_for_plan = (
+        evaluation_repetitions
+        if isinstance(evaluation_repetitions, int)
+        and not isinstance(evaluation_repetitions, bool)
+        and evaluation_repetitions > 0
+        else 0
+    )
+    for suite_id, suite_value in evaluation_suites.items():
+        suite = _mapping(suite_value)
+        members_value = suite.get("arms")
+        members = (
+            list(members_value)
+            if isinstance(members_value, Sequence)
+            and not isinstance(members_value, (str, bytes, bytearray))
+            else []
+        )
+        runner = _mapping(suite.get("runner"))
+        runner_type = _string(runner.get("type"))
+        if evaluation_requested:
+            unknown_members = sorted(
+                _string(member) for member in members if _string(member) not in evaluation_arms
+            )
+            if unknown_members:
+                evaluation_blockers.append(
+                    f"suite {suite_id!r} references unknown arms: "
+                    + ", ".join(unknown_members)
+                )
+            runner_producer = _string(runner.get("producer"))
+            runner_version = _string(runner.get("version"))
+            runner_fingerprint = _string(runner.get("orchestration_sha256"))
+            if not runner_producer:
+                evaluation_blockers.append(
+                    f"suite {suite_id!r} runner requires producer"
+                )
+            if not runner_version or runner_version.upper().startswith("REPLACE_"):
+                evaluation_blockers.append(
+                    f"suite {suite_id!r} runner requires a concrete version"
+                )
+            fingerprint_match = re.fullmatch(
+                r"sha256:([0-9a-fA-F]{64})", runner_fingerprint
+            )
+            if fingerprint_match is None or not set(fingerprint_match.group(1)) - {"0"}:
+                evaluation_blockers.append(
+                    f"suite {suite_id!r} runner requires a non-placeholder immutable orchestration_sha256"
+                )
+            if runner_type == "command":
+                argv = runner.get("argv")
+                if not isinstance(argv, list) or not argv:
+                    evaluation_blockers.append(
+                        f"suite {suite_id!r} command runner has no argv"
+                    )
+                else:
+                    if any("REPLACE_WITH" in _string(part).upper() for part in argv):
+                        evaluation_blockers.append(
+                            f"suite {suite_id!r} command runner argv is still a placeholder"
+                        )
+                    if not any("{request}" in _string(part) for part in argv):
+                        evaluation_blockers.append(
+                            f"suite {suite_id!r} command runner argv requires {{request}}"
+                        )
+                    if not any("{result}" in _string(part) for part in argv):
+                        evaluation_blockers.append(
+                            f"suite {suite_id!r} command runner argv requires {{result}}"
+                        )
+            elif runner_type == "external":
+                if not _string(runner.get("result_schema")):
+                    evaluation_blockers.append(
+                        f"suite {suite_id!r} external runner requires result_schema"
+                    )
+            else:
+                evaluation_blockers.append(
+                    f"suite {suite_id!r} runner must be command or external"
+                )
+        pair_count = evaluation_ready_tasks * repetitions_for_plan
+        suite_plans[str(suite_id)] = {
+            "kind": _string(suite.get("kind")) or None,
+            "arms": members,
+            "runner": dict(runner),
+            "runner_status": (
+                "declared"
+                if runner_type == "command"
+                else "awaiting_external_results"
+                if runner_type == "external"
+                else "invalid"
+            ),
+            "pair_count": pair_count,
+            "arm_run_count": pair_count * len(members),
+        }
+
+    evaluation_blockers = _deduplicate(evaluation_blockers)
+    evaluation_warnings = _deduplicate(evaluation_warnings)
     plan_errors.extend(f"evaluation: {message}" for message in evaluation_blockers)
     plan_warnings.extend(f"evaluation: {message}" for message in evaluation_warnings)
     evaluation_plan = {
@@ -443,6 +666,13 @@ def build_plan(
         "source_id": str(evaluation_source.get("id")) if evaluation_source else None,
         "ready_task_count": evaluation_ready_tasks,
         "candidates": list(evaluation_candidates) if isinstance(evaluation_candidates, list) else [],
+        "repetitions": repetitions_for_plan,
+        "seeds": list(evaluation_seeds) if isinstance(evaluation_seeds, list) else [],
+        "compiled_dataset": str(compiled_evaluation_path) if compiled_evaluation_path else None,
+        "arms": arm_plans,
+        "suites": suite_plans,
+        "fairness": dict(_mapping(evaluation_config.get("fairness"))),
+        "decisions": dict(_mapping(evaluation_config.get("decisions"))),
         "holdout_unit": holdout_unit or None,
         "blockers": evaluation_blockers,
         "warnings": evaluation_warnings,

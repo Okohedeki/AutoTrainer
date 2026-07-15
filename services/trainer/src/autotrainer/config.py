@@ -20,6 +20,21 @@ class ConfigError(ValueError):
 
 ALLOWED_SOURCE_KINDS = {"repository", "sft_jsonl", "task_pack"}
 ALLOWED_PARTITIONS = {"train", "evaluation"}
+EVALUATION_ROLES = {"reference", "control", "candidate"}
+EVALUATION_SUITES = {"model_benchmark", "fable_ab"}
+IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}")
+FAIRNESS_TRUE_FIELDS = (
+    "same_task_snapshot",
+    "same_instruction",
+    "same_tools_and_limits",
+    "same_verifier",
+    "same_runner_within_suite",
+    "same_sampling",
+    "require_seed_control",
+    "immutable_models_and_adapter",
+    "randomize_arm_order",
+    "failures_score_zero",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +86,270 @@ def _positive_int(section: Mapping[str, Any], key: str, errors: list[str]) -> No
     value = section.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         errors.append(f"{key} must be a positive integer")
+
+
+def _evaluation_model_ref(value: Any, label: str, errors: list[str]) -> str:
+    if value == "project":
+        return "project"
+    model = _mapping(value, f"{label}.model", errors)
+    if model.get("provider") != "huggingface":
+        errors.append(f"{label}.model.provider must be huggingface")
+    if not str(model.get("id", "")).strip():
+        errors.append(f"{label}.model.id is required")
+    revision = str(model.get("revision", "")).strip()
+    if not IMMUTABLE_REVISION.fullmatch(revision):
+        errors.append(f"{label}.model.revision must be an immutable 40-64 character commit SHA")
+    if model.get("loader") not in {"auto_text_causal_lm", "qwen3_5_text"}:
+        errors.append(f"{label}.model.loader must be auto_text_causal_lm or qwen3_5_text")
+    if model.get("trust_remote_code", False) is not False:
+        errors.append(f"{label}.model.trust_remote_code must be false")
+    if model.get("dtype") != "bfloat16":
+        errors.append(f"{label}.model.dtype must be bfloat16")
+    max_sequence_length = model.get("max_sequence_length")
+    if (
+        not isinstance(max_sequence_length, int)
+        or isinstance(max_sequence_length, bool)
+        or max_sequence_length < 256
+    ):
+        errors.append(f"{label}.model.max_sequence_length must be at least 256")
+    if model.get("quantization") != "project":
+        errors.append(f"{label}.model.quantization must be project")
+    return "huggingface"
+
+
+def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> None:
+    if not str(evaluation.get("task_pack", "")).strip():
+        errors.append("evaluation.task_pack is required")
+    if evaluation.get("task_split") != "evaluation":
+        errors.append("evaluation.task_split must be evaluation")
+    if evaluation.get("holdout_unit") != "repository":
+        errors.append("evaluation.holdout_unit must be repository")
+    if evaluation.get("primary_metric") != "verified_task_success":
+        errors.append("evaluation.primary_metric must be verified_task_success")
+
+    repetitions = evaluation.get("repetitions")
+    if not isinstance(repetitions, int) or isinstance(repetitions, bool) or repetitions < 1:
+        errors.append("evaluation.repetitions must be a positive integer")
+        repetitions = 0
+    seeds = evaluation.get("seeds")
+    if not isinstance(seeds, list) or not seeds or any(
+        not isinstance(seed, int) or isinstance(seed, bool) or seed < 0 for seed in seeds
+    ):
+        errors.append("evaluation.seeds must be a non-empty list of non-negative integers")
+        seeds = []
+    elif len(set(seeds)) != len(seeds):
+        errors.append("evaluation.seeds must be unique")
+    if repetitions and isinstance(seeds, list) and len(seeds) != repetitions:
+        errors.append("evaluation.seeds length must equal evaluation.repetitions")
+
+    arms_value = evaluation.get("arms")
+    if not isinstance(arms_value, Mapping):
+        errors.append("evaluation.arms must be a mapping")
+        arms: dict[str, Any] = {}
+    else:
+        arms = dict(arms_value)
+    if len(arms) != 3:
+        errors.append("evaluation.arms must declare exactly reference, control, and candidate arms")
+
+    candidates = evaluation.get("candidates")
+    if not isinstance(candidates, list) or not candidates or any(
+        not isinstance(candidate, str) or not candidate.strip() for candidate in candidates
+    ):
+        errors.append("evaluation.candidates must be a non-empty list of arm ids")
+        candidate_ids: list[str] = []
+    else:
+        candidate_ids = list(candidates)
+        if len(set(candidate_ids)) != len(candidate_ids):
+            errors.append("evaluation.candidates must be unique")
+        if set(candidate_ids) != set(arms):
+            errors.append("evaluation.candidates must contain exactly the declared arm ids")
+
+    arm_roles: dict[str, str] = {}
+    for arm_id, arm_value in arms.items():
+        label = f"evaluation.arms.{arm_id}"
+        if not isinstance(arm_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", arm_id):
+            errors.append(f"{label} id must be a lowercase slug")
+        arm = _mapping(arm_value, label, errors)
+        if not str(arm.get("label", "")).strip():
+            errors.append(f"{label}.label is required")
+        if arm.get("parameter_class") != "9b":
+            errors.append(f"{label}.parameter_class must be 9b in V1")
+        role = arm.get("role")
+        if role not in EVALUATION_ROLES:
+            errors.append(f"{label}.role must be reference, control, or candidate")
+            role = ""
+        arm_roles[str(arm_id)] = str(role)
+        model_kind = _evaluation_model_ref(arm.get("model"), label, errors)
+        adapter = arm.get("adapter")
+        if role == "reference":
+            if model_kind != "huggingface":
+                errors.append(f"{label} reference arm must use an immutable Hugging Face model")
+            if adapter is not None:
+                errors.append(f"{label} reference arm must not declare an adapter")
+        elif role == "control":
+            if model_kind != "project":
+                errors.append(f"{label} control arm must use model: project")
+            if adapter is not None:
+                errors.append(f"{label} control arm must not declare an adapter")
+        elif role == "candidate":
+            if model_kind != "project":
+                errors.append(f"{label} candidate arm must use model: project")
+            adapter_mapping = _mapping(adapter, f"{label}.adapter", errors)
+            if not str(adapter_mapping.get("path", "")).strip():
+                errors.append(f"{label}.adapter.path is required")
+            if adapter_mapping.get("stage") not in {"sft", "grpo"}:
+                errors.append(f"{label}.adapter.stage must be sft or grpo")
+            digest = adapter_mapping.get("sha256")
+            if digest is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", str(digest)):
+                errors.append(f"{label}.adapter.sha256 must be a 64 character digest")
+    role_counts = {role: list(arm_roles.values()).count(role) for role in EVALUATION_ROLES}
+    if any(role_counts[role] != 1 for role in EVALUATION_ROLES):
+        errors.append("evaluation.arms must contain exactly one reference, one control, and one candidate role")
+
+    suites_value = evaluation.get("suites")
+    if not isinstance(suites_value, Mapping):
+        errors.append("evaluation.suites must be a mapping")
+        suites: dict[str, Any] = {}
+    else:
+        suites = dict(suites_value)
+    if set(suites) != EVALUATION_SUITES:
+        errors.append("evaluation.suites must contain exactly model_benchmark and fable_ab")
+
+    suite_arms: dict[str, list[str]] = {}
+    for suite_id in sorted(EVALUATION_SUITES):
+        suite = _mapping(suites.get(suite_id), f"evaluation.suites.{suite_id}", errors)
+        if suite.get("kind") != suite_id:
+            errors.append(f"evaluation.suites.{suite_id}.kind must be {suite_id}")
+        members = suite.get("arms")
+        if not isinstance(members, list) or not members or any(
+            not isinstance(member, str) or not member for member in members
+        ):
+            errors.append(f"evaluation.suites.{suite_id}.arms must be a non-empty list")
+            members = []
+        elif len(set(members)) != len(members):
+            errors.append(f"evaluation.suites.{suite_id}.arms must be unique")
+        unknown_members = sorted(set(members) - set(arms))
+        if unknown_members:
+            errors.append(
+                f"evaluation.suites.{suite_id} references unknown arms: {', '.join(unknown_members)}"
+            )
+        suite_arms[suite_id] = list(members)
+        runner = _mapping(suite.get("runner"), f"evaluation.suites.{suite_id}.runner", errors)
+        runner_type = runner.get("type")
+        if runner_type not in {"command", "external"}:
+            errors.append(f"evaluation.suites.{suite_id}.runner.type must be command or external")
+        runner_label = f"evaluation.suites.{suite_id}.runner"
+        if not str(runner.get("producer", "")).strip():
+            errors.append(f"{runner_label}.producer is required")
+        if not str(runner.get("version", "")).strip():
+            errors.append(f"{runner_label}.version is required")
+        orchestration_sha256 = str(runner.get("orchestration_sha256", "")).strip()
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", orchestration_sha256):
+            errors.append(f"{runner_label}.orchestration_sha256 must be sha256:<64 hex characters>")
+        if runner_type == "command":
+            argv = runner.get("argv")
+            if not isinstance(argv, list) or not argv or any(
+                not isinstance(part, str) or not part.strip() for part in argv
+            ):
+                errors.append(
+                    f"{runner_label}.argv must be a non-empty argument list"
+                )
+            else:
+                if not any("{request}" in part for part in argv):
+                    errors.append(f"{runner_label}.argv must include a {{request}} placeholder")
+                if not any("{result}" in part for part in argv):
+                    errors.append(f"{runner_label}.argv must include a {{result}} placeholder")
+        elif runner_type == "external":
+            if not str(runner.get("result_schema", "")).strip():
+                errors.append(f"{runner_label}.result_schema is required")
+
+    model_roles = {arm_roles.get(member) for member in suite_arms.get("model_benchmark", [])}
+    if len(suite_arms.get("model_benchmark", [])) != 2 or model_roles != {"reference", "candidate"}:
+        errors.append("model_benchmark must contain exactly the reference and candidate arms")
+    model_suite = _mapping(
+        suites.get("model_benchmark"), "evaluation.suites.model_benchmark", errors
+    )
+    model_runner = _mapping(
+        model_suite.get("runner"), "evaluation.suites.model_benchmark.runner", errors
+    )
+    if model_runner.get("type") != "command":
+        errors.append("model_benchmark runner must use type: command")
+
+    fable_members = suite_arms.get("fable_ab", [])
+    fable_roles = {arm_roles.get(member) for member in fable_members}
+    if len(fable_members) != 2 or fable_roles != {"control", "candidate"}:
+        errors.append("fable_ab must contain exactly the control and candidate arms")
+    fable_suite = _mapping(suites.get("fable_ab"), "evaluation.suites.fable_ab", errors)
+    fable_runner = _mapping(
+        fable_suite.get("runner"), "evaluation.suites.fable_ab.runner", errors
+    )
+    if fable_runner.get("type") != "external":
+        errors.append("fable_ab runner must use type: external")
+    review = _mapping(fable_suite.get("review"), "evaluation.suites.fable_ab.review", errors)
+    if review.get("type") != "manual":
+        errors.append("evaluation.suites.fable_ab.review.type must be manual")
+    if review.get("blind") is not True:
+        errors.append("evaluation.suites.fable_ab.review.blind must be true")
+    _positive_int(review, "reviewers_per_pair", errors)
+
+    fairness = _mapping(evaluation.get("fairness"), "evaluation.fairness", errors)
+    if fairness.get("paired_by") != ["task_id", "repetition", "seed"]:
+        errors.append("evaluation.fairness.paired_by must be [task_id, repetition, seed]")
+    for key in FAIRNESS_TRUE_FIELDS:
+        if fairness.get(key) is not True:
+            errors.append(f"evaluation.fairness.{key} must be true")
+    if fairness.get("allow_unplanned_reruns") is not False:
+        errors.append("evaluation.fairness.allow_unplanned_reruns must be false")
+
+    decisions = _mapping(evaluation.get("decisions"), "evaluation.decisions", errors)
+    confidence = decisions.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0.5 < confidence < 1:
+        errors.append("evaluation.decisions.confidence must be between 0.5 and 1")
+    model_decision = _mapping(
+        decisions.get("model_benchmark"), "evaluation.decisions.model_benchmark", errors
+    )
+    if model_decision.get("candidate") not in suite_arms.get("model_benchmark", []):
+        errors.append("evaluation.decisions.model_benchmark.candidate must reference a suite arm")
+    elif arm_roles.get(str(model_decision.get("candidate"))) != "candidate":
+        errors.append("evaluation.decisions.model_benchmark.candidate must use the candidate role")
+    if model_decision.get("control") not in suite_arms.get("model_benchmark", []):
+        errors.append("evaluation.decisions.model_benchmark.control must reference a suite arm")
+    elif arm_roles.get(str(model_decision.get("control"))) != "reference":
+        errors.append("evaluation.decisions.model_benchmark.control must use the reference role")
+    if model_decision.get("metric") != "verified_task_success":
+        errors.append("evaluation.decisions.model_benchmark.metric must be verified_task_success")
+    minimum_delta = model_decision.get("minimum_delta")
+    if not isinstance(minimum_delta, (int, float)) or isinstance(minimum_delta, bool) or not -1 <= minimum_delta <= 1:
+        errors.append("evaluation.decisions.model_benchmark.minimum_delta must be between -1 and 1")
+    model_minimum_tasks = model_decision.get("minimum_tasks")
+    if (
+        not isinstance(model_minimum_tasks, int)
+        or isinstance(model_minimum_tasks, bool)
+        or model_minimum_tasks < 2
+    ):
+        errors.append("evaluation.decisions.model_benchmark.minimum_tasks must be at least 2")
+
+    fable_decision = _mapping(decisions.get("fable_ab"), "evaluation.decisions.fable_ab", errors)
+    if fable_decision.get("candidate") not in fable_members:
+        errors.append("evaluation.decisions.fable_ab.candidate must reference a suite arm")
+    elif arm_roles.get(str(fable_decision.get("candidate"))) != "candidate":
+        errors.append("evaluation.decisions.fable_ab.candidate must use the candidate role")
+    if fable_decision.get("control") not in fable_members:
+        errors.append("evaluation.decisions.fable_ab.control must reference a suite arm")
+    elif arm_roles.get(str(fable_decision.get("control"))) != "control":
+        errors.append("evaluation.decisions.fable_ab.control must use the control role")
+    if fable_decision.get("metric") != "blind_preference_rate":
+        errors.append("evaluation.decisions.fable_ab.metric must be blind_preference_rate")
+    minimum_rate = fable_decision.get("minimum_rate")
+    if not isinstance(minimum_rate, (int, float)) or isinstance(minimum_rate, bool) or not 0 <= minimum_rate <= 1:
+        errors.append("evaluation.decisions.fable_ab.minimum_rate must be between 0 and 1")
+    fable_minimum_tasks = fable_decision.get("minimum_tasks")
+    if (
+        not isinstance(fable_minimum_tasks, int)
+        or isinstance(fable_minimum_tasks, bool)
+        or fable_minimum_tasks < 2
+    ):
+        errors.append("evaluation.decisions.fable_ab.minimum_tasks must be at least 2")
 
 
 def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> ValidationReport:
@@ -216,9 +495,7 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         errors.append("environment.factory must be a dotted environment factory path")
 
     evaluation = _mapping(data.get("evaluation"), "evaluation", errors)
-    candidates = evaluation.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        errors.append("evaluation.candidates must be a non-empty list")
+    _validate_evaluation(evaluation, errors)
     if not any(
         isinstance(source, Mapping)
         and source.get("partition") == "evaluation"
@@ -349,8 +626,114 @@ def default_config(
             "episode_timeout_seconds": 900,
         },
         "evaluation": {
-            "candidates": ["base", "sft:best", "rl:best"],
+            "task_pack": "held-out-frontend",
+            "task_split": "evaluation",
+            "repetitions": 3,
+            "seeds": [1701, 1702, 1703],
+            "holdout_unit": "repository",
             "primary_metric": "verified_task_success",
+            # ``candidates`` is retained as the ordered, display-facing arm list.
+            # Runtime identity and comparison roles live in ``arms`` and ``suites``.
+            "candidates": ["reference_9b", "base_fable", "autotrainer"],
+            "arms": {
+                "reference_9b": {
+                    "label": "Declared 9B reference",
+                    "role": "reference",
+                    "parameter_class": "9b",
+                    "model": {
+                        "provider": "huggingface",
+                        "id": "REPLACE_WITH_REFERENCE_9B",
+                        "revision": "0" * 40,
+                        "loader": "auto_text_causal_lm",
+                        "trust_remote_code": False,
+                        "dtype": "bfloat16",
+                        "max_sequence_length": 2048,
+                        "quantization": "project",
+                    },
+                },
+                "base_fable": {
+                    "label": "Base 9B + Fable",
+                    "role": "control",
+                    "parameter_class": "9b",
+                    "model": "project",
+                },
+                "autotrainer": {
+                    "label": "AutoTrainer 9B",
+                    "role": "candidate",
+                    "parameter_class": "9b",
+                    "model": "project",
+                    "adapter": {
+                        "path": ".autotrainer/checkpoints/grpo",
+                        "stage": "grpo",
+                    },
+                },
+            },
+            "suites": {
+                "model_benchmark": {
+                    "kind": "model_benchmark",
+                    "arms": ["reference_9b", "autotrainer"],
+                    "runner": {
+                        "type": "command",
+                        "producer": "local-model-agent",
+                        "version": "REPLACE_WITH_RUNNER_VERSION",
+                        "orchestration_sha256": "sha256:" + "0" * 64,
+                        "argv": [
+                            "REPLACE_WITH_MODEL_AGENT",
+                            "--request",
+                            "{request}",
+                            "--result",
+                            "{result}",
+                        ],
+                    },
+                },
+                "fable_ab": {
+                    "kind": "fable_ab",
+                    "arms": ["base_fable", "autotrainer"],
+                    "runner": {
+                        "type": "external",
+                        "producer": "fable",
+                        "version": "REPLACE_WITH_FABLE_VERSION",
+                        "orchestration_sha256": "sha256:" + "0" * 64,
+                        "result_schema": "autotrainer-evaluation-result-v1",
+                    },
+                    "review": {
+                        "type": "manual",
+                        "blind": True,
+                        "reviewers_per_pair": 3,
+                    },
+                },
+            },
+            "fairness": {
+                "paired_by": ["task_id", "repetition", "seed"],
+                "same_task_snapshot": True,
+                "same_instruction": True,
+                "same_tools_and_limits": True,
+                "same_verifier": True,
+                "same_runner_within_suite": True,
+                "same_sampling": True,
+                "require_seed_control": True,
+                "immutable_models_and_adapter": True,
+                "randomize_arm_order": True,
+                "failures_score_zero": True,
+                "allow_unplanned_reruns": False,
+            },
+            "decisions": {
+                "confidence": 0.95,
+                "model_benchmark": {
+                    "candidate": "autotrainer",
+                    "control": "reference_9b",
+                    "metric": "verified_task_success",
+                    "minimum_delta": 0.0,
+                    "minimum_tasks": 2,
+                },
+                "fable_ab": {
+                    "candidate": "autotrainer",
+                    "control": "base_fable",
+                    "metric": "blind_preference_rate",
+                    "minimum_rate": 0.5,
+                    "minimum_tasks": 2,
+                },
+            },
         },
         "package": {"type": "lora_adapter", "merge_base_weights": False},
     }
