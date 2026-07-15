@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -756,6 +758,236 @@ def _safe_artifact_name(source_id: str) -> str:
     return name or hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
 
 
+def _clone_repository(uri: str, destination: Path) -> tuple[bool, str]:
+    environment = os.environ.copy()
+    environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                "--no-hardlinks",
+                "--no-recurse-submodules",
+                uri,
+                str(destination),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            env=environment,
+        )
+    except FileNotFoundError:
+        return False, "git executable was not found"
+    except subprocess.TimeoutExpired:
+        return False, "git clone timed out"
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip().replace("\r", " ").replace("\n", " ")
+        return False, detail[-1000:] or f"git clone exited with status {completed.returncode}"
+    return True, ""
+
+
+def _remove_materialization(path: Path) -> None:
+    """Remove only a destination created for the current failed operation."""
+
+    def retry_read_only(function: Any, value: str, _error: Any) -> None:
+        if os.path.islink(value):
+            os.unlink(value)
+            return
+        mode = stat.S_IRUSR | stat.S_IWUSR
+        if os.path.isdir(value):
+            mode |= stat.S_IXUSR
+        os.chmod(value, mode)
+        function(value)
+
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path, onerror=retry_read_only)
+
+
+def _materialization_destination(
+    config: Mapping[str, Any], project_root: Path, source_id: str, destination: Path | None
+) -> tuple[Path, Path]:
+    source_root = (_artifact_dir(config, project_root) / "sources").resolve()
+    if destination is None:
+        candidate = source_root / _safe_artifact_name(source_id)
+    else:
+        supplied = Path(destination).expanduser()
+        candidate = supplied if supplied.is_absolute() else source_root / supplied
+    # Keep a lexical absolute path long enough to detect destination symlinks.
+    # Resolving first would silently turn ``sources/name -> another-place`` into
+    # the target path and defeat the explicit no-symlink/no-overwrite checks.
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        candidate.relative_to(source_root)
+    except ValueError as error:
+        raise ValueError(
+            f"materialization destination must stay inside {source_root}: {candidate}"
+        ) from error
+    if candidate == source_root:
+        raise ValueError("materialization destination must be below the artifact sources directory")
+
+    relative = candidate.relative_to(source_root)
+    current = source_root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"materialization destination must not traverse a symlink: {current}")
+
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(source_root)
+    except ValueError as error:
+        raise ValueError(
+            f"materialization destination must stay inside {source_root}: {resolved}"
+        ) from error
+    if resolved != candidate:
+        raise ValueError(f"materialization destination must not traverse a symlink: {candidate}")
+    return source_root, resolved
+
+
+def materialize_repository(
+    config: Mapping[str, Any],
+    project_root: Path,
+    source_id: str,
+    destination: Path | None = None,
+) -> dict[str, Any]:
+    """Clone and pin one declared repository source into the project artifacts.
+
+    Relative ``destination`` values are resolved below
+    ``project.artifact_dir/sources``.  The clone is performed with Git argv and
+    no shell, submodules are not initialized, repository symlinks are rejected,
+    and the checkout is detached at the resolved commit.  The returned
+    ``updated_source`` remains compatible with the source declaration schema so
+    a caller can persist it explicitly.
+    """
+
+    if not isinstance(config, Mapping):
+        raise ValueError("config must be a mapping")
+    root = Path(project_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"project root does not exist or is not a directory: {root}")
+    requested_id = str(source_id).strip()
+    if not requested_id:
+        raise ValueError("source_id must be a non-empty string")
+
+    matching = [
+        source
+        for source in _source_specs(config)
+        if "_invalid" not in source and str(source.get("id", "")).strip() == requested_id
+    ]
+    if not matching:
+        raise ValueError(f"repository source is not declared: {requested_id}")
+    if len(matching) > 1:
+        raise ValueError(f"source id is declared more than once: {requested_id}")
+    source = matching[0]
+    if source.get("kind") != "repository":
+        raise ValueError(f"source {requested_id!r} is not a repository")
+    uri = str(source.get("uri", "")).strip()
+    if not uri:
+        raise ValueError(f"repository source {requested_id!r} has no uri")
+    revision = str(source.get("revision", "")).strip()
+    if not revision:
+        raise ValueError(
+            f"repository source {requested_id!r} must declare a revision before materialization"
+        )
+
+    clone_uri = uri
+    if not _is_remote(uri) and not uri.lower().startswith("file://"):
+        supplied_source = Path(uri).expanduser()
+        if not supplied_source.is_absolute():
+            supplied_source = root / supplied_source
+        supplied_source = Path(os.path.abspath(supplied_source))
+        if supplied_source.is_symlink():
+            raise ValueError(f"repository source uri must not be a symlink: {supplied_source}")
+        local_source = supplied_source.resolve()
+        if not local_source.is_dir():
+            raise ValueError(f"repository source does not exist or is not a directory: {local_source}")
+        clone_uri = str(local_source)
+
+    source_root, local_path = _materialization_destination(
+        config, root, requested_id, destination
+    )
+    if local_path.is_symlink():
+        raise ValueError(f"refusing to overwrite symlink destination: {local_path}")
+    if local_path.exists():
+        raise ValueError(f"refusing to overwrite materialized repository: {local_path}")
+
+    source_root.mkdir(parents=True, exist_ok=True)
+    clone_started = False
+    try:
+        clone_started = True
+        ok, detail = _clone_repository(clone_uri, local_path)
+        if not ok:
+            raise RuntimeError(f"cannot clone repository source {requested_id!r}: {detail}")
+
+        ok, commit = _git(local_path, "rev-parse", "--verify", f"{revision}^{{commit}}")
+        if not ok:
+            raise RuntimeError(
+                f"cannot resolve declared revision {revision!r} for source {requested_id!r}: {commit}"
+            )
+        if not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+            raise RuntimeError(f"git returned a non-immutable commit identifier: {commit!r}")
+
+        ok, tree = _git(local_path, "ls-tree", "-r", "-z", commit)
+        if not ok:
+            raise RuntimeError(f"cannot inspect repository tree at {commit}: {tree}")
+        symlinks = []
+        for entry in tree.split("\x00"):
+            if not entry:
+                continue
+            metadata, separator, path_value = entry.partition("\t")
+            if separator and metadata.startswith("120000 "):
+                symlinks.append(path_value)
+        if symlinks:
+            preview = ", ".join(sorted(symlinks)[:5])
+            raise ValueError(
+                "repository tree contains symlinks, which are not supported by V1 "
+                f"materialization: {preview}"
+            )
+
+        ok, checkout_detail = _git(
+            local_path,
+            "-c",
+            "core.autocrlf=false",
+            "checkout",
+            "--quiet",
+            "--detach",
+            "--force",
+            commit,
+        )
+        if not ok:
+            raise RuntimeError(f"cannot check out resolved commit {commit}: {checkout_detail}")
+        ok, head = _git(local_path, "rev-parse", "HEAD")
+        if not ok or head != commit:
+            raise RuntimeError(
+                f"detached checkout verification failed: expected {commit}, got {head or 'unresolved'}"
+            )
+        ok, _branch = _git(local_path, "symbolic-ref", "--quiet", "--short", "HEAD")
+        if ok:
+            raise RuntimeError("materialized repository checkout is not detached")
+
+        updated_source = dict(source)
+        updated_source["uri"] = _display_path(local_path, root)
+        updated_source["revision"] = commit.lower()
+        return {
+            "source_id": requested_id,
+            "local_path": str(local_path),
+            "commit": commit.lower(),
+            "requested_revision": revision,
+            "updated_source": updated_source,
+        }
+    except Exception:
+        if clone_started and (local_path.exists() or local_path.is_symlink()):
+            _remove_materialization(local_path)
+        raise
+
+
 def _write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -910,4 +1142,4 @@ def scan_sources(
     return scan
 
 
-__all__ = ["scan_sources"]
+__all__ = ["materialize_repository", "scan_sources"]

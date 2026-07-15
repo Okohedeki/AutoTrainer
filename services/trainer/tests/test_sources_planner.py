@@ -11,7 +11,7 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.planner import build_plan  # noqa: E402
-from autotrainer.sources import scan_sources  # noqa: E402
+from autotrainer.sources import materialize_repository, scan_sources  # noqa: E402
 
 
 def run_git(repository: Path, *arguments: str) -> str:
@@ -39,6 +39,37 @@ def create_repository(root: Path, name: str = "frontend") -> tuple[Path, str]:
     run_git(repository, "add", ".")
     run_git(repository, "commit", "-m", "fixture")
     return repository, run_git(repository, "rev-parse", "HEAD")
+
+
+def create_bare_remote(
+    root: Path, name: str = "remote", *, include_tree_symlink: bool = False
+) -> tuple[Path, str]:
+    worktree, commit = create_repository(root, f"{name}-worktree")
+    if include_tree_symlink:
+        link_target = root / f"{name}-link-target.txt"
+        link_target.write_text("../outside\n", encoding="utf-8")
+        blob = run_git(worktree, "hash-object", "-w", str(link_target))
+        run_git(
+            worktree,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "120000",
+            blob,
+            "escape-link",
+        )
+        run_git(worktree, "commit", "-m", "add symlink fixture")
+        commit = run_git(worktree, "rev-parse", "HEAD")
+
+    remote = root / f"{name}.git"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--bare", str(worktree), str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return remote, commit
 
 
 def repository_source(repository: Path, commit: str, source_id: str = "frontend") -> dict:
@@ -229,6 +260,110 @@ class SourceScanTests(unittest.TestCase):
             records = [json.loads(line) for line in documents.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(records), 2)
             self.assertIn("text", records[0])
+
+
+class RepositoryMaterializationTests(unittest.TestCase):
+    @staticmethod
+    def config(remote: Path, revision: str) -> dict:
+        return {
+            "project": {"artifact_dir": "artifacts"},
+            "sources": [
+                {
+                    "id": "remote",
+                    "kind": "repository",
+                    "uri": str(remote),
+                    "revision": revision,
+                    "partition": "train",
+                    "roles": ["style", "rl_seed"],
+                }
+            ],
+        }
+
+    def test_clones_declared_repository_to_deterministic_detached_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, commit = create_bare_remote(root)
+            config = self.config(remote, commit)
+            original_uri = config["sources"][0]["uri"]
+
+            result = materialize_repository(config, root, "remote")
+
+            local = (root / "artifacts" / "sources" / "remote").resolve()
+            self.assertEqual(Path(result["local_path"]), local)
+            self.assertEqual(result["commit"], commit)
+            self.assertEqual(run_git(local, "rev-parse", "HEAD"), commit)
+            self.assertEqual(run_git(local, "branch", "--show-current"), "")
+            self.assertEqual(result["updated_source"]["uri"], "artifacts/sources/remote")
+            self.assertEqual(result["updated_source"]["revision"], commit)
+            self.assertEqual(config["sources"][0]["uri"], original_uri)
+
+            with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+                materialize_repository(config, root, "remote")
+
+    def test_rejects_undeclared_non_repository_and_unpinned_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, _commit = create_bare_remote(root)
+
+            with self.assertRaisesRegex(ValueError, "is not declared"):
+                materialize_repository({"sources": []}, root, "remote")
+
+            non_repository = {
+                "sources": [
+                    {
+                        "id": "remote",
+                        "kind": "sft_jsonl",
+                        "uri": str(root / "examples.jsonl"),
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(ValueError, "is not a repository"):
+                materialize_repository(non_repository, root, "remote")
+
+            unpinned = self.config(remote, "")
+            with self.assertRaisesRegex(ValueError, "must declare a revision"):
+                materialize_repository(unpinned, root, "remote")
+
+    def test_rejects_path_escape_and_preserves_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, commit = create_bare_remote(root)
+            config = self.config(remote, commit)
+
+            with self.assertRaisesRegex(ValueError, "must stay inside"):
+                materialize_repository(config, root, "remote", Path("..") / "escape")
+
+            occupied = root / "artifacts" / "sources" / "occupied"
+            occupied.mkdir(parents=True)
+            sentinel = occupied / "keep.txt"
+            sentinel.write_text("do not replace\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+                materialize_repository(config, root, "remote", Path("occupied"))
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not replace\n")
+
+    def test_failed_revision_resolution_removes_partial_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, _commit = create_bare_remote(root)
+            config = self.config(remote, "refs/heads/does-not-exist")
+            local = root / "artifacts" / "sources" / "remote"
+
+            with self.assertRaisesRegex(RuntimeError, "cannot resolve declared revision"):
+                materialize_repository(config, root, "remote")
+
+            self.assertFalse(local.exists())
+
+    def test_rejects_repository_tree_symlinks_before_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, commit = create_bare_remote(root, include_tree_symlink=True)
+            config = self.config(remote, commit)
+            local = root / "artifacts" / "sources" / "remote"
+
+            with self.assertRaisesRegex(ValueError, "repository tree contains symlinks"):
+                materialize_repository(config, root, "remote")
+
+            self.assertFalse(local.exists())
 
 
 class PlannerTests(unittest.TestCase):
