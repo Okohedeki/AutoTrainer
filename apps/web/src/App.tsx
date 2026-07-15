@@ -14,7 +14,7 @@ const benchmarkRows = [
 
 export default function App() {
   const [selectedModelId, setSelectedModelId] = useState(modelCatalog[0].id);
-  const [environmentReady, setEnvironmentReady] = useState(false);
+  const [showCommands, setShowCommands] = useState(false);
 
   const selectedModel = useMemo(
     () => modelCatalog.find((model) => model.id === selectedModelId) ?? modelCatalog[0],
@@ -61,8 +61,8 @@ export default function App() {
               <p className="section-label">Experiment 001</p>
               <h2>Frontend design expert</h2>
             </div>
-            <span className={environmentReady ? "pill pill-ready" : "pill"}>
-              {environmentReady ? "Draft ready" : "Not started"}
+            <span className={showCommands ? "pill pill-ready" : "pill"}>
+              {showCommands ? "CLI shown" : "Read-only preview"}
             </span>
           </div>
 
@@ -74,8 +74,8 @@ export default function App() {
                 onChange={(event) => setSelectedModelId(event.target.value)}
               >
                 {modelCatalog.map((model) => (
-                  <option key={model.id} value={model.id} disabled={model.status === "planned"}>
-                    {model.name}{model.status === "planned" ? " · planned" : ""}
+                  <option key={model.id} value={model.id}>
+                    {model.name}{model.status === "custom" ? " · configure in YAML" : ""}
                   </option>
                 ))}
               </select>
@@ -113,13 +113,15 @@ export default function App() {
           <button
             className="primary-action"
             type="button"
-            onClick={() => setEnvironmentReady(true)}
+            onClick={() => setShowCommands((current) => !current)}
           >
-            {environmentReady ? "Environment draft created" : "Create first environment"}
+            {showCommands ? "Hide project commands" : "Show project commands"}
             <span aria-hidden="true">→</span>
           </button>
           <p className="action-note">
-            Creates the task manifest only. It will not download a model or start training.
+            {showCommands
+              ? "autotrainer init → source add → compile → doctor → train sft → train rl"
+              : "The dashboard does not start jobs yet. autotrainer.yaml and the CLI are the source of truth."}
           </p>
         </article>
 
@@ -129,7 +131,7 @@ export default function App() {
               <p className="section-label">RL environment</p>
               <h2>{defaultEnvironment.id}</h2>
             </div>
-            <span className="code-badge">v0.1</span>
+            <span className="code-badge">v1.0</span>
           </div>
 
           <div className="environment-stack">

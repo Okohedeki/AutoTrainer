@@ -5,7 +5,7 @@ export type ModelDefinition = {
   parameters: string;
   architecture: "dense" | "moe";
   trainingMode: "qlora";
-  status: "ready" | "planned";
+  status: "reference" | "custom";
   description: string;
 };
 
@@ -24,14 +24,14 @@ export type RewardSignal = {
 
 export const modelCatalog: ModelDefinition[] = [
   {
-    id: "google/gemma-2-9b-it",
-    name: "Gemma 2 9B IT",
-    shortName: "Gemma 9B",
+    id: "Qwen/Qwen3.5-9B",
+    name: "Qwen3.5 9B · text-only",
+    shortName: "Qwen3.5 9B",
     parameters: "9B",
     architecture: "dense",
     trainingMode: "qlora",
-    status: "ready",
-    description: "The first compatibility target for the single-GPU pipeline.",
+    status: "reference",
+    description: "The reference profile loads only the causal language model for text and code training.",
   },
   {
     id: "custom/9b-checkpoint",
@@ -40,8 +40,8 @@ export const modelCatalog: ModelDefinition[] = [
     parameters: "9B",
     architecture: "dense",
     trainingMode: "qlora",
-    status: "planned",
-    description: "A future adapter for compatible Hugging Face checkpoints.",
+    status: "custom",
+    description: "Future profile: V1 training is guarded to the tested Qwen3.5 9B text loader.",
   },
 ];
 
@@ -110,7 +110,7 @@ export const defaultEnvironment = {
   id: "frontend-vite-v1",
   stack: ["React", "TypeScript", "Vite", "Tailwind", "Playwright"],
   task: "Repair a responsive pricing section without changing desktop behavior.",
-  tools: ["read_file", "search_code", "apply_patch", "run_command", "inspect_browser"],
+  tools: ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
   limits: {
     toolCalls: 40,
     tokenBudget: 12_000,

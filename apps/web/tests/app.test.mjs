@@ -19,7 +19,8 @@ test("build emits a conventional static web application", async () => {
 test("the control plane exposes the required experiment decisions", async () => {
   const source = await readFile(new URL("src/App.tsx", root), "utf8");
   assert.match(source, /Build a better 9B frontend model/);
-  assert.match(source, /Create first environment/);
+  assert.match(source, /Show project commands/);
+  assert.match(source, /autotrainer.yaml and the CLI are the source of truth/);
   assert.match(source, /Model benchmark/);
   assert.match(source, /Fable website A\/B/);
   assert.match(source, /QLoRA/);

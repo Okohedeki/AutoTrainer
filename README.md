@@ -1,57 +1,179 @@
 # AutoTrainer
 
-AutoTrainer is an open-source, local-first foundry for turning a 9B base model into a verified frontend expert on one consumer GPU.
+AutoTrainer is an Apache-2.0, local-first foundry for turning a 9B base model into a verified frontend expert on one consumer GPU.
 
-> The public license will be selected before the first GitHub release. No license is implied by this development snapshot.
-
-The first product path is:
+The source of truth is `autotrainer.yaml`, not the dashboard:
 
 ```text
-Base 9B → QLoRA warm start → reinforcement learning → held-out benchmark → Fable A/B
+declare model + sources
+        ↓
+scan and lock evidence
+        ↓
+compile demonstrations + executable tasks
+        ↓
+4-bit QLoRA SFT
+        ↓
+GRPO continues the same adapter
+        ↓
+Base vs SFT vs RL benchmark
+        ↓
+Fable + Base vs Fable + winner
 ```
 
-## Current state
+## What is usable now
 
-The repository contains the first control-plane interface and the initial RL environment contracts. Model download and training are intentionally not wired yet.
+- A project CLI for model and source declaration, validation, scanning, compilation, locking, planning, and runtime checks.
+- Deterministic repository inventories and direct SFT JSONL compilation.
+- Versioned executable frontend task packs with a Docker/Podman security boundary.
+- A guarded Hugging Face QLoRA SFT runner.
+- A guarded TRL GRPO runner that reloads the SFT adapter as trainable instead of creating a new adapter.
+- A conservative RTX 4090 / 24 GB recipe and dry runs that do not import CUDA libraries.
 
-## Repository layout
+Baseline automation, held-out evaluation, winner selection, expert packaging, and Fable A/B orchestration are the next milestone. The dashboard is currently a read-only product preview over this intended workflow; it does not launch jobs.
 
-- `apps/web` — local React control plane.
-- `services/trainer` — Python environment and training runtime.
-- `schemas` — versioned cross-language task contracts.
-- `examples` — redistributable example environments.
-- `docs` — architecture and reward-system decisions.
+## Quickstart
 
-## Local dashboard
+Use Python 3.11. GPU training should run in Linux or WSL2. Core inspection works without CUDA:
 
-```powershell
-npm install
-npm run dev
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./services/trainer
+
+autotrainer init my-frontend-expert
+cd my-frontend-expert
 ```
 
-Open `http://localhost:3000`.
+Or start from the complete example:
 
-## Validation
+```bash
+python -m pip install -e ./services/trainer
+autotrainer validate --config examples/frontend-expert/autotrainer.yaml
+autotrainer source scan --config examples/frontend-expert/autotrainer.yaml
+autotrainer compile --config examples/frontend-expert/autotrainer.yaml
+autotrainer plan --config examples/frontend-expert/autotrainer.yaml
+```
 
-```powershell
+The plan will intentionally block evaluation until you add a held-out project family.
+
+## Declare the model
+
+Edit the `model` section or use the CLI:
+
+```bash
+autotrainer models list
+autotrainer model use qwen3.5-9b-text \
+  --revision YOUR_IMMUTABLE_HUGGING_FACE_COMMIT \
+  --config autotrainer.yaml
+```
+
+The V1 reference is `Qwen/Qwen3.5-9B`, loaded through the text-only `Qwen3_5ForCausalLM` path. AutoTrainer never loads its processor, image inputs, or vision encoder, and aborts if a different class is instantiated. A custom model can be declared, but the guarded V1 training backend currently supports only this tested profile.
+
+```yaml
+model:
+  provider: huggingface
+  id: Qwen/Qwen3.5-9B
+  revision: YOUR_IMMUTABLE_HUGGING_FACE_COMMIT
+  loader: qwen3_5_text
+  trust_remote_code: false
+  dtype: bfloat16
+  max_sequence_length: 2048
+  quantization:
+    method: bitsandbytes-4bit
+    quant_type: nf4
+    double_quant: true
+    compute_dtype: bfloat16
+```
+
+`autotrainer lock` resolves a mutable Hugging Face revision and local Git revisions into `.autotrainer/autotrainer.lock.json`. A published experiment should never rely on `main`.
+
+## Point it at repositories and data
+
+Repositories, demonstrations, and RL tasks are separate source kinds:
+
+```bash
+autotrainer source add ../storefront \
+  --name storefront \
+  --kind repository \
+  --roles style,history,rl_seed \
+  --revision HEAD \
+  --config autotrainer.yaml
+
+autotrainer source add ./data/accepted.jsonl \
+  --name accepted-trajectories \
+  --kind sft_jsonl \
+  --config autotrainer.yaml
+
+autotrainer source add './tasks/train/**/*.json' \
+  --name frontend-train-tasks \
+  --kind task_pack \
+  --config autotrainer.yaml
+```
+
+A repository alone is **not** an SFT dataset or an RL environment:
+
+- Final source code is reference/style evidence.
+- Prompt → accepted response or tool trajectory JSONL is direct SFT data.
+- Git history can become SFT only after a compiler reconstructs a non-leaking instruction and accepted patch.
+- GRPO requires a starting revision, task instruction, isolated tools, hidden verifier, reward, and reset mechanism.
+
+`source scan` reports exactly which role each input can serve. `compile` writes inspectable data beneath `.autotrainer/compiled/` and never silently turns raw code into demonstrations.
+
+## Install the training runtime
+
+First install the CUDA build of PyTorch selected for your host at the [official PyTorch installer](https://pytorch.org/get-started/locally/). Then install the pinned reference stack:
+
+```bash
+python -m pip install -e './services/trainer[training]'
+docker build -t autotrainer/frontend-runtime:0.1 -f infra/frontend-runtime/Dockerfile .
+autotrainer doctor --config autotrainer.yaml
+```
+
+The reference matrix is Python 3.11, PyTorch 2.13.0, Transformers 5.13.1, TRL 1.8.0, PEFT 0.19.1, Accelerate 1.14.0, Datasets 5.0.0, bitsandbytes 0.49.2, and jmespath 1.1.0. The rollout image pins Playwright 1.61.1; task repositories should use the matching Playwright package.
+
+## Train
+
+Validate the resolved recipes before spending GPU time:
+
+```bash
+autotrainer compile --config autotrainer.yaml
+autotrainer train sft --dry-run --config autotrainer.yaml
+autotrainer train sft --config autotrainer.yaml
+
+# This dry run succeeds only after the SFT adapter exists.
+autotrainer train rl --dry-run --config autotrainer.yaml
+autotrainer train rl --config autotrainer.yaml
+```
+
+The smoke profile uses 4-bit NF4, LoRA rank 32, SFT batch 1 with gradient accumulation 8, and GRPO with two generations at a 2K completion limit. `beta: 0` avoids loading a second reference model. Increase group size or context only after measuring VRAM.
+
+## Data and environment contracts
+
+- [Getting started](docs/guides/getting-started.md)
+- [Configuration reference](docs/guides/configuration.md)
+- [Data-source rules](docs/guides/data-sources.md)
+- [Training and RL environment](docs/guides/training.md)
+- [Architecture](docs/architecture.md)
+- [RL security model](docs/rl-environment.md)
+- [Project schema](schemas/autotrainer.schema.json)
+- [Frontend task schema](schemas/frontend-task.schema.json)
+
+## Development
+
+```bash
+python -m pip install -e ./services/trainer
+python -m unittest discover -s services/trainer/tests -v
+
+npm ci
 npm test
 ```
 
-The test command creates a production build, verifies the rendered control plane, and exercises deterministic rollout reward calculation.
+The web preview is optional:
 
-## Trainer-core tests
-
-```powershell
-py -3.11 -m unittest discover -s services/trainer/tests -v
+```bash
+npm run dev
 ```
 
-The heavy CUDA training dependencies are optional and are not installed by the initial setup.
+## License
 
-## Important files
-
-- `apps/web/src/data.ts` — model catalog and product pipeline definitions.
-- `services/trainer/src/autotrainer/environment.py` — deterministic reward calculation.
-- `schemas/frontend-task.schema.json` — the versioned task contract.
-- `examples/tasks/responsive-pricing/task.json` — the first example environment manifest.
-- `docs/architecture.md` — system boundaries and experiment proof.
-- `docs/rl-environment.md` — episode lifecycle and security rules.
+Apache License 2.0. Training data, model checkpoints, and imported repositories retain their own licenses; AutoTrainer records source license declarations but does not grant redistribution rights to third-party material.
