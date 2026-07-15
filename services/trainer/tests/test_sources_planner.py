@@ -5,13 +5,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.planner import build_plan  # noqa: E402
-from autotrainer.sources import materialize_repository, scan_sources  # noqa: E402
+from autotrainer.sources import (  # noqa: E402
+    _write_text_atomic,
+    materialize_repository,
+    scan_sources,
+)
 
 
 def run_git(repository: Path, *arguments: str) -> str:
@@ -131,6 +136,23 @@ def task_payload(source_id: str, commit: str, split: str = "train", task_id: str
 
 
 class SourceScanTests(unittest.TestCase):
+    def test_atomic_artifact_writes_use_unique_temporary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "artifact.txt"
+            contents = [f"complete payload {index}\n" for index in range(12)]
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                list(
+                    executor.map(
+                        lambda content: _write_text_atomic(destination, content),
+                        contents,
+                    )
+                )
+
+            self.assertIn(destination.read_text(encoding="utf-8"), contents)
+            self.assertEqual(list(root.glob(".artifact.txt.*.tmp")), [])
+
     def test_scans_committed_frontend_text_without_executing_repository_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

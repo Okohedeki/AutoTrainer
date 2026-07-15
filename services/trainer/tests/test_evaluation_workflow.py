@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
@@ -460,6 +462,28 @@ class EvaluationPlanTests(unittest.TestCase):
             self.assertTrue(on_disk["errors"])
             # Dataset bytes may remain useful for diagnosis, but they cannot be
             # paired with provenance from the earlier successful compilation.
+            with self.assertRaisesRegex(EvaluationError, "compilation errors"):
+                build_evaluation_plan(config, root)
+
+    def test_cli_invalidates_provenance_before_source_scan_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config_path = write_config(root / "autotrainer.yaml", config)
+            report_path = root / ".artifacts" / "compiled" / "compile-report.json"
+
+            loaded = SimpleNamespace(data=config, root=root)
+            with patch("autotrainer.cli.load_config", return_value=loaded):
+                with patch(
+                    "autotrainer.sources.scan_sources",
+                    side_effect=PermissionError("simulated scan artifact failure"),
+                ):
+                    with self.assertRaisesRegex(PermissionError, "simulated scan"):
+                        cli_main(["compile", "--config", str(config_path), "--json"])
+
+            on_disk = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(on_disk["errors"])
+            self.assertIn("previous provenance was invalidated", on_disk["errors"][0])
             with self.assertRaisesRegex(EvaluationError, "compilation errors"):
                 build_evaluation_plan(config, root)
 

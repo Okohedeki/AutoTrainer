@@ -17,6 +17,8 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -1091,9 +1093,31 @@ def materialize_repository(
 
 def _write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8", newline="\n")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        # Unique same-directory files keep simultaneous read-only validation and
+        # artifact-producing commands from contending for one predictable name.
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(12):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                # Windows can transiently deny two simultaneous replacements of
+                # the same target even after both writers closed their handles.
+                if attempt == 11:
+                    raise
+                time.sleep(0.01)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_artifacts(

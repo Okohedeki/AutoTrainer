@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -41,13 +42,41 @@ def _task_files(root: Path, uri: str) -> list[Path]:
 
 def _atomic_jsonl(path: Path, records: list[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
     content = "".join(
         json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
         for record in records
     )
-    temporary.write_text(content, encoding="utf-8", newline="\n")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        # Each compiler owns its same-directory temporary file, so concurrent
+        # attempts cannot truncate or delete one another's in-progress dataset.
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_with_retry(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _replace_with_retry(temporary: Path, destination: Path) -> None:
+    """Finish an atomic replacement despite transient Windows sharing locks."""
+
+    for attempt in range(12):
+        try:
+            os.replace(temporary, destination)
+            return
+        except PermissionError:
+            # Retrying only the closed-file replacement preserves atomicity; it
+            # never exposes or rewrites the destination in place.
+            if attempt == 11:
+                raise
+            time.sleep(0.01)
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -66,7 +95,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -91,6 +120,18 @@ def _invalidate_previous_report(path: Path) -> bool:
         },
     )
     return True
+
+
+def invalidate_compile_provenance(
+    config: Mapping[str, Any],
+    project_root: Path,
+) -> bool:
+    """Invalidate a prior success before CLI source scanning can fail."""
+
+    root = Path(project_root).expanduser().resolve()
+    artifact_value = config.get("project", {}).get("artifact_dir", ".autotrainer")
+    report_path = _resolve(root, str(artifact_value)) / "compiled" / "compile-report.json"
+    return _invalidate_previous_report(report_path)
 
 
 def _return_failed_report(
@@ -618,4 +659,4 @@ def compile_data(
     return report
 
 
-__all__ = ["compile_data"]
+__all__ = ["compile_data", "invalidate_compile_provenance"]

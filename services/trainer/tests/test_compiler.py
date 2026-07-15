@@ -5,12 +5,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
-from autotrainer.compiler import compile_data  # noqa: E402
+from autotrainer.compiler import _atomic_jsonl, compile_data  # noqa: E402
 from autotrainer.config import default_config  # noqa: E402
 from autotrainer.sources import scan_sources  # noqa: E402
 
@@ -182,6 +183,27 @@ def _fixture(root: Path, *, evaluation: bool = False) -> tuple[dict, dict, Path]
 
 
 class CompilerTests(unittest.TestCase):
+    def test_atomic_dataset_writes_use_unique_temporary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "compiled.jsonl"
+            record_sets = [[{"writer": index, "complete": True}] for index in range(12)]
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                list(
+                    executor.map(
+                        lambda records: _atomic_jsonl(destination, records),
+                        record_sets,
+                    )
+                )
+
+            final_records = [
+                json.loads(line)
+                for line in destination.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn(final_records, record_sets)
+            self.assertEqual(list(root.glob(".compiled.jsonl.*.tmp")), [])
+
     def test_compiles_explicit_sft_and_executable_tasks_but_not_raw_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

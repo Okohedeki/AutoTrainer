@@ -314,9 +314,13 @@ def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
 
 def _run_compile(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
-    from .compiler import compile_data
+    from .compiler import compile_data, invalidate_compile_provenance
     from .sources import scan_sources
 
+    # Scanning writes source-lock artifacts and can fail before compile_data is
+    # entered. Invalidate the earlier success first so that exceptional exits
+    # cannot leave stale evaluation provenance executable.
+    invalidate_compile_provenance(config.data, config.root)
     scan = scan_sources(config.data, config.root, write=True)
     compiled = compile_data(config.data, config.root, scan)
     plan = _scan_and_plan(config, write=True)
