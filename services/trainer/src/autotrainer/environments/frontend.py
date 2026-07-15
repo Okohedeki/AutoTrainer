@@ -29,6 +29,12 @@ class EpisodeTimeoutError(TimeoutError):
 class FrontendEnvironment:
     """One disposable, network-disabled frontend coding episode."""
 
+    # Snapshot limits apply before a repository enters the container. They
+    # bound host memory/disk use from an accidentally huge or hostile Git tree.
+    _SNAPSHOT_FILE_LIMIT = 20_000
+    _SNAPSHOT_BLOB_BYTES = 64 * 1024 * 1024
+    _SNAPSHOT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+
     def __init__(self) -> None:
         self._manifest: TaskManifest | None = None
         self._workspace: Path | None = None
@@ -386,14 +392,16 @@ class FrontendEnvironment:
             revision = str(task_row.get("source_revision", ""))
         if not revision:
             raise RuntimeError("starting revision was not resolved by compile")
-        if (source_path / ".git").exists():
-            if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", revision) is None:
-                raise RuntimeError(
-                    "evaluation requires source_revision to be a full immutable Git commit"
-                )
-        elif re.fullmatch(r"tree:[0-9a-fA-F]{64}", revision) is None:
+        # V1 repository declarations are Git-backed. A former `tree:<sha>`
+        # escape hatch copied live directories without an independently stored
+        # snapshot, so accepting its digest would overstate reproducibility.
+        if not (source_path / ".git").exists():
             raise RuntimeError(
-                "non-Git evaluation requires an immutable tree:<sha256> source_revision"
+                "V1 executable evaluation requires a Git-backed repository source"
+            )
+        if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", revision) is None:
+            raise RuntimeError(
+                "evaluation requires source_revision to be a full immutable Git commit"
             )
 
         self._backend = str(task_row.get("environment_backend", "docker"))
@@ -714,21 +722,16 @@ class FrontendEnvironment:
         working_directory: str,
     ) -> None:
         relative = self._working_directory_path(working_directory)
-        if (source / ".git").exists():
-            files = self._export_locked_git_tree(
-                source,
-                revision,
-                destination,
-                relative,
+        if not (source / ".git").exists():
+            raise RuntimeError(
+                "V1 executable evaluation requires a Git-backed repository source"
             )
-        else:
-            if not revision.startswith("tree:"):
-                raise RuntimeError("non-Git task sources require a locked tree:<sha256> revision")
-            files = self._export_locked_filesystem_tree(
-                source,
-                destination,
-                relative,
-            )
+        files = self._export_locked_git_tree(
+            source,
+            revision,
+            destination,
+            relative,
+        )
 
         # Never carry the source repository's object database into an episode.
         # A fresh parentless baseline makes deleted or sibling verifier blobs
@@ -809,7 +812,7 @@ class FrontendEnvironment:
                     f"at the locked revision: {relative_posix}"
                 )
 
-        arguments = ["ls-tree", "-r", "-z", "--full-tree", revision]
+        arguments = ["ls-tree", "-r", "-z", "-l", "--full-tree", revision]
         if relative != Path("."):
             # Literal pathspecs prevent metacharacters in a project directory
             # from selecting files outside the intended subtree.
@@ -823,6 +826,7 @@ class FrontendEnvironment:
         files: list[tuple[str, str]] = []
         file_keys: set[str] = set()
         directory_keys: set[str] = set()
+        total_bytes = 0
         for raw_entry in listing.stdout.split(b"\0"):
             if not raw_entry:
                 continue
@@ -830,7 +834,7 @@ class FrontendEnvironment:
             if not separator:
                 raise RuntimeError("locked source tree contains an invalid Git entry")
             try:
-                mode, object_type, object_id = metadata.decode("ascii").split()
+                mode, object_type, object_id, size_value = metadata.decode("ascii").split()
                 path = raw_path.decode("utf-8")
             except (UnicodeDecodeError, ValueError) as error:
                 raise RuntimeError(
@@ -840,6 +844,24 @@ class FrontendEnvironment:
                 raise RuntimeError(
                     "editable task snapshots reject symlinks, gitlinks, "
                     f"and special entries: {path}"
+                )
+            try:
+                blob_bytes = int(size_value)
+            except ValueError as error:
+                raise RuntimeError(f"locked source blob has no valid size: {path}") from error
+            if blob_bytes > self._SNAPSHOT_BLOB_BYTES:
+                raise RuntimeError(
+                    f"locked source blob exceeds the snapshot limit: {path} ({blob_bytes} bytes)"
+                )
+            if len(files) + 1 > self._SNAPSHOT_FILE_LIMIT:
+                raise RuntimeError(
+                    f"locked source exceeds the {self._SNAPSHOT_FILE_LIMIT} file snapshot limit"
+                )
+            total_bytes += blob_bytes
+            if total_bytes > self._SNAPSHOT_TOTAL_BYTES:
+                raise RuntimeError(
+                    "locked source exceeds the "
+                    f"{self._SNAPSHOT_TOTAL_BYTES} byte snapshot limit"
                 )
             target = self._export_target(
                 destination,
@@ -859,58 +881,6 @@ class FrontendEnvironment:
             files.append((path, mode))
         if not files:
             raise RuntimeError("runtime.workingDirectory contains no tracked files")
-        return files
-
-    def _export_locked_filesystem_tree(
-        self,
-        source: Path,
-        destination: Path,
-        relative: Path,
-    ) -> list[tuple[str, str]]:
-        selected_candidate = source / relative
-        if self._is_link_or_reparse(selected_candidate):
-            raise RuntimeError("editable task snapshots do not accept symlinks or junctions")
-        selected = selected_candidate.resolve()
-        try:
-            selected.relative_to(source.resolve())
-        except ValueError as error:
-            raise RuntimeError("runtime.workingDirectory escapes the locked source") from error
-        if not selected.is_dir():
-            raise RuntimeError(
-                "runtime.workingDirectory does not exist in the locked source: "
-                f"{relative.as_posix()}"
-            )
-        self._reject_snapshot_symlinks(selected)
-
-        destination.mkdir(parents=True, exist_ok=True)
-        files: list[tuple[str, str]] = []
-        file_keys: set[str] = set()
-        directory_keys: set[str] = set()
-        for candidate in sorted(selected.rglob("*")):
-            if not candidate.is_file():
-                continue
-            within_project = candidate.relative_to(selected)
-            exported_path = (
-                within_project
-                if relative == Path(".")
-                else relative / within_project
-            ).as_posix()
-            target = self._export_target(
-                destination,
-                exported_path,
-                relative,
-                file_keys,
-                directory_keys,
-            )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(candidate, target)
-            executable = bool(candidate.stat().st_mode & stat.S_IXUSR)
-            mode = "100755" if executable else "100644"
-            if executable:
-                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            files.append((exported_path, mode))
-        if not files:
-            raise RuntimeError("runtime.workingDirectory contains no files")
         return files
 
     @staticmethod
@@ -1090,28 +1060,6 @@ class FrontendEnvironment:
         return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
     @classmethod
-    def _reject_snapshot_symlinks(cls, root: Path) -> None:
-        # Source links and Windows reparse points are rejected before export;
-        # dereferencing either could silently copy files outside the locked tree.
-        for current, directory_names, file_names in os.walk(root, followlinks=False):
-            base = Path(current)
-            safe_directories: list[str] = []
-            for name in directory_names:
-                if name == ".git":
-                    continue
-                if cls._is_link_or_reparse(base / name):
-                    raise RuntimeError(
-                        "editable task snapshots do not accept symlinks or junctions"
-                    )
-                safe_directories.append(name)
-            directory_names[:] = safe_directories
-            for name in file_names:
-                if cls._is_link_or_reparse(base / name):
-                    raise RuntimeError(
-                        "editable task snapshots do not accept symlinks or junctions"
-                    )
-
-    @classmethod
     def _reject_workspace_escape_links(cls, root: Path) -> None:
         root = root.resolve()
         for current, directory_names, file_names in os.walk(root, followlinks=False):
@@ -1155,9 +1103,9 @@ class FrontendEnvironment:
         workspace = self._require_workspace()
         working = self._safe_path(manifest.working_directory)
         relative_working = working.relative_to(workspace).as_posix()
-        # Package scripts can create links even though the policy patch tool
-        # cannot. Reject links escaping the workspace before a verifier mount
-        # gives `/autotrainer-verifier` any meaning inside the container.
+        # Package scripts and unified diffs can create links. Reject links that
+        # escape the workspace before a verifier mount gives
+        # `/autotrainer-verifier` any meaning inside the container.
         self._reject_workspace_escape_links(workspace)
         # The workspace is writable because the policy must edit it. Everything
         # else is constrained: no network, no capabilities, bounded CPU/RAM/PIDs,

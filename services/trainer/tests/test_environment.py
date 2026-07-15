@@ -480,6 +480,66 @@ class SnapshotIsolationTests(unittest.TestCase):
                     "project",
                 )
 
+    def test_materialize_rejects_non_git_sources_instead_of_trusting_a_tree_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            (source / "project").mkdir(parents=True)
+            (source / "project" / "app.txt").write_text("live tree\n", encoding="utf-8")
+
+            # A caller-provided digest is not proof that these mutable bytes
+            # came from that digest, so V1 fails closed on non-Git sources.
+            with self.assertRaisesRegex(RuntimeError, "Git-backed"):
+                FrontendEnvironment()._materialize(
+                    source,
+                    f"tree:{'0' * 64}",
+                    root / "episode" / "workspace",
+                    "project",
+                )
+
+    def test_materialize_bounds_file_count_blob_size_and_total_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            (source / "project").mkdir(parents=True)
+            (source / "project" / "one.txt").write_text("one!\n", encoding="utf-8")
+            (source / "project" / "two.txt").write_text("two!\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(source)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self._git(source, "add", "--all")
+            self._git(
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "bounded fixture",
+            )
+            revision = self._git(source, "rev-parse", "HEAD")
+            cases = (
+                ("_SNAPSHOT_FILE_LIMIT", 1, "file snapshot limit"),
+                ("_SNAPSHOT_BLOB_BYTES", 4, "blob exceeds"),
+                ("_SNAPSHOT_TOTAL_BYTES", 7, "byte snapshot limit"),
+            )
+            for index, (attribute, limit, message) in enumerate(cases):
+                with self.subTest(limit=attribute):
+                    environment = FrontendEnvironment()
+                    setattr(environment, attribute, limit)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        environment._materialize(
+                            source,
+                            revision,
+                            root / f"episode-{index}" / "workspace",
+                            "project",
+                        )
+
 
 class EpisodeFinalizationTests(unittest.TestCase):
     def prepare_environment(
