@@ -17,12 +17,12 @@ QLoRA supervised warm start
         ↓
 GRPO in executable frontend environments
         ↓
-Base vs SFT vs GRPO evaluation
+Declared 9B reference vs trained candidate benchmark
         ↓
-Fable base-vs-winner A/B
+Fable + base 9B vs Fable + the same trained candidate
 ```
 
-The repository includes an authoring example in [`examples/frontend-expert`](../../examples/frontend-expert). It contains one resolvable training fixture and deliberately leaves evaluation blocked until you supply a different held-out repository family.
+The repository includes an authoring example in [`examples/frontend-expert`](../../examples/frontend-expert). It contains miniature training and evaluation fixtures in separate directories for exercising the contracts, but both starting projects belong to this same Git repository and therefore do not establish repository holdout. Use multiple genuinely independent held-out project families and pin the real runners before collecting evidence.
 
 ## Requirements
 
@@ -79,14 +79,17 @@ The training reference matrix checked on 2026-07-14 is:
 
 The project dependency declaration remains the authority for supported ranges. Record the installed versions in every run; do not assume a newer combination is compatible merely because each package installs independently.
 
-## Start from the example
+## Run the bundled example
 
-Copy the example outside the AutoTrainer source checkout so experiment state stays separate from product source:
+Run the example from inside the AutoTrainer checkout:
 
 ```bash
-cp -R examples/frontend-expert ~/polished-frontend-9b
-cd ~/polished-frontend-9b
+cd examples/frontend-expert
+autotrainer validate --config autotrainer.yaml
+autotrainer source scan --config autotrainer.yaml
 ```
+
+Do not copy only `examples/frontend-expert` elsewhere. Its miniature repository sources deliberately point to the enclosing AutoTrainer checkout, so a copy would leave `uri: ../..` and each repository-relative `working_directory` pointing at the wrong tree. Generated example state remains below its ignored `.autotrainer` directory.
 
 Open `autotrainer.yaml` and make these changes before running training:
 
@@ -94,9 +97,10 @@ Open `autotrainer.yaml` and make these changes before running training:
 2. Replace or add repository sources whose frontend work you have the right to use.
 3. Replace the `sft_jsonl` source with your accepted, text-only demonstrations. `compile` writes the canonical file named by `sft.dataset`.
 4. Replace or extend the training task-pack source. `compile` writes the canonical prompt file named by `grpo.dataset`.
-5. Review every source license declaration.
+5. Replace the evaluation repository source with a genuinely independent repository, then replace or extend its task pack. `compile` writes those final proof tasks to `evaluation.dataset`, never to the optional training-time `grpo.eval_dataset`.
+6. Review every source license declaration.
 
-`Qwen/Qwen3.5-9B` is the example model, not a hidden global default. `model.id` is the declaration that selects the base model. You may replace it with another supported text-only causal language model, but model architecture, license, chat template, and single-GPU compatibility must be verified separately.
+`model.id` is explicit rather than a hidden default, but the V1 SFT/GRPO execution backend supports only the text backbone `Qwen/Qwen3.5-9B`. Selecting another ID may produce an authoring configuration, but `plan` and the guarded trainers block it until that architecture receives deliberate runtime support. A separately declared 9B evaluation reference is executed by its pinned external runner; it does not expand trainer compatibility.
 
 ## Configure and inspect
 
@@ -110,7 +114,7 @@ autotrainer source list --config autotrainer.yaml
 autotrainer source scan --config autotrainer.yaml
 ```
 
-To create a new project instead of copying the example:
+To create a standalone project, initialize it and then add your own repository, demonstration, and task-pack source declarations. Copy authored data or task files only when you also update every `uri`, `sourceId`, and repository-relative `workingDirectory`:
 
 ```bash
 autotrainer init ./my-frontend-expert
@@ -132,7 +136,7 @@ autotrainer doctor --config autotrainer.yaml
 
 Compilation locks local source revisions, validates supplied datasets and task packs, and writes canonical trainer inputs under `.autotrainer/compiled`. Run `autotrainer lock --config autotrainer.yaml` separately to resolve the Hugging Face revision. Generated state belongs under `project.artifact_dir`, which is `./.autotrainer` in the example.
 
-`plan` checks declared sources, task links, and held-out separation. `doctor` checks Python, CUDA/GPU visibility, the pinned package matrix, and the container runtime. The stage dry runs perform the final dataset and adapter checks.
+`plan` checks declared sources, task links, and held-out separation. In the bundled authoring example its evaluation stage is blocked by the shared repository identity, the not-yet-produced GRPO adapter, and placeholder runner pins; model, source, SFT, GRPO, and environment blockers must be resolved. `doctor` checks Python, CUDA/GPU visibility, the pinned package matrix, and the container runtime. The stage dry runs perform the final dataset and adapter checks.
 
 ## Train
 
@@ -158,18 +162,26 @@ See [Training](training.md) for the data formats, reward gates, and memory contr
 
 The required proof has two parts:
 
-1. Run Base, SFT, and GRPO through the same held-out task harness and show that the tuned candidate earns a higher verified benchmark.
-2. Run Fable with the base model and with the winning adapter under identical orchestration, briefs, budgets, and time limits, then compare the resulting websites in a blind review.
+1. Run the declared 9B reference and trained candidate through the same held-out task harness and show that the candidate earns a higher verified benchmark.
+2. Run Fable with the base model and with that same trained candidate under identical orchestration, briefs, budgets, and time limits, then compare the resulting websites in a blind review.
 
-The CLI contracts for that final milestone are:
+Freeze the plan before producing any results. The command runner can execute the model suite locally; the external Fable suite uses verifier-free request export and immutable result ingestion:
 
 ```bash
-autotrainer benchmark base --config autotrainer.yaml
-autotrainer evaluate --config autotrainer.yaml
+autotrainer evaluate plan --write --config autotrainer.yaml
+autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
+autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
+# Run those requests through the pinned Fable setup. Name directory-mode
+# envelopes result.json or *.result.json, then ingest the results.
+autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
+autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
+# Collect reviewer JSONL choices, then import them.
+autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
+autotrainer evaluate report --config autotrainer.yaml
 autotrainer package --config autotrainer.yaml
 ```
 
-These three commands are the required next milestone and are not implemented in the current `0.1.0` trainer. Do not interpret a completed SFT or GRPO job as a verified model until held-out evaluation and candidate selection exist.
+`benchmark` is an alias for `evaluate` and uses the same subcommands. Packaging refuses a winner unless both suite decisions are verified; `--allow-unverified` creates a clearly marked development artifact instead. The repository's placeholder runner pins, miniature task packs, and absence of real 9B/Fable results mean the included example is not yet verified. Follow the [V1 handoff plan](../V1-HANDOFF.md) to complete the proof.
 
 ## Windows and WSL2
 
@@ -199,4 +211,5 @@ Keep user repositories wherever convenient, then reference them with Linux paths
 - Compilation does not guarantee that arbitrary history contains a useful, non-leaking instruction or verifier.
 - Dependencies must be fetched before a network-disabled episode can run.
 - Hidden verifier isolation depends on Docker or Podman and must not be replaced by running untrusted repository commands directly on the host.
-- Benchmark, winner selection, Fable A/B, serving, and package export remain the next milestone in `0.1.0`.
+- Evaluation orchestration and local package assembly are implemented, but AutoTrainer does not provide or host the model-agent/Fable runtimes and does not serve the packaged adapter.
+- This checkout has no completed 9B SFT/GRPO evidence, production-sized held-out benchmark, Fable outputs, or blind reviews; both report decisions must be verified before calling an adapter a V1 winner.

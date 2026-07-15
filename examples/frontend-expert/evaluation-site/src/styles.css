@@ -1,0 +1,237 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1f2a25;
+  background: #f3efe6;
+  font-synthesis: none;
+  --ink: #1f2a25;
+  --muted: #667069;
+  --paper: #fffdf7;
+  --moss: #315c49;
+  --peach: #e9a782;
+  --line: #d8d2c5;
+  --space-1: 0.5rem;
+  --space-2: 0.875rem;
+  --space-3: 1.25rem;
+  --space-4: 2rem;
+  --space-5: 3.5rem;
+  --radius: 1.25rem;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  min-width: 20rem;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.6;
+}
+
+a { color: inherit; text-underline-offset: 0.22em; }
+
+button, input { font: inherit; }
+
+.site-header, main, footer {
+  width: min(72rem, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.wordmark span {
+  display: grid;
+  width: 2.5rem;
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--paper);
+  background: var(--moss);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+}
+
+nav { display: flex; gap: var(--space-3); font-size: 0.925rem; font-weight: 650; }
+
+/* The starting snapshot locks the accepted desktop composition. The task asks
+   the candidate to add narrow-layout behavior without weakening this rule. */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(20rem, 0.85fr);
+  gap: var(--space-5);
+  align-items: center;
+  min-height: 39rem;
+  padding-block: var(--space-5);
+}
+
+.hero-copy, .signup-panel, .issue-card { min-width: 0; }
+
+.eyebrow, .panel-kicker, .issue-number {
+  margin: 0 0 var(--space-2);
+  color: var(--moss);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1, h2, h3, p { margin-top: 0; }
+
+h1, h2, h3 {
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1.08;
+}
+
+h1 {
+  max-width: 12ch;
+  margin-bottom: var(--space-3);
+  font-size: clamp(3rem, 7vw, 6.5rem);
+  font-weight: 500;
+  letter-spacing: -0.055em;
+}
+
+.intro { max-width: 38rem; color: var(--muted); font-size: 1.125rem; }
+
+.proof-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  color: var(--muted);
+  list-style: none;
+  font-size: 0.875rem;
+}
+
+.proof-list li::before { margin-right: var(--space-1); color: var(--peach); content: "●"; }
+
+.signup-panel {
+  padding: clamp(1.5rem, 4vw, 2.75rem);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f6eee2;
+  box-shadow: 0 1.5rem 4rem rgb(38 54 45 / 10%);
+}
+
+.signup-panel h2 {
+  margin-bottom: var(--space-2);
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 500;
+}
+
+.signup-panel > p:not(.panel-kicker, .privacy-note, .form-status) { color: var(--muted); }
+
+.signup-form { margin-top: var(--space-4); }
+
+.form-label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: 0.875rem;
+  font-weight: 750;
+}
+
+.form-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1);
+}
+
+.form-controls input, .form-controls button {
+  min-height: 2.5rem;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+}
+
+.form-controls input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.7rem 1rem;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.form-controls input:focus { outline: none; box-shadow: none; }
+
+.form-controls button {
+  padding: 0.7rem 1.15rem;
+  border-color: var(--moss);
+  color: white;
+  background: var(--moss);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.privacy-note, .form-status {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.form-status { color: var(--moss); font-weight: 700; }
+
+.latest { padding-block: var(--space-5); border-block: 1px solid var(--line); }
+
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.section-heading h2, .about h2 {
+  margin-bottom: 0;
+  font-size: clamp(2.25rem, 5vw, 4.5rem);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.issue-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(12rem, 1fr));
+  gap: var(--space-3);
+}
+
+.issue-card {
+  display: flex;
+  min-height: 20rem;
+  flex-direction: column;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #faf6ee;
+}
+
+.issue-card h3 { margin-bottom: var(--space-2); font-size: 1.75rem; font-weight: 500; }
+.issue-card > p:not(.issue-number, .read-time) { color: var(--muted); }
+.read-time { margin: auto 0 0; padding-top: var(--space-3); color: var(--moss); font-size: 0.825rem; font-weight: 750; }
+
+.about { max-width: 46rem; padding-block: calc(var(--space-5) * 1.4); }
+.about > p:last-child { max-width: 40rem; margin: var(--space-3) 0 0; color: var(--muted); font-size: 1.1rem; }
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer p { margin-bottom: 0; }

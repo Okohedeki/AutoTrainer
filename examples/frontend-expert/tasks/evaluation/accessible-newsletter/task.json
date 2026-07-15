@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "task": {
+    "id": "accessible-newsletter-evaluation-001",
+    "instruction": "Repair the Signal & Story newsletter landing page so the email signup has a persistent programmatic label, announces its local submission feedback, and shows a visible keyboard focus indicator. At narrow widths, stack the hero, signup controls, and issue cards into a readable single column without horizontal overflow or undersized actions. Preserve the publication copy, all three archive entries, local-only submit behavior, and the existing two-column desktop composition.",
+    "sourceId": "held-out-newsletter-site",
+    "startingRevision": "locked",
+    "split": "evaluation",
+    "groupId": "newsletter-editorial-holdout-family"
+  },
+  "runtime": {
+    "workingDirectory": "examples/frontend-expert/evaluation-site",
+    "install": "cp -a /opt/autotrainer/frontend-deps/node_modules ./node_modules",
+    "build": "npm run build",
+    "tests": "npm test",
+    "browserTests": "npm run test:browser"
+  },
+  "tools": ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
+  "verifier": {
+    "bundle": "./hidden-verifier",
+    "command": "node /autotrainer-verifier/verify.mjs",
+    "reportPath": ".autotrainer-verifier-report.json"
+  },
+  "rewards": {
+    "buildGate": true,
+    "regressionGate": true,
+    "regressionSafety": 0.2,
+    "taskTests": 0.35,
+    "responsiveRules": 0.2,
+    "designRules": 0.15,
+    "patchQuality": 0.1
+  },
+  "limits": {
+    "toolCalls": 40,
+    "tokenBudget": 12000,
+    "commandTimeoutSeconds": 120,
+    "episodeTimeoutSeconds": 900,
+    "networkAccess": false
+  }
+}

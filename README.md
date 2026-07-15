@@ -15,9 +15,9 @@ compile demonstrations + executable tasks
         ↓
 GRPO continues the same adapter
         ↓
-Base vs SFT vs RL benchmark
+Declared 9B reference vs trained candidate benchmark
         ↓
-Fable + Base vs Fable + winner
+Fable + base 9B vs Fable + the same trained candidate
 ```
 
 ## What is usable now
@@ -28,8 +28,10 @@ Fable + Base vs Fable + winner
 - A guarded Hugging Face QLoRA SFT runner.
 - A guarded TRL GRPO runner that reloads the SFT adapter as trainable instead of creating a new adapter.
 - A conservative RTX 4090 / 24 GB recipe and dry runs that do not import CUDA libraries.
+- Immutable, paired evaluation plans with local result verification, separate model/Fable reports, and blind-review import/export.
+- Winner-gated LoRA adapter packaging with auditable file hashes and an explicitly labeled unverified-development escape hatch.
 
-Baseline automation, held-out evaluation, winner selection, expert packaging, and Fable A/B orchestration are the next milestone. The dashboard is currently a read-only product preview over this intended workflow; it does not launch jobs.
+The evaluation and packaging workflow is implemented, but this checkout does not contain the evidence for a verified V1 winner. A real run still needs enough independent held-out project families, pinned model-agent and Fable runners, a completed 9B SFT/GRPO run, and blind Fable reviews. The dashboard remains a read-only product preview; it does not launch jobs. See the [V1 handoff plan](docs/V1-HANDOFF.md) for the ordered continuation work.
 
 ## Quickstart
 
@@ -54,7 +56,7 @@ autotrainer compile --config examples/frontend-expert/autotrainer.yaml
 autotrainer plan --config examples/frontend-expert/autotrainer.yaml
 ```
 
-The plan will intentionally block evaluation until you add a held-out project family.
+The example includes a small evaluation authoring fixture, not an independent repository holdout or a statistically useful benchmark. Evaluation planning remains blocked until that source is replaced with a genuinely separate repository, the placeholder runner identities are pinned, and the candidate adapter exists; add multiple independent held-out project families before making an improvement claim.
 
 ## Declare the model
 
@@ -67,7 +69,7 @@ autotrainer model use qwen3.5-9b-text \
   --config autotrainer.yaml
 ```
 
-The V1 reference is `Qwen/Qwen3.5-9B`, loaded through the text-only `Qwen3_5ForCausalLM` path. AutoTrainer never loads its processor, image inputs, or vision encoder, and aborts if a different class is instantiated. A custom model can be declared, but the guarded V1 training backend currently supports only this tested profile.
+The V1 trainable project model is `Qwen/Qwen3.5-9B`, loaded through the text-only `Qwen3_5ForCausalLM` path. AutoTrainer never loads its processor, image inputs, or vision encoder, and aborts if a different class is instantiated. A custom model can be declared for authoring, but the guarded V1 training backend currently supports only this tested profile; the separately pinned 9B benchmark reference may use a different model through its external runner.
 
 ```yaml
 model:
@@ -109,6 +111,8 @@ autotrainer source add './tasks/train/**/*.json' \
   --kind task_pack \
   --config autotrainer.yaml
 ```
+
+For a Git URL, declare it the same way, then run `autotrainer source materialize <source-id> --config autotrainer.yaml` to create a detached local checkout and update the source URI.
 
 A repository alone is **not** an SFT dataset or an RL environment:
 
@@ -155,8 +159,11 @@ The smoke profile uses 4-bit NF4, LoRA rank 32, SFT batch 1 with gradient accumu
 - [Training and RL environment](docs/guides/training.md)
 - [Architecture](docs/architecture.md)
 - [RL security model](docs/rl-environment.md)
+- [V1 handoff and remaining proof work](docs/V1-HANDOFF.md)
 - [Project schema](schemas/autotrainer.schema.json)
 - [Frontend task schema](schemas/frontend-task.schema.json)
+- [External evaluation result schema](schemas/evaluation-result.schema.json)
+- [Blind-review row schema](schemas/blind-review-row.schema.json)
 
 ## Development
 

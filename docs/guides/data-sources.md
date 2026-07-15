@@ -42,9 +42,9 @@ sources:
       attribution: https://example.com/preferred-storefront
 ```
 
-`uri` may be a local Git working tree or a Git URL. The V1 scanner requires Git because it must identify and lock an exact source state. Remote URLs are declared but not cloned implicitly; clone them into a reviewed local directory and point `uri` there before compilation. A plain non-Git directory is not accepted as a repository source.
+`uri` may be a local Git working tree or a Git URL. The V1 scanner requires Git because it must identify and lock an exact source state. A remote declaration is materialized explicitly with `autotrainer source materialize <source-id> --config autotrainer.yaml`; that command clones into the project artifact directory, checks out a detached commit, and updates the source URI. You can instead clone into a reviewed local directory yourself. A plain non-Git directory is not accepted as a repository source.
 
-For local sources, `revision: HEAD` is acceptable while authoring. Compilation records the exact commit and must also detect dirty files. Dirty input is rejected by default because a commit SHA cannot reproduce uncommitted content. For remote sources, prefer an immutable commit from the beginning.
+For local sources, `revision: HEAD` is acceptable while authoring. Compilation records the exact commit and warns when the working tree is dirty because a commit SHA cannot reproduce uncommitted content. Clean the source before collecting or publishing evidence. For remote sources, prefer an immutable commit from the beginning.
 
 ### What scanning does
 
@@ -193,17 +193,21 @@ The current compiler produces deterministic state below `project.artifact_dir`:
 ├── compiled/
 │   ├── compile-report.json
 │   ├── sft/train.jsonl
-│   └── rl/train.jsonl
+│   ├── sft/evaluation.jsonl  # when sft.eval_dataset is declared
+│   ├── rl/train.jsonl
+│   └── rl/evaluation.jsonl   # final held-out evaluation.dataset
 └── plan.json
 ```
+
+`grpo.eval_dataset`, when used, is a separate training-time validation file supplied to the GRPO trainer; it is not the compiled held-out benchmark. It must resolve to a different path from `evaluation.dataset`. This prevents final proof tasks from influencing training diagnostics or checkpoint choices.
 
 The current compiler locks and validates declared sources. It does not call a cloud teacher, infer product taste from screenshots, or promise to synthesize high-quality instructions and hidden tests from arbitrary commits. Those transformations must remain inspectable and reviewable when added.
 
 ## Train/evaluation isolation
 
-Set `partition: evaluation` on held-out repository and task-pack sources. Use `groupId` to keep related variants together. The production benchmark split is by repository or project family, not by random records.
+Set `partition: evaluation` on held-out repository and task-pack sources. `compile` writes those final proof records to `evaluation.dataset`, not `grpo.eval_dataset`. Use `groupId` to keep related variants together. The production benchmark split is by repository or project family, not by random records.
 
-The bundled miniature training fixture demonstrates configuration and task resolution. The evaluation directory is intentionally empty so the plan remains blocked until you add a genuinely separate repository family and task pack. A real benchmark must not use projects that contributed source code, demonstrations, mutation seeds, or RL rollouts to training.
+The bundled example includes a miniature evaluation source subtree and hidden-verifier task so authors can exercise configuration, compilation, and scoring. That subtree still belongs to the same AutoTrainer Git repository as the training fixture, so it is an authoring fixture rather than a valid repository holdout or production benchmark. Add multiple genuinely separate repository families and task packs before evaluating a release; a real benchmark must not use projects that contributed source code, demonstrations, mutation seeds, or RL rollouts to training. The [V1 handoff plan](../V1-HANDOFF.md) lists the remaining held-out-suite acceptance criteria.
 
 ## Licensing and sensitive data
 

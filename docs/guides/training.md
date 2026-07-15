@@ -3,7 +3,7 @@
 AutoTrainer’s V1 training recipe is intentionally narrow:
 
 ```text
-text-only 9B causal LM
+Qwen/Qwen3.5-9B text causal LM
         ↓
 4-bit QLoRA supervised warm start
         ↓
@@ -11,7 +11,7 @@ same trainable adapter
         ↓
 GRPO against executable frontend rewards
         ↓
-held-out Base vs SFT vs GRPO comparison
+declared 9B reference vs trained candidate comparison
 ```
 
 The frozen base weights are not rewritten. SFT creates a PEFT adapter; GRPO must reload and continue training that adapter. This keeps the trainable surface small enough for a single consumer GPU and makes the final expert distributable as an adapter package.
@@ -28,18 +28,19 @@ autotrainer plan --config autotrainer.yaml
 autotrainer doctor --config autotrainer.yaml
 ```
 
-Do not bypass a blocked plan. At minimum, the resolved plan should show:
+Before training, do not bypass blockers in the model, source, SFT, GRPO, or environment stages. The evaluation stage remains blocked until training has produced the candidate adapter, the operator has pinned both runners, and every held-out repository is independent of all declared training repository exposure; resolve those evaluation-only blockers before `evaluate plan --write`. At minimum, the preparation report should show:
 
 - The exact model ID and immutable revision.
 - A CUDA-capable GPU and compatible package matrix.
 - A valid text-only SFT dataset at `sft.dataset`.
 - Valid training task manifests represented at `grpo.dataset`.
+- A final held-out task set at `evaluation.dataset`, distinct from any optional `grpo.eval_dataset` used during training.
 - A Docker or Podman runtime capable of network isolation.
 - Resolvable repository locks and working directories.
 - Verifier bundles outside editable workspaces.
 - No detected train/evaluation group collision.
 
-The included example intentionally reports evaluation as blocked. Add a separate held-out repository family and task pack before claiming an improvement.
+The included example has a small evaluation fixture in a separate directory for exercising the contract. Its starting project is still part of the same AutoTrainer Git repository as the training fixture, so the planner correctly rejects it as a repository holdout. Add multiple genuinely independent held-out repository families and pin the real evaluation runners before claiming an improvement.
 
 ## Compiled trainer inputs
 
@@ -51,11 +52,16 @@ sft:
 
 grpo:
   dataset: ./.autotrainer/compiled/rl/train.jsonl
+  # Optional training-loop validation. Keep it separate from the final proof set.
+  eval_dataset: ./data/rl-validation.jsonl
+
+evaluation:
+  dataset: ./.autotrainer/compiled/rl/evaluation.jsonl
 ```
 
-Compilation is the boundary where source paths and mutable revisions become locked provenance. It also prevents a trainer from silently sweeping every file in a repository into a dataset.
+Compilation is the boundary where source paths and mutable revisions become locked provenance. It also prevents a trainer from silently sweeping every file in a repository into a dataset. `evaluation.dataset` contains held-out task-pack records for the final two-suite proof. `grpo.eval_dataset` is optional trainer feedback and must be a different file; do not let final benchmark tasks affect optimization or checkpoint selection.
 
-Inspect the compiled JSONL before training. Each SFT line must contain text-only conversational `messages`, or conversational `prompt` and `completion`. Each GRPO line contains a conversational `prompt`, `task_id`, the validated manifest, resolved source path/revision, and sandbox settings.
+Inspect the JSONL before training. Each SFT line must contain text-only conversational `messages`, or conversational `prompt` and `completion`. Each GRPO or evaluation-task line contains a conversational `prompt`, `task_id`, the validated manifest, resolved source path/revision, and sandbox settings.
 
 ## QLoRA supervised tuning
 
@@ -100,7 +106,7 @@ grpo:
   sft_adapter: ./.autotrainer/runs/sft
 ```
 
-The reference runner saves the final SFT adapter at `sft.output_dir`. Until held-out checkpoint selection is implemented, retain periodic checkpoints and record how a candidate was chosen.
+The reference runner saves the final SFT adapter at `sft.output_dir`. Retain periodic checkpoints, select the adapter under test explicitly in `evaluation.arms`, and record why it was chosen; V1 evaluation does not search training checkpoints automatically.
 
 ## GRPO reinforcement learning
 
@@ -200,20 +206,19 @@ Resume only when all locked inputs match. If the model revision, source revision
 
 A successful optimizer run is not the product success criterion. The required model benchmark compares:
 
-- Base 9B.
-- SFT QLoRA adapter.
-- GRPO-updated adapter.
+- The immutable 9B reference declared for the benchmark.
+- The project model with the adapter produced by the configured QLoRA SFT and GRPO sequence.
 
 Use the same held-out tasks, model prompt template, tools, starting revisions, token budget, tool budget, generation settings, and verifier. The primary metric is verified task success; also retain build rate, task-test pass rate, regressions, accessibility, responsive checks, tokens per success, and wall time per success.
 
 The second proof runs:
 
-- Fable orchestrator with Base 9B.
-- The identical Fable orchestrator with the winning tuned adapter.
+- Fable orchestrator with the base 9B.
+- The identical Fable orchestrator with that same trained candidate adapter.
 
 Both receive identical website briefs, context, tools, time limits, and token budgets. Blind reviewers compare whether the finished sites satisfy the brief and which is better. This final rendering/review step does not make the training pipeline multimodal.
 
-`benchmark base`, `evaluate`, automatic winner selection, Fable A/B, and `package` are required next-milestone commands. They are not implemented in the current `0.1.0` trainer, so current runs must not advertise verified improvement.
+The CLI implements immutable evaluation planning, model-benchmark execution, external Fable request/result exchange, local result verification, blind-review import/export, reporting, and winner-gated packaging. `benchmark` is an alias for `evaluate` and accepts the same subcommands. Implementation alone is not evidence: the configured runners must be pinned, every planned trial must be completed, the model benchmark must satisfy its unique-task and confidence rules, the Fable review must satisfy its unique-task and completeness rules, and both decisions must report `verified_better`. The bundled placeholders and fixtures do not meet that bar. See the [V1 handoff plan](../V1-HANDOFF.md) for the remaining run work.
 
 ## Current runtime matrix
 
