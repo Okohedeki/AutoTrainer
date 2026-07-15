@@ -48,6 +48,136 @@ def _atomic_jsonl(path: Path, records: list[Mapping[str, Any]]) -> None:
     temporary.replace(path)
 
 
+def _within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def _output_destinations(
+    config: Mapping[str, Any], root: Path, artifact_dir: Path
+) -> tuple[dict[tuple[str, str], Path], list[str]]:
+    """Resolve declared trainer outputs and enforce the artifact boundary."""
+
+    declarations = {
+        ("sft", "train"): ("sft", "dataset", True),
+        ("sft", "evaluation"): ("sft", "eval_dataset", False),
+        ("rl", "train"): ("grpo", "dataset", True),
+        ("rl", "evaluation"): ("grpo", "eval_dataset", False),
+    }
+    destinations: dict[tuple[str, str], Path] = {}
+    errors: list[str] = []
+    for key, (section_name, field_name, required) in declarations.items():
+        section = config.get(section_name, {})
+        if not isinstance(section, Mapping):
+            errors.append(f"{section_name} must be a mapping")
+            continue
+        value = section.get(field_name)
+        if value is None or value == "":
+            if required and section.get("enabled", True) is not False:
+                errors.append(f"{section_name}.{field_name} is required for compilation")
+            continue
+        if not isinstance(value, (str, Path)):
+            errors.append(f"{section_name}.{field_name} must be a path")
+            continue
+        destination = _resolve(root, str(value))
+        if destination.suffix.lower() != ".jsonl":
+            errors.append(f"{section_name}.{field_name} must end in .jsonl: {destination}")
+            continue
+        if not _within(destination, artifact_dir):
+            errors.append(
+                f"{section_name}.{field_name} must stay inside project.artifact_dir "
+                f"({artifact_dir}): {destination}"
+            )
+            continue
+        destinations[key] = destination
+
+    paths: dict[Path, list[str]] = {}
+    for key, destination in destinations.items():
+        paths.setdefault(destination, []).append(f"{key[0]}.{key[1]}")
+    for destination, owners in sorted(paths.items(), key=lambda item: str(item[0])):
+        if len(owners) > 1:
+            errors.append(
+                f"compiled dataset destinations collide at {destination}: {', '.join(sorted(owners))}"
+            )
+    return destinations, errors
+
+
+def _source_input_paths(config: Mapping[str, Any], root: Path) -> set[Path]:
+    paths: set[Path] = set()
+    sources = config.get("sources", [])
+    if not isinstance(sources, list):
+        return paths
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        uri = source.get("uri")
+        if not isinstance(uri, str) or not uri or "://" in uri or uri.startswith("git@"):
+            continue
+        if any(character in uri for character in "*?["):
+            continue
+        paths.add(_resolve(root, uri))
+    return paths
+
+
+def _fingerprint(
+    sft_records: Mapping[str, list[Mapping[str, Any]]],
+    rl_records: Mapping[str, list[Mapping[str, Any]]],
+    repository_locks: Mapping[str, Mapping[str, Any]],
+    destinations: Mapping[tuple[str, str], Path],
+    root: Path,
+) -> str:
+    destination_values = {
+        f"{kind}_{partition}": (
+            destination.relative_to(root).as_posix()
+            if _within(destination, root)
+            else str(destination)
+        )
+        for (kind, partition), destination in sorted(destinations.items())
+    }
+    payload = {
+        "sft": sft_records,
+        "rl": rl_records,
+        "source_commits": {
+            source_id: source.get("commit") for source_id, source in repository_locks.items()
+        },
+        "destinations": destination_values,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _report(
+    *,
+    sft_records: Mapping[str, list[Mapping[str, Any]]],
+    rl_records: Mapping[str, list[Mapping[str, Any]]],
+    repository_locks: Mapping[str, Mapping[str, Any]],
+    destinations: Mapping[tuple[str, str], Path],
+    root: Path,
+    errors: list[str],
+    warnings: list[str],
+    artifacts: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "fingerprint": _fingerprint(
+            sft_records, rl_records, repository_locks, destinations, root
+        ),
+        "counts": {
+            "sft_train": len(sft_records["train"]),
+            "sft_evaluation": len(sft_records["evaluation"]),
+            "rl_train": len(rl_records["train"]),
+            "rl_evaluation": len(rl_records["evaluation"]),
+        },
+        "artifacts": dict(artifacts or {}),
+        "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+    }
+
+
 def _repository_lock(scan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return {
         str(source["id"]): source
@@ -65,13 +195,50 @@ def compile_data(
     artifact_value = config.get("project", {}).get("artifact_dir", ".autotrainer")
     artifact_dir = _resolve(root, str(artifact_value))
     compiled_dir = artifact_dir / "compiled"
+    empty_sft: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
+    empty_rl: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
+    repository_locks = _repository_lock(scan)
+    scan_errors = [f"source scan: {value}" for value in scan.get("errors", [])]
+    if scan_errors:
+        return _report(
+            sft_records=empty_sft,
+            rl_records=empty_rl,
+            repository_locks=repository_locks,
+            destinations={},
+            root=root,
+            errors=scan_errors,
+            warnings=["compilation aborted before writing artifacts because source inspection failed"],
+        )
+
+    destinations, destination_errors = _output_destinations(config, root, artifact_dir)
+    report_path = compiled_dir / "compile-report.json"
+    source_paths = _source_input_paths(config, root)
+    for key, destination in destinations.items():
+        if destination == report_path:
+            destination_errors.append(
+                f"{key[0]}.{key[1]} collides with the compile report: {destination}"
+            )
+        if destination in source_paths:
+            destination_errors.append(
+                f"{key[0]}.{key[1]} would overwrite a declared source input: {destination}"
+            )
+    if destination_errors:
+        return _report(
+            sft_records=empty_sft,
+            rl_records=empty_rl,
+            repository_locks=repository_locks,
+            destinations=destinations,
+            root=root,
+            errors=destination_errors,
+            warnings=["compilation aborted before writing artifacts because output paths are unsafe"],
+        )
+
     source_specs = config.get("sources", [])
     repositories = {
         str(source["id"]): source
         for source in source_specs
         if isinstance(source, Mapping) and source.get("kind") == "repository"
     }
-    repository_locks = _repository_lock(scan)
     sft_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     rl_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     errors: list[str] = []
@@ -167,18 +334,6 @@ def compile_data(
     for records in (*sft_records.values(), *rl_records.values()):
         records.sort(key=lambda row: str(row.get("task_id", json.dumps(row, sort_keys=True))))
 
-    artifacts: dict[str, str] = {}
-    for partition, records in sft_records.items():
-        if records:
-            path = compiled_dir / "sft" / f"{partition}.jsonl"
-            _atomic_jsonl(path, records)
-            artifacts[f"sft_{partition}"] = str(path)
-    for partition, records in rl_records.items():
-        if records:
-            path = compiled_dir / "rl" / f"{partition}.jsonl"
-            _atomic_jsonl(path, records)
-            artifacts[f"rl_{partition}"] = str(path)
-
     if not sft_records["train"]:
         warnings.append("no SFT demonstrations were compiled; repository code is not a substitute")
     if not rl_records["train"]:
@@ -186,33 +341,57 @@ def compile_data(
     if not rl_records["evaluation"]:
         warnings.append("no held-out executable evaluation tasks were compiled")
 
-    fingerprint_payload = {
-        "sft": sft_records,
-        "rl": rl_records,
-        "source_commits": {
-            source_id: source.get("commit") for source_id, source in repository_locks.items()
-        },
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    report = {
-        "schema_version": 1,
-        "fingerprint": fingerprint,
-        "counts": {
-            "sft_train": len(sft_records["train"]),
-            "sft_evaluation": len(sft_records["evaluation"]),
-            "rl_train": len(rl_records["train"]),
-            "rl_evaluation": len(rl_records["evaluation"]),
-        },
-        "artifacts": artifacts,
-        "errors": sorted(set(errors)),
-        "warnings": sorted(set(warnings)),
-    }
-    report_path = compiled_dir / "compile-report.json"
+    for key, records in (
+        (("sft", "train"), sft_records["train"]),
+        (("sft", "evaluation"), sft_records["evaluation"]),
+        (("rl", "train"), rl_records["train"]),
+        (("rl", "evaluation"), rl_records["evaluation"]),
+    ):
+        if records and key not in destinations:
+            section = "sft" if key[0] == "sft" else "grpo"
+            field = "dataset" if key[1] == "train" else "eval_dataset"
+            errors.append(
+                f"compiled {key[0]} {key[1]} records require {section}.{field}"
+            )
+
+    if errors:
+        warnings.append("compilation produced no dataset artifacts because validation failed")
+        return _report(
+            sft_records=sft_records,
+            rl_records=rl_records,
+            repository_locks=repository_locks,
+            destinations=destinations,
+            root=root,
+            errors=errors,
+            warnings=warnings,
+        )
+
+    artifacts: dict[str, str] = {}
+    for key, records in (
+        (("sft", "train"), sft_records["train"]),
+        (("sft", "evaluation"), sft_records["evaluation"]),
+        (("rl", "train"), rl_records["train"]),
+        (("rl", "evaluation"), rl_records["evaluation"]),
+    ):
+        if not records:
+            continue
+        path = destinations[key]
+        _atomic_jsonl(path, records)
+        artifacts[f"{key[0]}_{key[1]}"] = str(path)
+
+    artifacts["report"] = str(report_path)
+    report = _report(
+        sft_records=sft_records,
+        rl_records=rl_records,
+        repository_locks=repository_locks,
+        destinations=destinations,
+        root=root,
+        errors=[],
+        warnings=warnings,
+        artifacts=artifacts,
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    report["artifacts"]["report"] = str(report_path)
     return report
 
 
