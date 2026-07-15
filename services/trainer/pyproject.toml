@@ -7,17 +7,24 @@ name = "autotrainer-trainer"
 version = "0.1.0"
 description = "Single-GPU QLoRA and reinforcement-learning runtime for AutoTrainer"
 requires-python = ">=3.11"
-dependencies = []
+license = "Apache-2.0"
+dependencies = [
+  "PyYAML>=6.0,<7"
+]
+
+[project.scripts]
+autotrainer = "autotrainer.cli:main"
 
 [project.optional-dependencies]
 training = [
-  "accelerate",
-  "bitsandbytes",
-  "datasets",
-  "peft",
-  "torch",
-  "transformers",
-  "trl"
+  "accelerate==1.14.0",
+  "bitsandbytes==0.49.2",
+  "datasets==5.0.0",
+  "jmespath==1.1.0",
+  "peft==0.19.1",
+  "torch==2.13.0",
+  "transformers==5.13.1",
+  "trl==1.8.0"
 ]
 
 [tool.setuptools.packages.find]

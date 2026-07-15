@@ -1,0 +1,332 @@
+"""Command-line entry point for the declarative AutoTrainer workflow."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .config import ConfigError, default_config, load_config, validate_mapping, write_config
+from .doctor import run_doctor
+from .models import MODEL_CATALOG, resolve_model
+
+
+def _emit(payload: Any, *, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif isinstance(payload, str):
+        print(payload)
+    else:
+        print(yaml.safe_dump(payload, sort_keys=False, width=100).rstrip())
+
+
+def _save_loaded(config: Any) -> None:
+    write_config(config.path, config.data, overwrite=True)
+
+
+def _config_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", type=Path, default=Path("autotrainer.yaml"))
+    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="autotrainer",
+        description="Configure, inspect, and run a single-GPU QLoRA -> GRPO experiment.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init", help="create an autotrainer.yaml project")
+    init.add_argument("directory", nargs="?", type=Path, default=Path("."))
+    init.add_argument("--name", default=None)
+    init.add_argument("--model", default="Qwen/Qwen3.5-9B")
+    init.add_argument("--revision", default="main")
+    init.add_argument("--force", action="store_true")
+
+    models = subparsers.add_parser("models", help="inspect the small supported model catalogue")
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_list = models_sub.add_parser("list")
+    models_list.add_argument("--json", action="store_true")
+    models_show = models_sub.add_parser("show")
+    models_show.add_argument("model")
+    models_show.add_argument("--json", action="store_true")
+
+    model = subparsers.add_parser("model", help="show or update the configured base model")
+    model_sub = model.add_subparsers(dest="model_command", required=True)
+    model_show = model_sub.add_parser("show")
+    _config_argument(model_show)
+    model_use = model_sub.add_parser("use")
+    model_use.add_argument("model")
+    model_use.add_argument("--revision", required=True)
+    _config_argument(model_use)
+
+    source = subparsers.add_parser("source", help="declare and inspect repositories or datasets")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+    source_list = source_sub.add_parser("list")
+    _config_argument(source_list)
+    source_add = source_sub.add_parser("add")
+    source_add.add_argument("uri")
+    source_add.add_argument("--name", required=True)
+    source_add.add_argument("--kind", required=True, choices=["repository", "sft_jsonl", "task_pack"])
+    source_add.add_argument("--partition", choices=["train", "evaluation"], default="train")
+    source_add.add_argument("--roles", default="", help="comma-separated repository roles")
+    source_add.add_argument("--revision", default=None)
+    source_add.add_argument("--license", dest="source_license", default="UNDECLARED")
+    _config_argument(source_add)
+    source_scan = source_sub.add_parser("scan")
+    source_scan.add_argument("--write", action="store_true", help="write lock and raw reference artifacts")
+    _config_argument(source_scan)
+
+    validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
+    _config_argument(validate)
+
+    compile_command = subparsers.add_parser(
+        "compile", help="materialize deterministic source inventories and data readiness"
+    )
+    _config_argument(compile_command)
+
+    lock = subparsers.add_parser("lock", help="resolve model and source revisions into an immutable lock")
+    lock.add_argument(
+        "--offline",
+        action="store_true",
+        help="do not resolve a mutable Hugging Face revision (useful only for inspecting lock shape)",
+    )
+    _config_argument(lock)
+
+    plan = subparsers.add_parser("plan", help="show which experiment stages are ready or blocked")
+    plan.add_argument("--write", action="store_true")
+    _config_argument(plan)
+
+    doctor = subparsers.add_parser("doctor", help="check GPU, sandbox, Python, and pinned ML packages")
+    _config_argument(doctor)
+
+    train = subparsers.add_parser("train", help="run a declared training stage")
+    train_sub = train.add_subparsers(dest="train_command", required=True)
+    train_sft = train_sub.add_parser("sft", help="train the 4-bit LoRA adapter on demonstrations")
+    train_sft.add_argument("--dry-run", action="store_true")
+    _config_argument(train_sft)
+    train_rl = train_sub.add_parser("rl", help="continue the SFT adapter with GRPO environments")
+    train_rl.add_argument("--dry-run", action="store_true")
+    _config_argument(train_rl)
+
+    return parser
+
+
+def _run_init(arguments: argparse.Namespace) -> int:
+    destination = arguments.directory.expanduser().resolve() / "autotrainer.yaml"
+    project_name = arguments.name or arguments.directory.resolve().name or "frontend-expert-9b"
+    write_config(
+        destination,
+        default_config(name=project_name, model_id=arguments.model, revision=arguments.revision),
+        overwrite=arguments.force,
+    )
+    print(f"created {destination}")
+    print("next: declare sources with `autotrainer source add ...`, then run `autotrainer plan`")
+    return 0
+
+
+def _run_models(arguments: argparse.Namespace) -> int:
+    if arguments.models_command == "list":
+        payload = {alias: details["id"] for alias, details in MODEL_CATALOG.items()}
+    else:
+        payload = resolve_model(arguments.model)
+    _emit(payload, as_json=arguments.json)
+    return 0
+
+
+def _run_model(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    if arguments.model_command == "show":
+        _emit(dict(config.model), as_json=arguments.json)
+        return 0
+    resolved = resolve_model(arguments.model)
+    model = config.data["model"]
+    model["id"] = resolved["id"]
+    model["revision"] = arguments.revision
+    model["loader"] = resolved["loader"]
+    _save_loaded(config)
+    _emit({"model": model["id"], "revision": model["revision"], "loader": model["loader"]}, as_json=arguments.json)
+    return 0
+
+
+def _run_source(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    if arguments.source_command == "list":
+        _emit(config.sources, as_json=arguments.json)
+        return 0
+    if arguments.source_command == "add":
+        if any(source.get("id") == arguments.name for source in config.sources):
+            raise ConfigError(f"source id already exists: {arguments.name}")
+        declared: dict[str, Any] = {
+            "id": arguments.name,
+            "kind": arguments.kind,
+            "uri": arguments.uri,
+            "partition": arguments.partition,
+        }
+        if arguments.kind == "repository":
+            declared["roles"] = [role.strip() for role in arguments.roles.split(",") if role.strip()] or ["style"]
+            declared["revision"] = arguments.revision or "HEAD"
+            declared["license"] = {"spdx": arguments.source_license}
+        elif arguments.kind == "sft_jsonl":
+            declared["roles"] = ["demonstrations"]
+        else:
+            declared["roles"] = ["evaluation" if arguments.partition == "evaluation" else "rl_tasks"]
+        config.data["sources"].append(declared)
+        _save_loaded(config)
+        _emit(declared, as_json=arguments.json)
+        return 0
+
+    from .sources import scan_sources
+
+    scan = scan_sources(config.data, config.root, write=arguments.write)
+    _emit(scan, as_json=arguments.json)
+    return 0 if not scan.get("errors") else 3
+
+
+def _run_validate(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    report = validate_mapping(config.data, root=config.root)
+    try:
+        from .sources import scan_sources
+
+        scan = scan_sources(config.data, config.root, write=False)
+        source_errors = tuple(str(item) for item in scan.get("errors", []))
+        source_warnings = tuple(str(item) for item in scan.get("warnings", []))
+    except (ImportError, AttributeError):
+        source_errors = ()
+        source_warnings = ()
+    payload = {
+        "valid": not report.errors and not source_errors,
+        "errors": [*report.errors, *source_errors],
+        "warnings": [*report.warnings, *source_warnings],
+    }
+    if arguments.json:
+        _emit(payload, as_json=True)
+    else:
+        print("valid" if payload["valid"] else "invalid")
+        for warning in payload["warnings"]:
+            print(f"warning: {warning}")
+        for error in payload["errors"]:
+            print(f"error: {error}", file=sys.stderr)
+    return 0 if payload["valid"] else 2
+
+
+def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
+    from .planner import build_plan
+    from .sources import scan_sources
+
+    scan = scan_sources(config.data, config.root, write=write)
+    plan = build_plan(config.data, config.root, scan)
+    if write:
+        config.artifact_dir.mkdir(parents=True, exist_ok=True)
+        destination = config.artifact_dir / "plan.json"
+        destination.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        plan["artifact"] = str(destination)
+    return plan
+
+
+def _run_compile(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    from .compiler import compile_data
+    from .sources import scan_sources
+
+    scan = scan_sources(config.data, config.root, write=True)
+    compiled = compile_data(config.data, config.root, scan)
+    plan = _scan_and_plan(config, write=True)
+    payload = {"scan": scan, "compile": compiled, "plan": plan}
+    _emit(payload, as_json=arguments.json)
+    return 0 if not scan.get("errors") and not compiled.get("errors") else 3
+
+
+def _run_lock(arguments: argparse.Namespace) -> int:
+    from .locking import build_lock, write_lock
+    from .sources import scan_sources
+
+    config = load_config(arguments.config, check_paths=True)
+    scan = scan_sources(config.data, config.root, write=True)
+    if scan.get("errors"):
+        raise ConfigError("source scan failed; fix it before locking: " + "; ".join(scan["errors"]))
+    lock = build_lock(config.data, config.root, scan, resolve_model=not arguments.offline)
+    destination = write_lock(config.artifact_dir / "autotrainer.lock.json", lock)
+    lock["artifact"] = str(destination)
+    _emit(lock, as_json=arguments.json)
+    return 0
+
+
+def _run_plan(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    plan = _scan_and_plan(config, write=arguments.write)
+    _emit(plan, as_json=arguments.json)
+    return 0 if not plan.get("errors") else 3
+
+
+def _run_doctor(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    result = run_doctor(environment_backend=str(config.data["environment"]["backend"]))
+    _emit(result, as_json=arguments.json)
+    return 0 if result["sft_ready"] else 3
+
+
+def _run_train(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config, check_paths=True)
+    if arguments.train_command == "sft":
+        from .training import run_sft
+
+        output = config.resolve_path(config.data["sft"]["output_dir"])
+        result = run_sft(
+            config.data,
+            project_root=config.root,
+            output_dir=output,
+            dry_run=arguments.dry_run,
+        )
+    else:
+        from .training import run_grpo
+
+        output = config.resolve_path(config.data["grpo"]["output_dir"])
+        result = run_grpo(
+            config.data,
+            project_root=config.root,
+            output_dir=output,
+            dry_run=arguments.dry_run,
+        )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    arguments = parser.parse_args(argv)
+    try:
+        if arguments.command == "init":
+            return _run_init(arguments)
+        if arguments.command == "models":
+            return _run_models(arguments)
+        if arguments.command == "model":
+            return _run_model(arguments)
+        if arguments.command == "source":
+            return _run_source(arguments)
+        if arguments.command == "validate":
+            return _run_validate(arguments)
+        if arguments.command == "compile":
+            return _run_compile(arguments)
+        if arguments.command == "lock":
+            return _run_lock(arguments)
+        if arguments.command == "plan":
+            return _run_plan(arguments)
+        if arguments.command == "doctor":
+            return _run_doctor(arguments)
+        if arguments.command == "train":
+            return _run_train(arguments)
+    except (ConfigError, ValueError, RuntimeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    parser.error(f"unhandled command: {arguments.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
