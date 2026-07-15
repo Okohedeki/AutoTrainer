@@ -14,7 +14,8 @@ import stat
 import subprocess
 import tempfile
 import time
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from ..environment import CheckResult, EpisodeResult, RolloutVerifierReport, score_rollout
@@ -249,6 +250,8 @@ class FrontendEnvironment:
             if gate_reason:
                 return self._complete_result(gate_reason)
 
+            # Gate order is deliberate: cheap deterministic regressions run
+            # before browser work, and the hidden verifier is always last.
             checks = (
                 ("build", manifest.runtime_commands["build"], "build_failed", False),
                 ("tests", manifest.runtime_commands["tests"], "regression_failed", False),
@@ -267,6 +270,9 @@ class FrontendEnvironment:
                             manifest.verifier_report_path or ""
                         )
                         if report_path.exists():
+                            # The editable policy can write inside the workspace.
+                            # Remove any forged report before mounting/running the
+                            # trusted verifier bundle.
                             if not report_path.is_file():
                                 return self._complete_result("invalid_verifier_report")
                             report_path.unlink()
@@ -368,6 +374,13 @@ class FrontendEnvironment:
         if not source_path.is_dir():
             raise RuntimeError(f"task source_path is not a directory: {source_path}")
 
+        # Task bundles may live beside a source repository in an authoring
+        # monorepo. The verifier can be a sibling, but never part of the project
+        # snapshot exported into the policy-visible episode.
+        self._validate_verifier_boundary(manifest, task_root, source_path)
+
+        # Never evaluate a moving branch or an un-fingerprinted directory. This
+        # is what makes the same task row replayable across all candidate arms.
         revision = manifest.starting_revision
         if revision == "locked":
             revision = str(task_row.get("source_revision", ""))
@@ -403,12 +416,19 @@ class FrontendEnvironment:
         self._started_at = time.monotonic()
         self._deadline = self._started_at + manifest.episode_timeout_seconds
 
+        # Track the exact temporary root separately; cleanup later verifies this
+        # relationship before performing any recursive removal.
         temporary_root = Path(tempfile.mkdtemp(prefix="autotrainer-episode-"))
         workspace = temporary_root / "workspace"
         self._temporary_root = temporary_root.resolve()
         self._workspace = workspace
         try:
-            self._materialize(source_path, revision, workspace)
+            self._materialize(
+                source_path,
+                revision,
+                workspace,
+                manifest.working_directory,
+            )
             self._check_deadline()
         except Exception:
             self._cleanup()
@@ -585,23 +605,22 @@ class FrontendEnvironment:
         except (RuntimeError, ValueError) as error:
             return False, f"rejected patch: {error}"
         workspace = self._require_workspace()
-        check = subprocess.run(
-            ["git", "-C", str(workspace), "apply", "--check", "--whitespace=error-all", "-"],
-            input=patch,
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_for(30),
-            check=False,
+        check = self._run_git(
+            workspace,
+            "apply",
+            "--check",
+            "--whitespace=error-all",
+            "-",
+            input_value=patch,
         )
         if check.returncode:
             return False, self._truncate(f"patch check failed:\n{check.stderr or check.stdout}")
-        applied = subprocess.run(
-            ["git", "-C", str(workspace), "apply", "--whitespace=nowarn", "-"],
-            input=patch,
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_for(30),
-            check=False,
+        applied = self._run_git(
+            workspace,
+            "apply",
+            "--whitespace=nowarn",
+            "-",
+            input_value=patch,
         )
         if applied.returncode:
             return False, self._truncate(
@@ -612,21 +631,21 @@ class FrontendEnvironment:
 
     def _capture_unified_diff(self) -> str:
         workspace = self._require_workspace()
-        intent = subprocess.run(
-            ["git", "-C", str(workspace), "add", "--intent-to-add", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_for(30),
-            check=False,
+        intent = self._run_git(
+            workspace,
+            "add",
+            "--intent-to-add",
+            "--all",
         )
         if intent.returncode:
             raise RuntimeError(f"could not prepare unified diff: {intent.stderr.strip()}")
-        diff = subprocess.run(
-            ["git", "-C", str(workspace), "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_for(30),
-            check=False,
+        diff = self._run_git(
+            workspace,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
         )
         if diff.returncode:
             raise RuntimeError(f"could not capture unified diff: {diff.stderr.strip()}")
@@ -648,74 +667,481 @@ class FrontendEnvironment:
             return row, root
         raise RuntimeError("task row must contain manifest, manifest_json, manifest_path, or manifest fields")
 
-    def _materialize(self, source: Path, revision: str, destination: Path) -> None:
-        if (source / ".git").exists():
-            clone = subprocess.run(
-                ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(destination)],
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_for(120),
-                check=False,
+    @staticmethod
+    def _working_directory_path(value: str) -> Path:
+        relative = Path(value or ".")
+        if relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+            raise RuntimeError(
+                "runtime.workingDirectory must stay inside the locked source and outside .git"
             )
-            if clone.returncode:
-                raise RuntimeError(f"failed to clone task source: {clone.stderr.strip()}")
-            checkout = subprocess.run(
-                ["git", "-C", str(destination), "checkout", "--quiet", "--detach", revision],
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_for(60),
-                check=False,
-            )
-            if checkout.returncode:
-                raise RuntimeError(f"cannot resolve starting revision {revision}: {checkout.stderr.strip()}")
+        return relative
+
+    def _validate_verifier_boundary(
+        self,
+        manifest: TaskManifest,
+        task_root: Path,
+        source: Path,
+    ) -> None:
+        relative = self._working_directory_path(manifest.working_directory)
+        source_root = source.resolve()
+        editable_source = (source_root / relative).resolve()
+        try:
+            editable_source.relative_to(source_root)
+        except ValueError as error:
+            raise RuntimeError("runtime.workingDirectory escapes the locked source") from error
+        bundle_value = manifest.verifier_bundle
+        if not bundle_value:
             return
-        if not revision.startswith("tree:"):
-            raise RuntimeError("non-Git task sources require a locked tree:<sha256> revision")
-        shutil.copytree(
-            source,
-            destination,
-            symlinks=False,
-            ignore=shutil.ignore_patterns("node_modules", "dist", "build", ".autotrainer", ".git"),
+        bundle = Path(bundle_value)
+        bundle = bundle.resolve() if bundle.is_absolute() else (task_root / bundle).resolve()
+        for child, parent in (
+            (bundle, editable_source),
+            (editable_source, bundle),
+        ):
+            try:
+                child.relative_to(parent)
+            except ValueError:
+                continue
+            raise RuntimeError(
+                "verifier bundle must not overlap the policy-visible working directory"
+            )
+
+    def _materialize(
+        self,
+        source: Path,
+        revision: str,
+        destination: Path,
+        working_directory: str,
+    ) -> None:
+        relative = self._working_directory_path(working_directory)
+        if (source / ".git").exists():
+            files = self._export_locked_git_tree(
+                source,
+                revision,
+                destination,
+                relative,
+            )
+        else:
+            if not revision.startswith("tree:"):
+                raise RuntimeError("non-Git task sources require a locked tree:<sha256> revision")
+            files = self._export_locked_filesystem_tree(
+                source,
+                destination,
+                relative,
+            )
+
+        # Never carry the source repository's object database into an episode.
+        # A fresh parentless baseline makes deleted or sibling verifier blobs
+        # unavailable even to policy code that invokes `git cat-file` itself.
+        self._initialize_baseline_repository(destination, files)
+
+    @staticmethod
+    def _isolated_git_environment() -> dict[str, str]:
+        environment = dict(os.environ)
+        # Git accepts configuration and object-store overrides through many
+        # environment variables. Clear them so a user's templates, filters,
+        # hooks, alternates, or replacement refs cannot change trusted setup.
+        for key in list(environment):
+            if key.startswith("GIT_CONFIG_") or key in {
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_COMMON_DIR",
+                "GIT_DEFAULT_HASH",
+                "GIT_DIR",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_QUARANTINE_PATH",
+                "GIT_REPLACE_REF_BASE",
+                "GIT_TEMPLATE_DIR",
+                "GIT_WORK_TREE",
+            }:
+                environment.pop(key, None)
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_CONFIG_GLOBAL"] = os.devnull
+        # A local partial clone may otherwise contact its promisor remote when
+        # cat-file encounters a missing blob. Snapshot export must stay local.
+        environment["GIT_NO_LAZY_FETCH"] = "1"
+        environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+        return environment
+
+    def _run_git(
+        self,
+        repository: Path,
+        *arguments: str,
+        binary: bool = False,
+        input_value: str | None = None,
+        timeout: float = 30,
+    ) -> subprocess.CompletedProcess[Any]:
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.resolve().as_posix()}",
+                "-C",
+                str(repository),
+                *arguments,
+            ],
+            input=None if binary else input_value,
+            capture_output=True,
+            text=not binary,
+            env=self._isolated_git_environment(),
+            timeout=self._timeout_for(timeout),
+            check=False,
         )
+
+    def _export_locked_git_tree(
+        self,
+        source: Path,
+        revision: str,
+        destination: Path,
+        relative: Path,
+    ) -> list[tuple[str, str]]:
+        relative_posix = relative.as_posix()
+        if relative != Path("."):
+            object_type = self._run_git(
+                source,
+                "cat-file",
+                "-t",
+                f"{revision}:{relative_posix}",
+            )
+            if object_type.returncode or object_type.stdout.strip() != "tree":
+                raise RuntimeError(
+                    "runtime.workingDirectory does not exist as a directory "
+                    f"at the locked revision: {relative_posix}"
+                )
+
+        arguments = ["ls-tree", "-r", "-z", "--full-tree", revision]
+        if relative != Path("."):
+            # Literal pathspecs prevent metacharacters in a project directory
+            # from selecting files outside the intended subtree.
+            arguments.extend(["--", f":(literal){relative_posix}"])
+        listing = self._run_git(source, *arguments, binary=True, timeout=120)
+        if listing.returncode:
+            detail = listing.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"cannot read locked source tree: {detail}")
+
+        destination.mkdir(parents=True, exist_ok=True)
+        files: list[tuple[str, str]] = []
+        file_keys: set[str] = set()
+        directory_keys: set[str] = set()
+        for raw_entry in listing.stdout.split(b"\0"):
+            if not raw_entry:
+                continue
+            metadata, separator, raw_path = raw_entry.partition(b"\t")
+            if not separator:
+                raise RuntimeError("locked source tree contains an invalid Git entry")
+            try:
+                mode, object_type, object_id = metadata.decode("ascii").split()
+                path = raw_path.decode("utf-8")
+            except (UnicodeDecodeError, ValueError) as error:
+                raise RuntimeError(
+                    "locked source paths and tree metadata must be valid UTF-8"
+                ) from error
+            if object_type != "blob" or mode not in {"100644", "100755"}:
+                raise RuntimeError(
+                    "editable task snapshots reject symlinks, gitlinks, "
+                    f"and special entries: {path}"
+                )
+            target = self._export_target(
+                destination,
+                path,
+                relative,
+                file_keys,
+                directory_keys,
+            )
+            blob = self._run_git(source, "cat-file", "blob", object_id, binary=True)
+            if blob.returncode:
+                detail = blob.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"cannot read locked blob {object_id}: {detail}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob.stdout)
+            if mode == "100755":
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            files.append((path, mode))
+        if not files:
+            raise RuntimeError("runtime.workingDirectory contains no tracked files")
+        return files
+
+    def _export_locked_filesystem_tree(
+        self,
+        source: Path,
+        destination: Path,
+        relative: Path,
+    ) -> list[tuple[str, str]]:
+        selected_candidate = source / relative
+        if self._is_link_or_reparse(selected_candidate):
+            raise RuntimeError("editable task snapshots do not accept symlinks or junctions")
+        selected = selected_candidate.resolve()
+        try:
+            selected.relative_to(source.resolve())
+        except ValueError as error:
+            raise RuntimeError("runtime.workingDirectory escapes the locked source") from error
+        if not selected.is_dir():
+            raise RuntimeError(
+                "runtime.workingDirectory does not exist in the locked source: "
+                f"{relative.as_posix()}"
+            )
+        self._reject_snapshot_symlinks(selected)
+
+        destination.mkdir(parents=True, exist_ok=True)
+        files: list[tuple[str, str]] = []
+        file_keys: set[str] = set()
+        directory_keys: set[str] = set()
+        for candidate in sorted(selected.rglob("*")):
+            if not candidate.is_file():
+                continue
+            within_project = candidate.relative_to(selected)
+            exported_path = (
+                within_project
+                if relative == Path(".")
+                else relative / within_project
+            ).as_posix()
+            target = self._export_target(
+                destination,
+                exported_path,
+                relative,
+                file_keys,
+                directory_keys,
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(candidate, target)
+            executable = bool(candidate.stat().st_mode & stat.S_IXUSR)
+            mode = "100755" if executable else "100644"
+            if executable:
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            files.append((exported_path, mode))
+        if not files:
+            raise RuntimeError("runtime.workingDirectory contains no files")
+        return files
+
+    @staticmethod
+    def _export_target(
+        destination: Path,
+        value: str,
+        relative: Path,
+        file_keys: set[str],
+        directory_keys: set[str],
+    ) -> Path:
+        if not value or "\\" in value or "\0" in value:
+            raise RuntimeError(f"locked source contains a non-portable path: {value!r}")
+        path = PurePosixPath(value)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise RuntimeError(f"locked source path escapes its snapshot: {value!r}")
+        prefix = PurePosixPath(relative.as_posix()).parts if relative != Path(".") else ()
+        if prefix and path.parts[: len(prefix)] != prefix:
+            raise RuntimeError(f"locked source entry escaped workingDirectory: {value!r}")
+
+        reserved = {"CON", "PRN", "AUX", "NUL"} | {
+            f"{name}{number}"
+            for name in ("COM", "LPT")
+            for number in range(1, 10)
+        }
+        normalized_parts: list[str] = []
+        for part in path.parts:
+            normalized = unicodedata.normalize("NFC", part).casefold()
+            stem = part.split(".", 1)[0].upper()
+            if (
+                normalized == ".git"
+                or part.endswith((" ", "."))
+                or ":" in part
+                or stem in reserved
+            ):
+                raise RuntimeError(f"locked source contains a non-portable path: {value!r}")
+            normalized_parts.append(normalized)
+
+        for index in range(1, len(normalized_parts)):
+            directory_key = "/".join(normalized_parts[:index])
+            if directory_key in file_keys:
+                raise RuntimeError(
+                    f"locked source has a case or Unicode path collision: {value!r}"
+                )
+            directory_keys.add(directory_key)
+        file_key = "/".join(normalized_parts)
+        if file_key in file_keys or file_key in directory_keys:
+            raise RuntimeError(f"locked source has a case or Unicode path collision: {value!r}")
+        file_keys.add(file_key)
+
+        target = (destination / Path(*path.parts)).resolve()
+        try:
+            target.relative_to(destination.resolve())
+        except ValueError as error:
+            raise RuntimeError(f"locked source path escapes its snapshot: {value!r}") from error
+        return target
+
+    def _initialize_baseline_repository(
+        self,
+        destination: Path,
+        files: list[tuple[str, str]],
+    ) -> None:
+        empty_template = destination.parent / "empty-git-template"
+        empty_template.mkdir(exist_ok=True)
+        environment = self._isolated_git_environment()
         initialized = subprocess.run(
-            ["git", "init", "--quiet", str(destination)],
+            [
+                "git",
+                "init",
+                "--quiet",
+                f"--template={empty_template}",
+                str(destination),
+            ],
             capture_output=True,
             text=True,
+            env=environment,
             timeout=self._timeout_for(30),
             check=False,
         )
         if initialized.returncode:
             raise RuntimeError(f"failed to initialize task snapshot: {initialized.stderr.strip()}")
-        staged = subprocess.run(
-            ["git", "-C", str(destination), "add", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_for(30),
-            check=False,
+
+        # The highest-precedence attributes file neutralizes repository-provided
+        # clean/smudge, encoding, and ident transforms. The baseline indexes the
+        # exact bytes exported from the locked tree and never executes filters.
+        info = destination / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "attributes").write_text(
+            "* -text -filter -ident -working-tree-encoding\n"
+            "**/* -text -filter -ident -working-tree-encoding\n",
+            encoding="utf-8",
         )
-        if staged.returncode:
-            raise RuntimeError(f"failed to index task snapshot: {staged.stderr.strip()}")
+
+        for path, mode in files:
+            hashed = self._run_git(
+                destination,
+                "hash-object",
+                "-w",
+                "--no-filters",
+                "--",
+                path,
+            )
+            if hashed.returncode:
+                raise RuntimeError(
+                    f"failed to hash task snapshot file {path}: {hashed.stderr.strip()}"
+                )
+            indexed = self._run_git(
+                destination,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                mode,
+                hashed.stdout.strip(),
+                path,
+            )
+            if indexed.returncode:
+                raise RuntimeError(
+                    f"failed to index task snapshot file {path}: {indexed.stderr.strip()}"
+                )
+
+        tree = self._run_git(destination, "write-tree")
+        if tree.returncode:
+            raise RuntimeError(f"failed to write task snapshot tree: {tree.stderr.strip()}")
+        commit_environment = self._isolated_git_environment()
+        commit_environment.update(
+            {
+                "GIT_AUTHOR_NAME": "AutoTrainer",
+                "GIT_AUTHOR_EMAIL": "autotrainer@localhost",
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+                "GIT_COMMITTER_NAME": "AutoTrainer",
+                "GIT_COMMITTER_EMAIL": "autotrainer@localhost",
+                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+            }
+        )
         committed = subprocess.run(
             [
                 "git",
+                "-c",
+                f"safe.directory={destination.resolve().as_posix()}",
                 "-C",
                 str(destination),
-                "-c",
-                "user.name=AutoTrainer",
-                "-c",
-                "user.email=autotrainer@localhost",
-                "commit",
-                "--quiet",
-                "-m",
-                "Locked evaluation snapshot",
+                "commit-tree",
+                tree.stdout.strip(),
             ],
+            input="Locked evaluation snapshot\n",
             capture_output=True,
             text=True,
+            env=commit_environment,
             timeout=self._timeout_for(30),
             check=False,
         )
         if committed.returncode:
-            raise RuntimeError(f"failed to lock task snapshot: {committed.stderr.strip()}")
+            raise RuntimeError(f"failed to commit task snapshot: {committed.stderr.strip()}")
+        updated = self._run_git(
+            destination,
+            "update-ref",
+            "HEAD",
+            committed.stdout.strip(),
+        )
+        if updated.returncode:
+            raise RuntimeError(f"failed to lock task snapshot: {updated.stderr.strip()}")
+
+        status = self._run_git(destination, "status", "--porcelain")
+        if status.returncode or status.stdout:
+            raise RuntimeError(
+                "fresh task snapshot baseline is not clean: "
+                f"{status.stderr.strip() or status.stdout.strip()}"
+            )
+
+    @staticmethod
+    def _is_link_or_reparse(path: Path) -> bool:
+        if path.is_symlink():
+            return True
+        try:
+            attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        except OSError:
+            return False
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+    @classmethod
+    def _reject_snapshot_symlinks(cls, root: Path) -> None:
+        # Source links and Windows reparse points are rejected before export;
+        # dereferencing either could silently copy files outside the locked tree.
+        for current, directory_names, file_names in os.walk(root, followlinks=False):
+            base = Path(current)
+            safe_directories: list[str] = []
+            for name in directory_names:
+                if name == ".git":
+                    continue
+                if cls._is_link_or_reparse(base / name):
+                    raise RuntimeError(
+                        "editable task snapshots do not accept symlinks or junctions"
+                    )
+                safe_directories.append(name)
+            directory_names[:] = safe_directories
+            for name in file_names:
+                if cls._is_link_or_reparse(base / name):
+                    raise RuntimeError(
+                        "editable task snapshots do not accept symlinks or junctions"
+                    )
+
+    @classmethod
+    def _reject_workspace_escape_links(cls, root: Path) -> None:
+        root = root.resolve()
+        for current, directory_names, file_names in os.walk(root, followlinks=False):
+            base = Path(current)
+            safe_directories: list[str] = []
+            for name in directory_names:
+                candidate = base / name
+                if not cls._is_link_or_reparse(candidate):
+                    safe_directories.append(name)
+                    continue
+                try:
+                    candidate.resolve().relative_to(root)
+                except (OSError, ValueError) as error:
+                    raise RuntimeError(
+                        "episode contains a link that escapes the editable workspace"
+                    ) from error
+                # Do not descend through even an internal junction. On Windows,
+                # os.walk may otherwise traverse a reparse point despite
+                # followlinks=False, which can produce cycles or duplicate scans.
+            directory_names[:] = safe_directories
+            for name in file_names:
+                candidate = base / name
+                if not cls._is_link_or_reparse(candidate):
+                    continue
+                try:
+                    candidate.resolve().relative_to(root)
+                except (OSError, ValueError) as error:
+                    raise RuntimeError(
+                        "episode contains a link that escapes the editable workspace"
+                    ) from error
 
     def _run_container_command(
         self,
@@ -729,6 +1155,13 @@ class FrontendEnvironment:
         workspace = self._require_workspace()
         working = self._safe_path(manifest.working_directory)
         relative_working = working.relative_to(workspace).as_posix()
+        # Package scripts can create links even though the policy patch tool
+        # cannot. Reject links escaping the workspace before a verifier mount
+        # gives `/autotrainer-verifier` any meaning inside the container.
+        self._reject_workspace_escape_links(workspace)
+        # The workspace is writable because the policy must edit it. Everything
+        # else is constrained: no network, no capabilities, bounded CPU/RAM/PIDs,
+        # a no-new-privileges bit, and an ephemeral tmpfs.
         arguments = [
             self._backend,
             "run",
@@ -749,12 +1182,22 @@ class FrontendEnvironment:
             "1g",
             "--tmpfs",
             "/tmp:rw,nosuid,size=1g",
+            # Read-only Git metadata still supports status/diff when Git skips
+            # optional index refresh locks.
+            "-e",
+            "GIT_OPTIONAL_LOCKS=0",
             "-v",
             f"{workspace}:/workspace",
+            # Keep the private baseline readable for project tools but prevent
+            # package scripts from changing Git config, refs, or object data.
+            "-v",
+            f"{workspace / '.git'}:/workspace/.git:ro",
             "-w",
             f"/workspace/{relative_working}" if relative_working != "." else "/workspace",
         ]
         if include_verifier:
+            # Hidden verifier code is mounted read-only only for the verifier
+            # command; policy-visible checks never receive this mount.
             bundle = self._resolve_verifier_bundle()
             report_path = self._safe_path(manifest.verifier_report_path or "")
             report_relative = report_path.relative_to(workspace).as_posix()
@@ -843,22 +1286,31 @@ class FrontendEnvironment:
             raise RuntimeError("environment reset must run before tools")
         return self._workspace
 
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        if not path.exists():
+            return
+
+        def remove_readonly(function: Any, value: str, _error: Any) -> None:
+            os.chmod(value, stat.S_IRWXU)
+            function(value)
+
+        shutil.rmtree(path, onerror=remove_readonly)
+
     def _cleanup(self) -> None:
         if self._workspace is not None:
             workspace = self._workspace.resolve()
             root = self._temporary_root.resolve() if self._temporary_root else workspace.parent
+            # Recursive deletion is permitted only for the exact temp root this
+            # instance created, never for a path supplied by a task manifest.
             if workspace.name != "workspace" or workspace.parent != root:
                 raise RuntimeError(
                     "refusing to clean an environment outside its verified temporary root"
                 )
 
-            def remove_readonly(function: Any, path: str, _error: Any) -> None:
-                os.chmod(path, stat.S_IRWXU)
-                function(path)
-
             self._workspace = None
             self._temporary_root = None
-            shutil.rmtree(root, onerror=remove_readonly)
+            self._remove_tree(root)
         self._manifest = None
         self._task_root = None
         self._install_result = None

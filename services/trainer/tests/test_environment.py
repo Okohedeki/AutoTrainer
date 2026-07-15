@@ -209,6 +209,278 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(task.verifier_report_path, ".autotrainer-verifier-report.json")
 
 
+class SnapshotIsolationTests(unittest.TestCase):
+    @staticmethod
+    def _git(repository: Path, *arguments: str) -> str:
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.as_posix()}",
+                "-C",
+                str(repository),
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise AssertionError(completed.stderr or completed.stdout)
+        return completed.stdout.strip()
+
+    def test_verifier_bundle_must_be_outside_editable_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "source"
+            (source / "project" / "hidden-verifier").mkdir(parents=True)
+            payload = executable_manifest()
+            payload["runtime"]["workingDirectory"] = "project"
+            payload["verifier"]["bundle"] = "project/hidden-verifier"
+            manifest = TaskManifest.from_mapping(payload)
+
+            with self.assertRaisesRegex(RuntimeError, "must not overlap"):
+                FrontendEnvironment()._validate_verifier_boundary(
+                    manifest,
+                    source,
+                    source,
+                )
+
+            payload["verifier"]["bundle"] = "."
+            ancestor_manifest = TaskManifest.from_mapping(payload)
+            with self.assertRaisesRegex(RuntimeError, "must not overlap"):
+                FrontendEnvironment()._validate_verifier_boundary(
+                    ancestor_manifest,
+                    source,
+                    source,
+                )
+
+            payload["verifier"]["bundle"] = "hidden-verifier"
+            external_manifest = TaskManifest.from_mapping(payload)
+            FrontendEnvironment()._validate_verifier_boundary(
+                external_manifest,
+                source,
+                source,
+            )
+
+    def test_materialize_exports_project_without_sibling_files_or_git_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            (source / "project").mkdir(parents=True)
+            (source / "hidden-verifier").mkdir()
+            (source / "project" / "app.txt").write_text("editable\n", encoding="utf-8")
+            secret = source / "hidden-verifier" / "secret.txt"
+            secret.write_text("never policy visible\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(source)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self._git(source, "add", "--all")
+            self._git(
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            )
+            revision = self._git(source, "rev-parse", "HEAD")
+            secret_object = self._git(source, "rev-parse", "HEAD:hidden-verifier/secret.txt")
+            destination = root / "episode" / "workspace"
+            destination.parent.mkdir()
+
+            FrontendEnvironment()._materialize(
+                source,
+                revision,
+                destination,
+                "project",
+            )
+
+            self.assertEqual(
+                (destination / "project" / "app.txt").read_text(encoding="utf-8"),
+                "editable\n",
+            )
+            self.assertFalse((destination / "hidden-verifier").exists())
+            self.assertFalse((destination.parent / "locked-source").exists())
+            self.assertEqual(self._git(destination, "status", "--porcelain"), "")
+            object_probe = subprocess.run(
+                ["git", "-C", str(destination), "cat-file", "-e", secret_object],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(object_probe.returncode, 0)
+
+    def test_materialize_uses_only_the_locked_tree_and_builds_a_fresh_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            project = source / "project"
+            verifier = source / "hidden-verifier"
+            retired = source / "retired-verifier"
+            project.mkdir(parents=True)
+            verifier.mkdir()
+            retired.mkdir()
+            # These attributes would mutate a normal checkout/index round trip.
+            # The episode exporter must preserve the committed blob bytes instead.
+            (project / ".gitattributes").write_text("app.txt ident\n", encoding="utf-8")
+            (project / "app.txt").write_text("committed $Id$\n", encoding="utf-8")
+            (verifier / "current-secret.txt").write_text(
+                "current verifier secret\n",
+                encoding="utf-8",
+            )
+            (retired / "historical-secret.txt").write_text(
+                "deleted verifier secret\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "init", "--quiet", str(source)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self._git(source, "add", "--all")
+            self._git(
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "add current and historical verifier fixtures",
+            )
+            historical_secret_object = self._git(
+                source,
+                "rev-parse",
+                "HEAD:retired-verifier/historical-secret.txt",
+            )
+            (retired / "historical-secret.txt").unlink()
+            retired.rmdir()
+            self._git(source, "add", "--all")
+            self._git(
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "retire old verifier",
+            )
+            revision = self._git(source, "rev-parse", "HEAD")
+            current_secret_object = self._git(
+                source,
+                "rev-parse",
+                "HEAD:hidden-verifier/current-secret.txt",
+            )
+
+            # A locked revision, not the caller's dirty checkout, defines the
+            # exact policy-visible input to a reproducible training episode.
+            (project / "app.txt").write_text("dirty worktree value\n", encoding="utf-8")
+            (project / "untracked.txt").write_text("do not export\n", encoding="utf-8")
+            destinations = [root / "episode-a" / "workspace", root / "episode-b" / "workspace"]
+            environment = FrontendEnvironment()
+            for destination in destinations:
+                destination.parent.mkdir()
+                environment._materialize(source, revision, destination, "project")
+
+                self.assertEqual(
+                    (destination / "project" / "app.txt").read_bytes(),
+                    b"committed $Id$\n",
+                )
+                self.assertFalse((destination / "project" / "untracked.txt").exists())
+                self.assertFalse((destination / "hidden-verifier").exists())
+                self.assertFalse((destination / "retired-verifier").exists())
+                self.assertEqual(self._git(destination, "status", "--porcelain"), "")
+                # A single parentless baseline cannot reveal source history.
+                head_with_parents = self._git(
+                    destination,
+                    "rev-list",
+                    "--parents",
+                    "-n",
+                    "1",
+                    "HEAD",
+                )
+                self.assertEqual(len(head_with_parents.split()), 1)
+                self.assertEqual(self._git(destination, "remote"), "")
+                alternates = destination / ".git" / "objects" / "info" / "alternates"
+                self.assertFalse(alternates.exists())
+                config = (destination / ".git" / "config").read_text(encoding="utf-8")
+                self.assertNotIn(str(source), config)
+                for secret_object in (current_secret_object, historical_secret_object):
+                    probe = subprocess.run(
+                        ["git", "-C", str(destination), "cat-file", "-e", secret_object],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(probe.returncode, 0)
+
+            # Fixed metadata and exact input blobs make equivalent episode
+            # baselines byte-for-byte reproducible across temporary locations.
+            self.assertEqual(
+                self._git(destinations[0], "rev-parse", "HEAD"),
+                self._git(destinations[1], "rev-parse", "HEAD"),
+            )
+
+    def test_materialize_rejects_a_git_symlink_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            (source / "project").mkdir(parents=True)
+            (source / "project" / "app.txt").write_text("safe\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", "--quiet", str(source)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self._git(source, "add", "--all")
+            link_object = subprocess.run(
+                ["git", "-C", str(source), "hash-object", "-w", "--stdin"],
+                input="../hidden-verifier",
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self._git(
+                source,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "120000",
+                link_object,
+                "project/verifier-link",
+            )
+            self._git(
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "add a Git symlink entry",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "reject symlinks"):
+                FrontendEnvironment()._materialize(
+                    source,
+                    self._git(source, "rev-parse", "HEAD"),
+                    root / "episode" / "workspace",
+                    "project",
+                )
+
+
 class EpisodeFinalizationTests(unittest.TestCase):
     def prepare_environment(
         self,
