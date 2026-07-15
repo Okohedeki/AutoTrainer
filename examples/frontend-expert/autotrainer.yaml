@@ -1,0 +1,160 @@
+schema_version: 1
+
+project:
+  name: polished-frontend-9b
+  seed: 42
+  artifact_dir: ./.autotrainer
+
+# Pinned from the model host on 2026-07-14. Update intentionally with
+# `autotrainer lock`; never publish a run against a moving branch.
+model:
+  provider: huggingface
+  id: Qwen/Qwen3.5-9B
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  loader: qwen3_5_text
+  trust_remote_code: false
+  dtype: bfloat16
+  max_sequence_length: 2048
+  quantization:
+    method: bitsandbytes-4bit
+    quant_type: nf4
+    double_quant: true
+    compute_dtype: bfloat16
+
+sources:
+  - id: preferred-pricing-ui
+    kind: repository
+    uri: ../..
+    revision: HEAD
+    partition: train
+    roles:
+      - style
+      - rl_seed
+    include:
+      - examples/frontend-expert/fixture-site/**
+    exclude:
+      - node_modules/**
+      - dist/**
+    runtime:
+      preset: react-vite-tailwind
+      working_directory: examples/frontend-expert/fixture-site
+      install: cp -a /opt/autotrainer/frontend-deps/node_modules ./node_modules
+      build: npm run build
+      test: npm test
+      browser_test: npm run test:browser
+    license:
+      spdx: Apache-2.0
+      attribution: AutoTrainer frontend-expert example
+
+  - id: accepted-frontend-demonstrations
+    kind: sft_jsonl
+    uri: ./data/sft-messages.jsonl
+    partition: train
+    roles:
+      - demonstrations
+    license:
+      spdx: Apache-2.0
+      attribution: AutoTrainer frontend-expert example
+
+  - id: frontend-rl-tasks
+    kind: task_pack
+    uri: ./tasks/train
+    partition: train
+    roles:
+      - rl_tasks
+    license:
+      spdx: Apache-2.0
+      attribution: AutoTrainer frontend-expert example
+
+qlora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  bias: none
+  target_modules: all-linear
+
+sft:
+  enabled: true
+  dataset: ./.autotrainer/compiled/sft/train.jsonl
+  output_dir: ./.autotrainer/runs/sft
+  max_length: 2048
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.0001
+  num_train_epochs: 1
+  bf16: true
+  tf32: true
+  gradient_checkpointing: true
+  completion_only_loss: true
+  assistant_only_loss: true
+  packing: false
+  seed: 42
+  logging_steps: 5
+  save_steps: 50
+
+grpo:
+  enabled: true
+  algorithm: grpo
+  dataset: ./.autotrainer/compiled/rl/train.jsonl
+  sft_adapter: ./.autotrainer/runs/sft
+  output_dir: ./.autotrainer/runs/grpo
+  max_steps: 500
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 2
+  num_generations: 2
+  generation_batch_size: 2
+  max_completion_length: 2048
+  max_tool_calling_iterations: 8
+  learning_rate: 0.00001
+  beta: 0.0
+  loss_type: dapo
+  bf16: true
+  tf32: true
+  gradient_checkpointing: true
+  use_vllm: false
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  seed: 42
+
+environment:
+  factory: autotrainer.environments.frontend:FrontendEnvironment
+  backend: docker
+  image: autotrainer/frontend-runtime:0.1
+  network: none
+  max_tool_output_chars: 20000
+  episode_timeout_seconds: 900
+
+evaluation:
+  task_pack: ./tasks/evaluation
+  candidates:
+    - base
+    - sft
+    - grpo
+  holdout_unit: repository
+  primary_metric: verified_task_success
+  metrics:
+    - verified_task_success
+    - build_rate
+    - task_pass_rate
+    - regression_rate
+    - accessibility
+    - responsive
+    - tokens_per_success
+    - wall_time_per_success
+  fable_a_b:
+    enabled: false
+    blind_review: true
+
+package:
+  name: polished-frontend-9b
+  type: lora_adapter
+  winner: best
+  output_dir: ./.autotrainer/packages/polished-frontend-9b
+  include:
+    - adapter
+    - system_prompt
+    - tool_schema
+    - evaluation_report
+    - source_license_manifest
+    - resolved_recipe

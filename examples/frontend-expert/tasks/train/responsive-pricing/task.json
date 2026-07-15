@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "task": {
+    "id": "responsive-pricing-train-001",
+    "instruction": "Repair the pricing grid so the cards form one readable column below 768px while preserving the existing three-column desktop layout and purchase actions.",
+    "sourceId": "preferred-pricing-ui",
+    "startingRevision": "locked",
+    "split": "train",
+    "groupId": "pricing-fixture-family"
+  },
+  "runtime": {
+    "workingDirectory": "examples/frontend-expert/fixture-site",
+    "install": "cp -a /opt/autotrainer/frontend-deps/node_modules ./node_modules",
+    "build": "npm run build",
+    "tests": "npm test",
+    "browserTests": "npm run test:browser"
+  },
+  "tools": ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
+  "verifier": {
+    "bundle": "./verifier",
+    "command": "node /autotrainer-verifier/verify.mjs",
+    "reportPath": ".autotrainer-verifier-report.json"
+  },
+  "rewards": {
+    "buildGate": true,
+    "regressionGate": true,
+    "regressionSafety": 0.2,
+    "taskTests": 0.35,
+    "responsiveRules": 0.2,
+    "designRules": 0.15,
+    "patchQuality": 0.1
+  },
+  "limits": {
+    "toolCalls": 40,
+    "tokenBudget": 12000,
+    "commandTimeoutSeconds": 120,
+    "episodeTimeoutSeconds": 900,
+    "networkAccess": false
+  }
+}

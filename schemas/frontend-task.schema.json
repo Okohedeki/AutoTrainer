@@ -6,27 +6,31 @@
   "additionalProperties": false,
   "required": ["version", "task", "runtime", "tools", "rewards", "limits"],
   "properties": {
-    "version": { "const": "0.1" },
+    "version": { "enum": ["0.1", "1.0"] },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "instruction", "startingSnapshot", "split"],
+      "required": ["id", "instruction", "split"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "instruction": { "type": "string", "minLength": 20 },
         "startingSnapshot": { "type": "string", "minLength": 1 },
-        "split": { "enum": ["train", "evaluation"] }
+        "sourceId": { "type": "string", "minLength": 1 },
+        "startingRevision": { "type": "string", "minLength": 1 },
+        "split": { "enum": ["train", "evaluation"] },
+        "groupId": { "type": "string", "minLength": 1 }
       }
     },
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stack", "install", "build", "tests", "browserTests"],
+      "required": ["install", "build", "tests", "browserTests"],
       "properties": {
-        "stack": { "const": "react-vite-tailwind" },
+        "stack": { "type": "string", "minLength": 1 },
+        "workingDirectory": { "type": "string", "minLength": 1 },
         "install": { "type": "string" },
-        "build": { "type": "string" },
-        "tests": { "type": "string" },
+        "build": { "type": "string", "minLength": 1 },
+        "tests": { "type": "string", "minLength": 1 },
         "browserTests": { "type": "string" }
       }
     },
@@ -34,12 +38,40 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "enum": ["read_file", "search_code", "apply_patch", "run_command", "inspect_browser"] }
+      "items": {
+        "enum": [
+          "read_file",
+          "search_code",
+          "apply_patch",
+          "run_command",
+          "inspect_browser",
+          "list_files",
+          "run_check"
+        ]
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle", "command", "reportPath"],
+      "properties": {
+        "bundle": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "reportPath": { "type": "string", "minLength": 1 }
+      }
     },
     "rewards": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["buildGate", "regressionGate", "regressionSafety", "taskTests", "responsiveRules", "designRules", "patchQuality"],
+      "required": [
+        "buildGate",
+        "regressionGate",
+        "regressionSafety",
+        "taskTests",
+        "responsiveRules",
+        "designRules",
+        "patchQuality"
+      ],
       "properties": {
         "buildGate": { "const": true },
         "regressionGate": { "const": true },
@@ -58,8 +90,36 @@
         "toolCalls": { "type": "integer", "minimum": 1 },
         "tokenBudget": { "type": "integer", "minimum": 256 },
         "commandTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "episodeTimeoutSeconds": { "type": "integer", "minimum": 1 },
         "networkAccess": { "const": false }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "version": { "const": "0.1" } } },
+      "then": {
+        "properties": {
+          "task": { "required": ["startingSnapshot"] },
+          "runtime": { "required": ["stack"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "version": { "const": "1.0" } } },
+      "then": {
+        "required": ["verifier"],
+        "properties": {
+          "task": { "required": ["sourceId", "startingRevision", "groupId"] },
+          "runtime": { "required": ["workingDirectory"] },
+          "limits": { "required": ["episodeTimeoutSeconds"] },
+          "tools": {
+            "items": {
+              "enum": ["list_files", "read_file", "search_code", "apply_patch", "run_check"]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

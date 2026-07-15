@@ -1,0 +1,39 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #172033;
+  background: #f6f7fb;
+  --space: 1.25rem;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(70rem, calc(100% - 2rem));
+  margin: 4rem auto;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space);
+}
+
+.pricing-card {
+  min-width: 0;
+  padding: var(--space);
+  border: 1px solid #d8ddea;
+  border-radius: 1rem;
+  background: white;
+}
+
+.price {
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.price span {
+  font-size: 0.875rem;
+  font-weight: 400;
+}

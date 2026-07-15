@@ -38,8 +38,19 @@ def _validate_rate(name: str, value: float) -> None:
         raise ValueError(f"{name} must be between 0 and 1")
 
 
-def score_rollout(report: RolloutVerifierReport) -> RewardBreakdown:
+def score_rollout(
+    report: RolloutVerifierReport,
+    weights: dict[str, float] | None = None,
+) -> RewardBreakdown:
     """Convert verifier signals into the scalar reward consumed by GRPO."""
+
+    active_weights = WEIGHTS if weights is None else weights
+    if set(active_weights) != set(WEIGHTS):
+        raise ValueError(f"weights must contain exactly: {', '.join(sorted(WEIGHTS))}")
+    if any(not isfinite(value) or value < 0 or value > 1 for value in active_weights.values()):
+        raise ValueError("reward weights must be finite and between 0 and 1")
+    if abs(sum(active_weights.values()) - 1) > 1e-8:
+        raise ValueError("reward weights must sum to 1")
 
     rates = {
         "regression_safety": report.regression_pass_rate,
@@ -52,7 +63,7 @@ def score_rollout(report: RolloutVerifierReport) -> RewardBreakdown:
         _validate_rate(name, value)
 
     signals = {
-        name: round(value * WEIGHTS[name], 4)
+        name: round(value * active_weights[name], 4)
         for name, value in rates.items()
     }
 
