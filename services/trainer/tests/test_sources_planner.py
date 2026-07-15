@@ -41,6 +41,17 @@ def create_repository(root: Path, name: str = "frontend") -> tuple[Path, str]:
     return repository, run_git(repository, "rev-parse", "HEAD")
 
 
+def clone_repository(source: Path, destination: Path) -> Path:
+    subprocess.run(
+        ["git", "clone", "--quiet", str(source), str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return destination
+
+
 def create_bare_remote(
     root: Path, name: str = "remote", *, include_tree_symlink: bool = False
 ) -> tuple[Path, str]:
@@ -134,10 +145,87 @@ class SourceScanTests(unittest.TestCase):
 
             source = scan["sources"][0]
             self.assertEqual(source["commit"], commit)
+            self.assertRegex(source["repository_identity"], r"^sha256:[0-9a-f]{64}$")
             self.assertEqual(source["eligible_file_count"], 2)
             self.assertEqual([item["path"] for item in source["files"]], ["src/App.tsx", "src/styles.css"])
             self.assertTrue(source["dirty"])
             self.assertFalse(marker.exists())
+
+    def test_repository_aliases_share_a_credential_safe_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, commit = create_repository(root)
+            first = repository_source(repository, commit, "training-site")
+            second = repository_source(repository / ".", commit, "evaluation-site")
+
+            scan = scan_sources({"sources": [first, second]}, root)
+
+            identities = {
+                source["id"]: source["repository_identity"]
+                for source in scan["sources"]
+            }
+            self.assertEqual(identities["training-site"], identities["evaluation-site"])
+            # The scan artifact records a digest, never a local path or a
+            # credential-bearing remote URL.
+            self.assertNotIn(str(repository), identities["training-site"])
+
+    def test_equivalent_https_ssh_and_scp_origins_share_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, commit = create_repository(root, "upstream")
+            variants = (
+                "https://token:secret@GitHub.com/Org/Frontend.git/?access_token=hidden",
+                "ssh://git@github.com:22/org/frontend.git/",
+                "git@github.com:ORG/FRONTEND.git",
+                "https://github.com/org/frontend/",
+            )
+            sources = []
+            for index, origin in enumerate(variants):
+                clone = clone_repository(upstream, root / f"clone-{index}")
+                run_git(clone, "remote", "set-url", "origin", origin)
+                sources.append(repository_source(clone, commit, f"source-{index}"))
+
+            scan = scan_sources({"sources": sources}, root)
+
+            identities = {source["repository_identity"] for source in scan["sources"]}
+            self.assertEqual(len(identities), 1)
+            self.assertRegex(next(iter(identities)), r"^sha256:[0-9a-f]{64}$")
+            serialized = json.dumps(scan)
+            self.assertNotIn("token:secret", serialized)
+            self.assertNotIn("access_token=hidden", serialized)
+
+    def test_separate_clones_at_different_commits_share_remote_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, first_commit = create_repository(root, "upstream")
+            first_clone = clone_repository(upstream, root / "first-clone")
+            (upstream / "src" / "App.tsx").write_text(
+                "export function App() { return <main>Second</main>; }\n",
+                encoding="utf-8",
+            )
+            run_git(upstream, "add", ".")
+            run_git(upstream, "commit", "-m", "second fixture")
+            second_commit = run_git(upstream, "rev-parse", "HEAD")
+            second_clone = clone_repository(upstream, root / "second-clone")
+
+            scan = scan_sources(
+                {
+                    "sources": [
+                        repository_source(first_clone, first_commit, "training-site"),
+                        {
+                            **repository_source(
+                                second_clone, second_commit, "evaluation-site"
+                            ),
+                            "partition": "evaluation",
+                        },
+                    ]
+                },
+                root,
+            )
+
+            first, second = scan["sources"]
+            self.assertNotEqual(first["commit"], second["commit"])
+            self.assertEqual(first["repository_identity"], second["repository_identity"])
 
     def test_remote_repository_requires_explicit_materialization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

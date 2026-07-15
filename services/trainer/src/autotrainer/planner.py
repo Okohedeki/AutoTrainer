@@ -91,6 +91,95 @@ def _task_rows(sources: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return rows
 
 
+def _repository_holdout_blockers(
+    sources: Sequence[Mapping[str, Any]],
+    task_rows: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Prove repository isolation from scanner-derived identities.
+
+    A source ID is only a user-facing label, so it cannot be the holdout key.
+    Repository declarations count as exposure in their declared partition, and
+    task references count as exposure in the task split. This also catches an
+    evaluation task that accidentally points back to a train-partition source.
+    """
+
+    repositories = {
+        _string(source.get("id")): source
+        for source in sources
+        if source.get("kind") == "repository" and _string(source.get("id"))
+    }
+    exposures: dict[str, set[str]] = {
+        source_id: {_string(source.get("partition"))}
+        for source_id, source in repositories.items()
+        if _string(source.get("partition")) in {"train", "evaluation"}
+    }
+    missing_sources: set[str] = set()
+    for task in task_rows:
+        source_id = _string(task.get("snapshot_source_id"))
+        split = _string(task.get("split"))
+        if not source_id or split not in {"train", "evaluation"}:
+            continue
+        if source_id not in repositories:
+            missing_sources.add(source_id)
+            continue
+        exposures.setdefault(source_id, set()).add(split)
+
+    blockers: list[str] = []
+    if missing_sources:
+        blockers.append(
+            "repository holdout cannot be verified because task source(s) have no scanned "
+            "repository identity: "
+            + ", ".join(sorted(missing_sources))
+        )
+
+    exposed_ids = {
+        source_id
+        for source_id, partitions in exposures.items()
+        if partitions & {"train", "evaluation"}
+    }
+    missing_identities = sorted(
+        source_id
+        for source_id in exposed_ids
+        if not _string(repositories[source_id].get("repository_identity"))
+    )
+    if missing_identities:
+        # Fail closed: an unresolved/legacy scan must never silently downgrade
+        # repository holdout back to comparing user-controlled source IDs.
+        blockers.append(
+            "repository holdout cannot be verified because scanned source(s) lack "
+            "repository_identity: "
+            + ", ".join(missing_identities)
+        )
+
+    train_ids = sorted(
+        source_id for source_id, partitions in exposures.items() if "train" in partitions
+    )
+    evaluation_ids = sorted(
+        source_id
+        for source_id, partitions in exposures.items()
+        if "evaluation" in partitions
+    )
+    collisions: set[str] = set()
+    for train_id in train_ids:
+        train = repositories[train_id]
+        for evaluation_id in evaluation_ids:
+            held_out = repositories[evaluation_id]
+            train_identity = _string(train.get("repository_identity"))
+            evaluation_identity = _string(held_out.get("repository_identity"))
+            train_commit = _string(train.get("commit")).lower()
+            evaluation_commit = _string(held_out.get("commit")).lower()
+            shared_identity = bool(train_identity) and train_identity == evaluation_identity
+            shared_commit = bool(train_commit) and train_commit == evaluation_commit
+            if shared_identity or shared_commit:
+                reason = "repository identity" if shared_identity else "exact commit"
+                collisions.add(f"{train_id} and {evaluation_id} share {reason}")
+    if collisions:
+        blockers.append(
+            "repository holdout is violated: " + "; ".join(sorted(collisions))
+        )
+    return blockers
+
+
 def _deduplicate(values: Sequence[str]) -> list[str]:
     return sorted(dict.fromkeys(value for value in values if value))
 
@@ -383,16 +472,10 @@ def build_plan(
     )
     evaluation_repetitions = evaluation_config.get("repetitions")
     evaluation_seeds = evaluation_config.get("seeds")
-    project_config = _mapping(config.get("project"))
-    artifact_reference = project_config.get(
-        "artifact_dir", project_config.get("output_dir", ".autotrainer")
-    )
-    artifact_path = _project_path(root, artifact_reference)
-    compiled_evaluation_path = (
-        artifact_path / "compiled" / "rl" / "evaluation.jsonl"
-        if artifact_path is not None
-        else None
-    )
+    evaluation_dataset_reference = evaluation_config.get("dataset")
+    # The final benchmark path is an explicit contract, not an artifact-dir
+    # convention and never the GRPO trainer's optional validation dataset.
+    compiled_evaluation_path = _project_path(root, evaluation_dataset_reference)
     arm_plans: dict[str, dict[str, Any]] = {}
     suite_plans: dict[str, dict[str, Any]] = {}
     if evaluation_requested:
@@ -495,7 +578,7 @@ def build_plan(
 
         if compiled_evaluation_path is None:
             evaluation_blockers.append(
-                "project.artifact_dir is required to locate compiled evaluation tasks"
+                "evaluation.dataset is required to locate compiled evaluation tasks"
             )
         elif not compiled_evaluation_path.is_file():
             evaluation_blockers.append(
@@ -549,22 +632,10 @@ def build_plan(
             "task ids appear in both train and evaluation: " + ", ".join(duplicate_task_ids)
         )
     holdout_unit = _string(evaluation_config.get("holdout_unit"))
-    if holdout_unit in {"repository", "project", "project_family"}:
-        train_repositories = {
-            _string(task.get("snapshot_source_id"))
-            for task in train_rows
-            if task.get("snapshot_source_id")
-        }
-        evaluation_repositories = {
-            _string(task.get("snapshot_source_id"))
-            for task in evaluation_rows
-            if task.get("snapshot_source_id")
-        }
-        leaked = sorted(train_repositories & evaluation_repositories)
-        if leaked:
-            evaluation_blockers.append(
-                f"{holdout_unit} holdout is violated by source(s): " + ", ".join(leaked)
-            )
+    if holdout_unit == "repository":
+        evaluation_blockers.extend(
+            _repository_holdout_blockers(declared_sources, task_rows)
+        )
 
     repetitions_for_plan = (
         evaluation_repetitions

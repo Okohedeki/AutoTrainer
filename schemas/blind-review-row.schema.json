@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autotrainer.local/schemas/blind-review-row.schema.json",
+  "title": "AutoTrainer blind review JSONL row v1",
+  "$comment": "Validate each line independently. Arm identity is intentionally absent from the reviewer-facing row.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pair_id", "reviewer_id", "choice"],
+  "properties": {
+    "pair_id": { "type": "string", "pattern": "^pair-[0-9a-f]{24}$" },
+    "reviewer_id": { "type": "string", "minLength": 1 },
+    "choice": { "enum": ["left", "right", "tie", "both_fail"] }
+  }
+}

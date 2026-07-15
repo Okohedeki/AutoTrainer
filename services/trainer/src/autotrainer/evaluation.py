@@ -15,8 +15,10 @@ import math
 import os
 from pathlib import Path
 import random
-import shutil
+import re
+import stat
 import subprocess
+import tempfile
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .benchmark import compare_benchmark, render_benchmark_markdown
@@ -30,6 +32,9 @@ RESULT_COMPONENTS = (
     "responsive_rules",
     "task_tests",
 )
+RESULT_ENVELOPE_NAMES = ("result.json",)
+RESULT_ENVELOPE_SUFFIX = ".result.json"
+MAX_RESULT_ARTIFACT_BYTES = 10 * 1024 * 1024
 
 
 class EvaluationError(ValueError):
@@ -37,6 +42,8 @@ class EvaluationError(ValueError):
 
 
 def _canonical(value: Any) -> bytes:
+    # Every identity in the evaluation tree is content-addressed. Compact,
+    # sorted JSON keeps hashes stable when mappings arrive in a different order.
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -61,6 +68,8 @@ def _sha256_file(path: Path) -> str:
 def _sha256_tree(path: Path) -> str:
     if not path.is_dir():
         raise EvaluationError(f"adapter directory does not exist: {path}")
+    # Hash relative paths as well as bytes: renaming an adapter file changes the
+    # load contract even when its contents happen to be identical.
     entries: list[dict[str, str]] = []
     for candidate in sorted(path.rglob("*")):
         if candidate.is_symlink():
@@ -87,6 +96,172 @@ def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvaluationError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _exact_mapping(
+    value: Any,
+    field: str,
+    *,
+    required: Iterable[str],
+    optional: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Apply the published schemas' closed-object contract without a runtime dependency."""
+
+    result = _mapping(value, field)
+    required_keys = set(required)
+    allowed_keys = required_keys | set(optional)
+    missing = sorted(required_keys - set(result))
+    unknown = sorted(set(result) - allowed_keys)
+    if missing:
+        raise EvaluationError(f"{field} is missing required field(s): {', '.join(missing)}")
+    if unknown:
+        raise EvaluationError(f"{field} contains unknown field(s): {', '.join(unknown)}")
+    return result
+
+
+def _schema_string(value: Any, field: str, pattern: str | None = None) -> str:
+    if not isinstance(value, str) or not value:
+        raise EvaluationError(f"{field} must be a non-empty string")
+    if pattern is not None and re.fullmatch(pattern, value) is None:
+        raise EvaluationError(f"{field} does not match the published schema")
+    return value
+
+
+def _schema_non_negative_integer(value: Any, field: str) -> int:
+    # JSON Schema treats 1 and 1.0 as the same integer value. Preserve that
+    # behavior while rejecting booleans and non-finite Python JSON extensions.
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or value < 0
+        or not float(value).is_integer()
+    ):
+        raise EvaluationError(f"{field} must be a non-negative integer")
+    return int(value)
+
+
+def _validate_result_envelope(value: Any, field: str) -> dict[str, Any]:
+    """Mirror ``schemas/evaluation-result.schema.json`` at the ingestion boundary."""
+
+    result = _exact_mapping(
+        value,
+        field,
+        required=(
+            "schema_version",
+            "plan_id",
+            "trial_id",
+            "suite_id",
+            "arm_id",
+            "task_id",
+            "repetition",
+            "seed",
+            "status",
+            "producer",
+            "usage",
+            "output",
+        ),
+    )
+    if isinstance(result["schema_version"], bool) or result["schema_version"] != SCHEMA_VERSION:
+        raise EvaluationError(f"{field}.schema_version must be {SCHEMA_VERSION}")
+    _schema_string(result["plan_id"], f"{field}.plan_id", r"sha256:[0-9a-f]{64}")
+    for key in ("trial_id", "arm_id", "task_id"):
+        _schema_string(result[key], f"{field}.{key}")
+    suite_id = _schema_string(result["suite_id"], f"{field}.suite_id")
+    if suite_id not in {"model_benchmark", "fable_ab"}:
+        raise EvaluationError(f"{field}.suite_id must be model_benchmark or fable_ab")
+    _schema_non_negative_integer(result["repetition"], f"{field}.repetition")
+    _schema_non_negative_integer(result["seed"], f"{field}.seed")
+    status = _schema_string(result["status"], f"{field}.status")
+    if status not in {"completed", "failed", "timeout"}:
+        raise EvaluationError(f"{field}.status must be completed, failed, or timeout")
+
+    producer = _exact_mapping(
+        result["producer"],
+        f"{field}.producer",
+        required=(
+            "name",
+            "version",
+            "orchestration_sha256",
+            "model_revision",
+            "adapter_sha256",
+            "seed_honored",
+            "fallback_models_used",
+        ),
+    )
+    _schema_string(producer["name"], f"{field}.producer.name")
+    _schema_string(producer["version"], f"{field}.producer.version")
+    _schema_string(
+        producer["orchestration_sha256"],
+        f"{field}.producer.orchestration_sha256",
+        r"sha256:[0-9a-fA-F]{64}",
+    )
+    _schema_string(
+        producer["model_revision"],
+        f"{field}.producer.model_revision",
+        r"[0-9a-fA-F]{40,64}",
+    )
+    adapter_digest = producer["adapter_sha256"]
+    if adapter_digest is not None:
+        _schema_string(
+            adapter_digest,
+            f"{field}.producer.adapter_sha256",
+            r"[0-9a-fA-F]{64}",
+        )
+    if producer["seed_honored"] is not True:
+        raise EvaluationError(f"{field}.producer.seed_honored must be true")
+    if producer["fallback_models_used"] is not False:
+        raise EvaluationError(f"{field}.producer.fallback_models_used must be false")
+
+    usage = _exact_mapping(
+        result["usage"],
+        f"{field}.usage",
+        required=(),
+        optional=("input_tokens", "output_tokens", "tool_calls", "wall_time_seconds"),
+    )
+    for key in ("input_tokens", "output_tokens", "tool_calls"):
+        if key in usage:
+            _schema_non_negative_integer(usage[key], f"{field}.usage.{key}")
+    if "wall_time_seconds" in usage:
+        duration = usage["wall_time_seconds"]
+        if (
+            not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or not math.isfinite(float(duration))
+            or duration < 0
+        ):
+            raise EvaluationError(f"{field}.usage.wall_time_seconds must be non-negative")
+
+    output = _exact_mapping(
+        result["output"],
+        f"{field}.output",
+        required=(),
+        optional=("patch", "transcript", "review_artifact"),
+    )
+    for key, path_value in output.items():
+        path_text = _schema_string(path_value, f"{field}.output.{key}")
+        # Match the schema using both slash styles even on non-Windows hosts.
+        if re.search(r"^(?:[A-Za-z]:|[/\\])", path_text) or re.search(
+            r"(?:^|[/\\])\.\.(?:[/\\]|$)", path_text
+        ):
+            raise EvaluationError(f"{field}.output.{key} must be a relative file path")
+    return result
+
+
+def _validate_review_row(value: Any, field: str) -> dict[str, Any]:
+    """Mirror ``schemas/blind-review-row.schema.json`` before normalization."""
+
+    row = _exact_mapping(
+        value,
+        field,
+        required=("pair_id", "reviewer_id", "choice"),
+    )
+    _schema_string(row["pair_id"], f"{field}.pair_id", r"pair-[0-9a-f]{24}")
+    _schema_string(row["reviewer_id"], f"{field}.reviewer_id")
+    choice = _schema_string(row["choice"], f"{field}.choice")
+    if choice not in {"left", "right", "tie", "both_fail"}:
+        raise EvaluationError(f"{field}.choice is not a supported blind-review choice")
+    return row
 
 
 def _artifact_dir(config: Mapping[str, Any], root: Path) -> Path:
@@ -126,16 +301,170 @@ def _read_jsonl(path: Path, field: str) -> list[dict[str, Any]]:
             f"invalid JSON at {path}:{error.lineno}:{error.colno}: {error.msg}"
         ) from error
     if not rows:
-        raise EvaluationError(f"{field} contains no evaluation tasks: {path}")
+        raise EvaluationError(f"{field} contains no records: {path}")
     return rows
 
 
 def _evaluation_dataset(config: Mapping[str, Any], root: Path) -> Path:
+    evaluation = _mapping(config.get("evaluation", {}), "evaluation")
+    configured = evaluation.get("dataset")
+    if not configured:
+        raise EvaluationError("evaluation.dataset is required")
+    return _resolve_local(root, configured, "evaluation.dataset")
+
+
+def _training_dataset(config: Mapping[str, Any], root: Path) -> Path:
     grpo = _mapping(config.get("grpo", {}), "grpo")
-    configured = grpo.get("eval_dataset")
-    if configured:
-        return _resolve_local(root, configured, "grpo.eval_dataset")
-    return _artifact_dir(config, root) / "compiled" / "rl" / "evaluation.jsonl"
+    configured = grpo.get("dataset")
+    if not configured:
+        raise EvaluationError(
+            "grpo.dataset is required to prove repository holdout before evaluation"
+        )
+    return _resolve_local(root, configured, "grpo.dataset")
+
+
+def _repository_keys(
+    rows: Sequence[Mapping[str, Any]], field: str
+) -> tuple[set[str], set[str]]:
+    """Extract compiler-attested repository identities and locked revisions."""
+
+    identities: set[str] = set()
+    revisions: set[str] = set()
+    for index, row in enumerate(rows):
+        task_id = str(row.get("task_id", f"row-{index + 1}"))
+        identity = row.get("source_repository_identity")
+        if not isinstance(identity, str) or not identity.strip():
+            # Evaluation may be invoked directly, without the static planner.
+            # Missing compiler provenance therefore fails closed here.
+            raise EvaluationError(
+                f"{field} task {task_id!r} lacks source_repository_identity; "
+                "re-run source scan and compilation"
+            )
+        revision = row.get("source_revision")
+        if not isinstance(revision, str) or not revision.strip():
+            raise EvaluationError(
+                f"{field} task {task_id!r} lacks a locked source_revision; "
+                "re-run source scan and compilation"
+            )
+        identities.add(identity.strip())
+        revisions.add(revision.strip().lower())
+    return identities, revisions
+
+
+def _compiler_repository_provenance(
+    config: Mapping[str, Any],
+    root: Path,
+    training_dataset: Path,
+    evaluation_dataset: Path,
+) -> dict[str, Any]:
+    """Verify the compiler ledger for every declared repository exposure."""
+
+    report_path = _artifact_dir(config, root) / "compiled" / "compile-report.json"
+    if not report_path.is_file():
+        raise EvaluationError(
+            "compiler provenance report is missing; run `autotrainer compile` before evaluation: "
+            f"{report_path}"
+        )
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(f"compiler provenance report is unreadable: {report_path}: {error}") from error
+    if not isinstance(report, Mapping) or report.get("errors"):
+        raise EvaluationError("compiler provenance report is invalid or records compilation errors")
+
+    artifacts = report.get("artifacts")
+    hashes = report.get("artifact_sha256")
+    if not isinstance(artifacts, Mapping) or not isinstance(hashes, Mapping):
+        raise EvaluationError("compiler provenance report lacks artifact paths or SHA-256 digests")
+    for key, expected_path in (
+        ("rl_train", training_dataset),
+        ("rl_evaluation", evaluation_dataset),
+    ):
+        reported_value = artifacts.get(key)
+        if not isinstance(reported_value, str) or not reported_value.strip():
+            raise EvaluationError(f"compiler provenance report lacks {key} artifact")
+        reported_path = Path(reported_value).expanduser()
+        if not reported_path.is_absolute():
+            reported_path = root / reported_path
+        if reported_path.resolve() != expected_path.resolve():
+            raise EvaluationError(
+                f"configured {key} dataset does not match compiler provenance: "
+                f"{expected_path} != {reported_path.resolve()}"
+            )
+        expected_digest = hashes.get(key)
+        actual_digest = _sha256_file(expected_path)
+        if not isinstance(expected_digest, str) or expected_digest != actual_digest:
+            raise EvaluationError(
+                f"compiled {key} dataset bytes do not match compiler provenance"
+            )
+
+    raw_exposures = report.get("repository_exposures")
+    if not isinstance(raw_exposures, list) or not raw_exposures:
+        raise EvaluationError("compiler provenance report has no repository exposure ledger")
+    exposures: list[dict[str, str]] = []
+    for index, raw in enumerate(raw_exposures):
+        if not isinstance(raw, Mapping):
+            raise EvaluationError(f"compiler repository exposure {index} must be a mapping")
+        partition = raw.get("partition")
+        identity = raw.get("repository_identity")
+        commit = raw.get("commit")
+        source_id = raw.get("source_id")
+        if partition not in {"train", "evaluation"}:
+            raise EvaluationError(
+                f"compiler repository exposure {index} has invalid partition {partition!r}"
+            )
+        if not isinstance(identity, str) or not identity.strip():
+            raise EvaluationError(
+                f"compiler repository exposure {index} lacks repository_identity"
+            )
+        if not isinstance(commit, str) or not commit.strip():
+            raise EvaluationError(f"compiler repository exposure {index} lacks a locked commit")
+        exposures.append(
+            {
+                "source_id": str(source_id or f"source-{index + 1}"),
+                "partition": str(partition),
+                "repository_identity": identity.strip(),
+                "commit": commit.strip().lower(),
+            }
+        )
+
+    train = [item for item in exposures if item["partition"] == "train"]
+    held_out = [item for item in exposures if item["partition"] == "evaluation"]
+    collisions: set[str] = set()
+    for train_item in train:
+        for evaluation_item in held_out:
+            shared_identity = (
+                train_item["repository_identity"]
+                == evaluation_item["repository_identity"]
+            )
+            shared_commit = train_item["commit"] == evaluation_item["commit"]
+            if shared_identity or shared_commit:
+                reason = "repository identity" if shared_identity else "exact commit"
+                collisions.add(
+                    f"{train_item['source_id']} and {evaluation_item['source_id']} share {reason}"
+                )
+    if collisions:
+        raise EvaluationError(
+            "repository holdout is violated by compiler-frozen repository exposure: "
+            + "; ".join(sorted(collisions))
+        )
+
+    # Sorting makes the plan independent of scan declaration order while the
+    # report digest below still detects any byte-level provenance replacement.
+    exposures.sort(
+        key=lambda item: (
+            item["partition"],
+            item["repository_identity"],
+            item["commit"],
+            item["source_id"],
+        )
+    )
+    return {
+        "path": _relative_or_text(report_path, root),
+        "sha256": _sha256_file(report_path),
+        "fingerprint": report.get("fingerprint"),
+        "repository_exposures": exposures,
+    }
 
 
 def _task_identity(row: Mapping[str, Any], index: int) -> tuple[str, dict[str, Any]]:
@@ -157,6 +486,8 @@ def _resolved_arm(
     config: Mapping[str, Any],
     root: Path,
 ) -> dict[str, Any]:
+    # "project" means the exact locked base model at the top level. Reference
+    # arms may instead pin a different 9B quality bar without changing training.
     model_value = arm.get("model")
     if model_value == "project":
         model = _mapping(config.get("model", {}), "model")
@@ -186,6 +517,8 @@ def _resolved_arm(
         },
         "adapter": None,
     }
+    # The adapter digest, not merely its directory name, is part of the plan.
+    # Re-training therefore creates a new plan even if output paths are reused.
     adapter_value = arm.get("adapter")
     if adapter_value is not None:
         adapter = _mapping(adapter_value, f"evaluation.arms.{arm_id}.adapter")
@@ -214,6 +547,8 @@ def _resolved_runner(suite_id: str, suite: Mapping[str, Any]) -> dict[str, Any]:
     version = _text(runner.get("version"), f"evaluation.suites.{suite_id}.runner.version")
     if version.startswith("REPLACE_WITH_"):
         raise EvaluationError(f"evaluation suite {suite_id!r} still contains a placeholder runner version")
+    # Model weights alone do not define an agent run. The orchestrator digest
+    # freezes prompts, tool routing, fallbacks, and other behavior around them.
     orchestration = _text(
         runner.get("orchestration_sha256"),
         f"evaluation.suites.{suite_id}.runner.orchestration_sha256",
@@ -255,6 +590,14 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     arms_value = _mapping(evaluation.get("arms", {}), "evaluation.arms")
     suites_value = _mapping(evaluation.get("suites", {}), "evaluation.suites")
     fairness = _mapping(evaluation.get("fairness", {}), "evaluation.fairness")
+    decisions = _mapping(evaluation.get("decisions", {}), "evaluation.decisions")
+    confidence = decisions.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not 0.5 < float(confidence) < 1.0
+    ):
+        raise EvaluationError("evaluation.decisions.confidence must be between 0.5 and 1")
     repetitions = evaluation.get("repetitions")
     seeds = evaluation.get("seeds")
     if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
@@ -264,8 +607,49 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     ):
         raise EvaluationError("evaluation.seeds must contain one non-negative integer per repetition")
 
+    if evaluation.get("holdout_unit") != "repository":
+        raise EvaluationError("evaluation.holdout_unit must be repository")
+
+    # The static planner is advisory and can be bypassed by invoking evaluation
+    # directly. Compare the two compiled datasets again at this execution gate.
+    # IDs are labels; scanner-derived identity and exact revision are provenance.
+    training_dataset_path = _training_dataset(config, root)
     dataset_path = _evaluation_dataset(config, root)
+    grpo = _mapping(config.get("grpo", {}), "grpo")
+    training_eval_value = grpo.get("eval_dataset")
+    if training_eval_value:
+        training_eval_path = _resolve_local(root, training_eval_value, "grpo.eval_dataset")
+        if training_eval_path == dataset_path:
+            # Public library callers can bypass semantic config validation. The
+            # execution gate therefore repeats this anti-leakage invariant.
+            raise EvaluationError(
+                "grpo.eval_dataset must be separate from evaluation.dataset; "
+                "training validation cannot reuse the final benchmark"
+            )
+    training_rows = _read_jsonl(training_dataset_path, "compiled GRPO training dataset")
     task_rows = _read_jsonl(dataset_path, "compiled evaluation dataset")
+    training_identities, training_revisions = _repository_keys(
+        training_rows, "compiled GRPO training dataset"
+    )
+    evaluation_identities, evaluation_revisions = _repository_keys(
+        task_rows, "compiled evaluation dataset"
+    )
+    compiler_provenance = _compiler_repository_provenance(
+        config, root, training_dataset_path, dataset_path
+    )
+    shared_identities = sorted(training_identities & evaluation_identities)
+    shared_revisions = sorted(training_revisions & evaluation_revisions)
+    if shared_identities or shared_revisions:
+        reasons: list[str] = []
+        if shared_identities:
+            reasons.append("repository identity " + ", ".join(shared_identities))
+        if shared_revisions:
+            reasons.append("exact source revision " + ", ".join(shared_revisions))
+        raise EvaluationError(
+            "repository holdout is violated; training and evaluation datasets share "
+            + " and ".join(reasons)
+        )
+
     tasks: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(task_rows):
         task_id, manifest = _task_identity(row, index)
@@ -275,6 +659,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             "task_id": task_id,
             "group_id": manifest["task"].get("groupId"),
             "source_id": manifest["task"].get("sourceId"),
+            "source_repository_identity": row.get("source_repository_identity"),
             "source_revision": row.get("source_revision"),
             "fingerprint": f"sha256:{_digest(row)}",
             "row": row,
@@ -310,6 +695,20 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             "path": _relative_or_text(dataset_path, root),
             "sha256": _sha256_file(dataset_path),
         },
+        # Freeze the evidence used for the holdout decision into the plan ID.
+        # Changing either compiled dataset invalidates the paired trial matrix.
+        "holdout": {
+            "unit": "repository",
+            "training_source": {
+                "path": _relative_or_text(training_dataset_path, root),
+                "sha256": _sha256_file(training_dataset_path),
+            },
+            "training_repository_identities": sorted(training_identities),
+            "training_revisions": sorted(training_revisions),
+            "evaluation_repository_identities": sorted(evaluation_identities),
+            "evaluation_revisions": sorted(evaluation_revisions),
+            "compiler_provenance": compiler_provenance,
+        },
         "repetitions": repetitions,
         "seeds": list(seeds),
         "environment": {
@@ -330,8 +729,10 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             {key: value for key, value in tasks[task_id].items() if key != "row"}
             for task_id in sorted(tasks)
         ],
+        # Full rows (including hidden verifier paths) remain only in the local
+        # plan. External exports are derived through _public_task below.
         "task_rows": {task_id: tasks[task_id]["row"] for task_id in sorted(tasks)},
-        "decisions": evaluation.get("decisions", {}),
+        "decisions": decisions,
     }
     plan_id = f"sha256:{_digest(plan_input)}"
     trials: list[dict[str, Any]] = []
@@ -339,6 +740,8 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         suite_arms = list(suite["arms"])
         for task_index, task_id in enumerate(sorted(tasks)):
             for repetition, seed in enumerate(seeds):
+                # Counterbalance left/first position deterministically. This is
+                # predictable for reproduction but alternates across pairs.
                 ordered_arms = (
                     suite_arms
                     if (suite_index + task_index + repetition) % 2 == 0
@@ -396,6 +799,8 @@ def write_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     plan = build_evaluation_plan(config, root)
     run_dir = evaluation_run_dir(config, root, plan["plan_id"])
     plan_path = run_dir / "evaluation-plan.json"
+    # A plan ID is immutable. Reusing its directory with different bytes is
+    # treated as tampering instead of an invitation to overwrite evidence.
     if plan_path.exists():
         existing = json.loads(plan_path.read_text(encoding="utf-8"))
         if existing != plan:
@@ -431,6 +836,8 @@ def _public_task(row: Mapping[str, Any]) -> dict[str, Any]:
     public = json.loads(json.dumps(row))
     manifest = public.get("manifest")
     if isinstance(manifest, dict):
+        # An external producer receives the brief and bounded tools, never the
+        # hidden verifier location or reward weights it could optimize directly.
         manifest.pop("verifier", None)
         manifest.pop("rewards", None)
     public.pop("manifest_path", None)
@@ -461,7 +868,8 @@ def _request_for(plan: Mapping[str, Any], trial: Mapping[str, Any]) -> dict[str,
         "result_contract": {
             "format": "autotrainer-evaluation-result-v1",
             "scores_are_ignored": True,
-            "completed_output": "a unified Git patch relative to the request file",
+            "completed_output": "output.patch names a unified Git patch relative to the result envelope",
+            "directory_envelope_names": ["result.json", "*.result.json"],
             "failed_statuses": ["failed", "timeout"],
         },
     }
@@ -503,14 +911,46 @@ def export_evaluation_suite(
 
 
 def _result_documents(path: Path) -> list[tuple[dict[str, Any], Path]]:
-    source = Path(path).expanduser().resolve()
-    files = sorted(source.rglob("*.json")) if source.is_dir() else [source]
+    unresolved_source = Path(path).expanduser()
+    # Keep the unresolved input long enough to detect an explicitly supplied
+    # symlink; resolving first would erase the only portable identity check.
+    if unresolved_source.is_symlink():
+        raise EvaluationError(f"result envelope input must not be a symlink: {unresolved_source}")
+    source = unresolved_source.resolve()
+    if source.is_dir():
+        # JSON evidence is valid, so extension-only discovery is ambiguous.
+        # Reserve two explicit names for directory ingestion while preserving
+        # arbitrary filenames when the caller supplies one file directly.
+        files = []
+        for candidate in sorted(source.rglob("*.json")):
+            if not (
+                candidate.name in RESULT_ENVELOPE_NAMES
+                or candidate.name.endswith(RESULT_ENVELOPE_SUFFIX)
+            ):
+                continue
+            # Reserved envelope names are authoritative: reject a link or a
+            # junction escape instead of silently ignoring or following it.
+            if candidate.is_symlink():
+                raise EvaluationError(f"result envelope must not be a symlink: {candidate}")
+            resolved_candidate = candidate.resolve()
+            try:
+                resolved_candidate.relative_to(source)
+            except ValueError as error:
+                raise EvaluationError(
+                    f"result envelope escapes the supplied directory: {candidate}"
+                ) from error
+            if not resolved_candidate.is_file():
+                raise EvaluationError(f"result envelope must be a regular file: {candidate}")
+            files.append(resolved_candidate)
+    else:
+        files = [source]
     if not files:
-        raise EvaluationError(f"no result JSON files were found in {source}")
+        raise EvaluationError(
+            "no result envelopes were found; directory inputs require "
+            f"result.json or *{RESULT_ENVELOPE_SUFFIX}: {source}"
+        )
     documents: list[tuple[dict[str, Any], Path]] = []
     for result_path in files:
-        if result_path.name in {"export-manifest.json", "evaluation-plan.json"}:
-            continue
         try:
             value = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -527,6 +967,8 @@ def _safe_result_file(result_path: Path, value: Any, field: str) -> Path:
     relative = Path(_text(value, field))
     if relative.is_absolute() or ".." in relative.parts:
         raise EvaluationError(f"{field} must be relative to the result envelope")
+    # Resolve before reading so `..`, directory junctions, and symlinks cannot
+    # turn an envelope into an arbitrary host-file reader.
     candidate = (result_path.parent / relative).resolve()
     try:
         candidate.relative_to(result_path.parent.resolve())
@@ -534,22 +976,90 @@ def _safe_result_file(result_path: Path, value: Any, field: str) -> Path:
         raise EvaluationError(f"{field} escapes the result directory") from error
     if candidate.is_symlink() or not candidate.is_file():
         raise EvaluationError(f"{field} must name a regular file: {candidate}")
-    if candidate.stat().st_size > 10 * 1024 * 1024:
+    if candidate.stat().st_size > MAX_RESULT_ARTIFACT_BYTES:
         raise EvaluationError(f"{field} exceeds the 10 MiB artifact limit: {candidate}")
     return candidate
 
 
+def _is_link_or_reparse(path: Path) -> bool:
+    """Detect links, including Windows reparse points, without following them."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(file_attributes & reparse_flag)
+
+
+def _verify_evidence_target(target: Path, digest: str, size: int) -> None:
+    """Accept an existing content address only when its regular bytes match."""
+
+    if _is_link_or_reparse(target) or not target.is_file():
+        raise EvaluationError(f"content-addressed evidence target is not a regular file: {target}")
+    if target.stat().st_size != size or _sha256_file(target) != digest:
+        raise EvaluationError(f"content-addressed evidence was modified: {target}")
+
+
 def _copy_evidence(source: Path, destination: Path) -> dict[str, Any]:
-    digest = _sha256_file(source)
-    suffix = source.suffix.lower()
-    target = destination / f"sha256-{digest}{suffix}"
-    if target.exists():
-        if _sha256_file(target) != digest:
-            raise EvaluationError(f"content-addressed evidence was modified: {target}")
-    else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-    return {"path": str(target), "sha256": digest, "bytes": source.stat().st_size}
+    """Copy once while hashing the exact bounded bytes that will be scored."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination,
+        prefix=".incoming-evidence.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    digest = hashlib.sha256()
+    copied_bytes = 0
+    try:
+        # The producer may still mutate its path. Holding one input descriptor
+        # and hashing bytes as they enter our private file guarantees the label,
+        # stored artifact, and bytes later scored all describe the same copy.
+        with os.fdopen(descriptor, "wb") as output_handle:
+            with source.open("rb") as input_handle:
+                if not stat.S_ISREG(os.fstat(input_handle.fileno()).st_mode):
+                    raise EvaluationError(f"result evidence must be a regular file: {source}")
+                for chunk in iter(lambda: input_handle.read(1024 * 1024), b""):
+                    copied_bytes += len(chunk)
+                    if copied_bytes > MAX_RESULT_ARTIFACT_BYTES:
+                        raise EvaluationError(
+                            f"result evidence exceeds the 10 MiB artifact limit: {source}"
+                        )
+                    digest.update(chunk)
+                    output_handle.write(chunk)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+
+        digest_hex = digest.hexdigest()
+        # Preserve ordinary viewer hints without allowing an untrusted filename
+        # to introduce an alternate-data-stream marker or an oversized target.
+        suffix = source.suffix.lower()
+        if re.fullmatch(r"\.[a-z0-9]{1,16}", suffix) is None:
+            suffix = ".bin"
+        target = destination / f"sha256-{digest_hex}{suffix}"
+        if _is_link_or_reparse(target):
+            raise EvaluationError(
+                f"content-addressed evidence target must not be a link: {target}"
+            )
+        try:
+            # A same-directory hard link installs the fully written private file
+            # without an overwrite window. Concurrent identical ingestion may
+            # win the name, but any pre-existing bytes are verified below.
+            os.link(temporary, target)
+        except FileExistsError:
+            _verify_evidence_target(target, digest_hex, copied_bytes)
+        else:
+            _verify_evidence_target(target, digest_hex, copied_bytes)
+        return {
+            "path": str(target),
+            "sha256": digest_hex,
+            "bytes": copied_bytes,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _producer_fairness(
@@ -561,6 +1071,8 @@ def _producer_fairness(
     runner = plan["suites"][trial["suite_id"]]["runner"]
     arm = plan["arms"][trial["arm_id"]]
     expected_adapter = arm.get("adapter")
+    # Producer metadata is evidence, not a score. Every claimed runtime pin must
+    # match the preregistered plan before local verification is considered fair.
     checks = {
         "producer": producer.get("name") == runner["producer"],
         "producer_version": producer.get("version") == runner["version"],
@@ -694,8 +1206,10 @@ def ingest_evaluation_results(
     active_scorer = scorer or _default_patch_scorer
     ingested: list[str] = []
     for result, result_path in _result_documents(Path(input_path)):
-        if result.get("schema_version") != SCHEMA_VERSION:
-            raise EvaluationError(f"result schema_version must be {SCHEMA_VERSION}: {result_path}")
+        # Keep runtime behavior in lockstep with the published producer schema;
+        # silently normalizing extra or mistyped fields would make that contract
+        # advisory precisely where untrusted data crosses into trusted reports.
+        result = _validate_result_envelope(result, f"result {result_path}")
         trial_id = _text(result.get("trial_id"), "result.trial_id")
         trial = trial_by_id.get(trial_id)
         if trial is None:
@@ -712,11 +1226,11 @@ def ingest_evaluation_results(
             raise EvaluationError(f"duplicate result refused for immutable trial: {trial_id}")
 
         fairness = _producer_fairness(result, trial, plan)
-        usage = _mapping(result.get("usage", {}), "result.usage")
+        usage = _mapping(result["usage"], "result.usage")
         status = result.get("status")
-        if status not in {"completed", "failed", "timeout"}:
-            raise EvaluationError(f"result.status must be completed, failed, or timeout: {trial_id}")
-        output = _mapping(result.get("output", {}), "result.output")
+        output = _mapping(result["output"], "result.output")
+        # Copy submitted artifacts under content hashes before executing any
+        # patch. The original envelope and evidence remain auditable afterward.
         evidence: dict[str, Any] = {}
         evidence_dir = run_dir / "evidence"
         for field in ("patch", "transcript", "review_artifact"):
@@ -779,6 +1293,8 @@ def ingest_evaluation_results(
                     "episode": episode_metadata,
                 },
             }
+        # Write the immutable raw/scored pair only after local scoring succeeds.
+        # A missing container runtime can therefore be fixed and retried safely.
         _write_json(raw_path, result)
         _write_json(scored_path, scored)
         ingested.append(str(scored_path))
@@ -832,6 +1348,8 @@ def _suite_payload(
         expected += 1
         result = scored.get(trial["trial_id"])
         if result is None:
+            # Missing trials stay in the denominator as explicit zeroes. Silent
+            # row dropping would reward flaky runners and bias the comparison.
             result = _zero_scored_result(
                 trial,
                 reason="missing_result",
@@ -879,8 +1397,24 @@ def _suite_payload(
     return payload, completeness
 
 
+def _deterministic_quantile(values: Sequence[float], probability: float) -> float:
+    """Select an R-7 quantile without depending on library/version defaults."""
+
+    position = probability * (len(values) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[lower]
+    fraction = position - lower
+    return values[lower] + (values[upper] - values[lower]) * fraction
+
+
 def _paired_delta(
-    payload: Mapping[str, Any], candidate: str, control: str, plan_id: str
+    payload: Mapping[str, Any],
+    candidate: str,
+    control: str,
+    plan_id: str,
+    confidence: float,
 ) -> dict[str, Any]:
     by_arm_task: dict[tuple[str, str], list[float]] = {}
     for run in payload["runs"]:
@@ -895,16 +1429,37 @@ def _paired_delta(
     point = sum(differences) / len(differences)
     interval = None
     if len(differences) >= 2:
-        generator = random.Random(int(_digest({"plan": plan_id, "comparison": [candidate, control]})[:16], 16))
+        # Resample whole tasks, not individual repetitions. Repetitions of one
+        # website are correlated and must not masquerade as independent tasks.
+        bootstrap_samples = 5000
+        seed = int(
+            _digest(
+                {
+                    "plan": plan_id,
+                    "comparison": [candidate, control],
+                }
+            )[:16],
+            16,
+        )
+        generator = random.Random(seed)
         samples = []
-        for _ in range(5000):
+        for _ in range(bootstrap_samples):
             drawn = [generator.choice(differences) for _ in differences]
             samples.append(sum(drawn) / len(drawn))
         samples.sort()
+        tail_probability = (1.0 - confidence) / 2.0
         interval = {
-            "low": round(samples[int(0.025 * (len(samples) - 1))], 6),
-            "high": round(samples[int(0.975 * (len(samples) - 1))], 6),
-            "method": "task-clustered deterministic bootstrap, 5000 samples",
+            "confidence": round(confidence, 6),
+            "low": round(_deterministic_quantile(samples, tail_probability), 6),
+            "high": round(
+                _deterministic_quantile(samples, 1.0 - tail_probability), 6
+            ),
+            "lower_quantile": round(tail_probability, 6),
+            "upper_quantile": round(1.0 - tail_probability, 6),
+            "method": "task-clustered deterministic bootstrap",
+            "bootstrap_samples": bootstrap_samples,
+            "quantile_method": "R-7 linear interpolation",
+            "seed": seed,
         }
     return {
         "candidate": candidate,
@@ -912,7 +1467,7 @@ def _paired_delta(
         "metric": "verified_task_success",
         "task_count": len(tasks),
         "delta": round(point, 6),
-        "ci95": interval,
+        "confidence_interval": interval,
     }
 
 
@@ -944,11 +1499,23 @@ def _review_summary(plan: Mapping[str, Any], run_dir: Path, suite_id: str) -> di
             counts["candidate" if winner == candidate else "control"] += 1
         else:
             counts[choice] += 1
+    # An exact reviewer count prevents one pair with extra votes from receiving
+    # more weight while still satisfying the verified-completeness gate.
     complete = all(
-        len(reviews_by_pair.get(pair_id, set())) >= required
+        len(reviews_by_pair.get(pair_id, set())) == required
         for pair_id in blind_map["pairs"]
     )
-    denominator = counts["candidate"] + counts["control"] + counts["tie"]
+    # Repetitions improve stability but do not create additional held-out tasks.
+    # Keep both counts visible so minimum_tasks can never be met by reruns alone.
+    task_count = len(
+        {
+            trial["task_id"]
+            for trial in plan["trials"]
+            if trial["suite_id"] == suite_id
+        }
+    )
+    # A failed result is evidence against a preference claim, not an abstention.
+    denominator = sum(counts.values())
     rate = (
         (counts["candidate"] + 0.5 * counts["tie"]) / denominator
         if denominator
@@ -959,6 +1526,7 @@ def _review_summary(plan: Mapping[str, Any], run_dir: Path, suite_id: str) -> di
         "control": control,
         "required_reviewers_per_pair": required,
         "pair_count": len(blind_map["pairs"]),
+        "task_count": task_count,
         "complete": complete,
         "counts": counts,
         "blind_preference_rate": round(rate, 6),
@@ -974,6 +1542,11 @@ def build_evaluation_reports(
     scored = _load_scored(run_dir)
     suite_reports: dict[str, Any] = {}
     all_verified = True
+    confidence = float(
+        _mapping(plan.get("decisions", {}), "evaluation.decisions").get("confidence")
+    )
+    # Each suite has its own runner, so each receives an independent comparison
+    # and decision. Local-agent reward is never pooled with Fable A/B results.
     for suite_id in sorted(plan["suites"]):
         payload, completeness = _suite_payload(plan, suite_id, scored)
         comparison = compare_benchmark(payload)
@@ -994,26 +1567,34 @@ def build_evaluation_reports(
                 and review["complete"]
                 and completeness["rate"] == 1.0
                 and completeness["fairness_passed"]
-                and review["pair_count"] >= minimum_tasks
+                and review["task_count"] >= minimum_tasks
                 and observed
             )
             decision = {
                 "metric": metric,
                 "minimum_rate": minimum_rate,
+                "minimum_tasks": minimum_tasks,
                 "review": review,
                 "observed_better": observed,
                 "verified_better": verified,
             }
         else:
-            delta = _paired_delta(payload, candidate, control, plan["plan_id"])
+            delta = _paired_delta(
+                payload,
+                candidate,
+                control,
+                plan["plan_id"],
+                confidence,
+            )
             threshold = float(decision_config.get("minimum_delta", 0.0))
             observed = delta["delta"] > threshold
+            interval = delta["confidence_interval"]
             verified = bool(
                 completeness["rate"] == 1.0
                 and completeness["fairness_passed"]
                 and delta["task_count"] >= minimum_tasks
-                and delta["ci95"] is not None
-                and delta["ci95"]["low"] > threshold
+                and interval is not None
+                and interval["low"] > threshold
             )
             decision = {
                 **delta,
@@ -1030,6 +1611,12 @@ def build_evaluation_reports(
             "comparison": comparison,
             "decision": decision,
         }
+        if metric == "verified_task_success":
+            # Confidence config drives only the paired task bootstrap. Fable's
+            # point-preference rule must not be mislabeled as a confidence gate.
+            suite_report["metadata"] = {
+                "paired_bootstrap_confidence": confidence
+            }
         suite_reports[suite_id] = suite_report
         _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
         markdown = render_benchmark_markdown(comparison)
@@ -1044,6 +1631,7 @@ def build_evaluation_reports(
     summary = {
         "schema_version": SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
+        "metadata": {"model_benchmark_confidence": confidence},
         "v1_success_criteria_verified": all_verified and bool(suite_reports),
         "suites": suite_reports,
     }
@@ -1086,6 +1674,8 @@ def export_blind_review(
         if set(arms) != set(suite["arms"]):
             raise EvaluationError(f"blind pair is incomplete for {key}")
         pair_id = f"pair-{_digest({'plan': plan['plan_id'], 'suite': suite_id, 'key': key})[:24]}"
+        # Arm identity is stored only in the sealed map. Reviewer exports expose
+        # content-addressed left/right artifacts with deterministic randomization.
         ordered = list(suite["arms"])
         if int(_digest(pair_id)[:2], 16) % 2:
             ordered.reverse()
@@ -1133,6 +1723,7 @@ def import_blind_reviews(
     seen: set[tuple[str, str]] = set()
     normalized: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
+        row = _validate_review_row(row, f"reviews[{index}]")
         pair_id = _text(row.get("pair_id"), f"reviews[{index}].pair_id")
         reviewer_id = _text(row.get("reviewer_id"), f"reviews[{index}].reviewer_id")
         choice = row.get("choice")
@@ -1207,6 +1798,8 @@ def run_command_suite(
         except KeyError as error:
             raise EvaluationError(f"unknown command runner placeholder: {error}") from error
         timeout = int(plan["environment"].get("episode_timeout_seconds") or 900)
+        # argv execution is explicit and shell-free. This prevents values in a
+        # task or artifact path from being interpreted as shell syntax.
         completed_process = subprocess.run(
             argv,
             cwd=str(Path(project_root).resolve()),

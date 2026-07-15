@@ -150,6 +150,7 @@
         "enabled": { "const": true },
         "algorithm": { "const": "grpo" },
         "dataset": { "$ref": "#/$defs/path" },
+        "eval_dataset": { "$ref": "#/$defs/path" },
         "sft_adapter": { "$ref": "#/$defs/path" },
         "output_dir": { "$ref": "#/$defs/path" },
         "max_steps": { "type": "integer", "minimum": 1 },
@@ -397,8 +398,9 @@
     "evaluation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task_pack", "task_split", "repetitions", "seeds", "holdout_unit", "primary_metric", "candidates", "arms", "suites", "fairness", "decisions"],
+      "required": ["dataset", "task_pack", "task_split", "repetitions", "seeds", "holdout_unit", "primary_metric", "candidates", "arms", "suites", "fairness", "decisions"],
       "properties": {
+        "dataset": { "$ref": "#/$defs/path" },
         "task_pack": { "$ref": "#/$defs/path" },
         "task_split": { "const": "evaluation" },
         "repetitions": { "type": "integer", "minimum": 1 },

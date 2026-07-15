@@ -9,6 +9,8 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,63 @@ def _atomic_jsonl(path: Path, records: list[Mapping[str, Any]]) -> None:
     temporary.replace(path)
 
 
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    """Replace a JSON document without exposing a partially written report."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _invalidate_previous_report(path: Path) -> bool:
+    """Fail closed before replacing artifacts from an earlier successful run."""
+
+    if not path.exists() and not path.is_symlink():
+        return False
+    # If compilation crashes or returns an error after this point, direct
+    # evaluation sees this explicit invalid state instead of trusting stale
+    # dataset hashes and repository exposure from the preceding run.
+    _atomic_json(
+        path,
+        {
+            "schema_version": 1,
+            "artifacts": {},
+            "artifact_sha256": {},
+            "repository_exposures": [],
+            "errors": ["compilation is in progress; previous provenance was invalidated"],
+            "warnings": [],
+        },
+    )
+    return True
+
+
+def _return_failed_report(
+    path: Path,
+    report: Mapping[str, Any],
+    *,
+    persist: bool,
+) -> dict[str, Any]:
+    """Persist a failed retry only when it must replace prior provenance."""
+
+    result = dict(report)
+    if persist:
+        _atomic_json(path, result)
+    return result
+
+
 def _within(path: Path, directory: Path) -> bool:
     try:
         path.relative_to(directory)
@@ -65,7 +124,10 @@ def _output_destinations(
         ("sft", "train"): ("sft", "dataset", True),
         ("sft", "evaluation"): ("sft", "eval_dataset", False),
         ("rl", "train"): ("grpo", "dataset", True),
-        ("rl", "evaluation"): ("grpo", "eval_dataset", False),
+        # Held-out task records are final benchmark inputs. ``grpo.eval_dataset``
+        # is deliberately absent because it belongs to the training loop and may
+        # only point at a separately supplied validation set.
+        ("rl", "evaluation"): ("evaluation", "dataset", True),
     }
     destinations: dict[tuple[str, str], Path] = {}
     errors: list[str] = []
@@ -140,9 +202,7 @@ def _fingerprint(
     payload = {
         "sft": sft_records,
         "rl": rl_records,
-        "source_commits": {
-            source_id: source.get("commit") for source_id, source in repository_locks.items()
-        },
+        "repository_exposures": _repository_exposures(repository_locks),
         "destinations": destination_values,
     }
     return hashlib.sha256(
@@ -160,6 +220,7 @@ def _report(
     errors: list[str],
     warnings: list[str],
     artifacts: Mapping[str, str] | None = None,
+    artifact_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -173,6 +234,10 @@ def _report(
             "rl_evaluation": len(rl_records["evaluation"]),
         },
         "artifacts": dict(artifacts or {}),
+        "artifact_sha256": dict(artifact_sha256 or {}),
+        # This is the compiler-frozen exposure ledger used by direct evaluation.
+        # IDs aid diagnostics; identity and commit enforce the holdout boundary.
+        "repository_exposures": _repository_exposures(repository_locks),
         "errors": sorted(set(errors)),
         "warnings": sorted(set(warnings)),
     }
@@ -186,6 +251,126 @@ def _repository_lock(scan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     }
 
 
+def _repository_exposures(
+    repository_locks: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_id": source_id,
+            "partition": source.get("partition"),
+            "repository_identity": source.get("repository_identity"),
+            "commit": source.get("commit"),
+        }
+        for source_id, source in sorted(repository_locks.items())
+    ]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _repository_exposure_warnings(
+    repository_locks: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Warn when declared evidence alone invalidates repository holdout."""
+
+    exposures = _repository_exposures(repository_locks)
+    train = [item for item in exposures if item.get("partition") == "train"]
+    evaluation = [item for item in exposures if item.get("partition") == "evaluation"]
+    collisions: set[str] = set()
+    for train_item in train:
+        for held_out in evaluation:
+            shared_identity = bool(train_item.get("repository_identity")) and (
+                train_item.get("repository_identity") == held_out.get("repository_identity")
+            )
+            shared_commit = bool(train_item.get("commit")) and str(
+                train_item.get("commit")
+            ).lower() == str(held_out.get("commit", "")).lower()
+            if shared_identity or shared_commit:
+                reason = "repository identity" if shared_identity else "exact commit"
+                collisions.add(
+                    f"{train_item['source_id']} (train) and "
+                    f"{held_out['source_id']} (evaluation) share {reason}"
+                )
+    if not collisions:
+        return []
+    return [
+        "REPOSITORY HOLDOUT VIOLATION: declared repository exposure overlaps: "
+        + "; ".join(sorted(collisions))
+        + "; datasets were written for authoring only, and evaluation planning will refuse them"
+    ]
+
+
+def _task_source_id(row: Mapping[str, Any]) -> str:
+    """Read the declared source ID from a compiled task row for diagnostics."""
+
+    manifest = row.get("manifest", {})
+    task = manifest.get("task", {}) if isinstance(manifest, Mapping) else {}
+    return str(task.get("sourceId", "<unknown>")) if isinstance(task, Mapping) else "<unknown>"
+
+
+def _repository_holdout_warnings(
+    rl_records: Mapping[str, list[Mapping[str, Any]]],
+) -> list[str]:
+    """Flag authoring datasets that cannot support a repository-held-out claim.
+
+    Compilation deliberately still writes these rows: the bundled fixture is
+    useful for exercising training and environment contracts. The planner and
+    evaluation planner are the hard gates that prevent publishing its result as
+    a repository-held-out benchmark.
+    """
+
+    train_rows = rl_records.get("train", [])
+    evaluation_rows = rl_records.get("evaluation", [])
+    if not train_rows or not evaluation_rows:
+        return []
+
+    missing = sorted(
+        {
+            _task_source_id(row)
+            for row in (*train_rows, *evaluation_rows)
+            if not str(row.get("source_repository_identity", "")).strip()
+        }
+    )
+    warnings: list[str] = []
+    if missing:
+        warnings.append(
+            "REPOSITORY HOLDOUT UNVERIFIED: compiled task source(s) lack "
+            "source_repository_identity: "
+            + ", ".join(missing)
+            + "; evaluation planning will refuse these rows"
+        )
+
+    collisions: set[str] = set()
+    for train in train_rows:
+        for held_out in evaluation_rows:
+            train_identity = str(train.get("source_repository_identity", "")).strip()
+            held_out_identity = str(
+                held_out.get("source_repository_identity", "")
+            ).strip()
+            train_revision = str(train.get("source_revision", "")).strip().lower()
+            held_out_revision = str(held_out.get("source_revision", "")).strip().lower()
+            shared_identity = bool(train_identity) and train_identity == held_out_identity
+            shared_revision = bool(train_revision) and train_revision == held_out_revision
+            if shared_identity or shared_revision:
+                reason = "repository identity" if shared_identity else "exact source revision"
+                collisions.add(
+                    f"{_task_source_id(train)} (train) and "
+                    f"{_task_source_id(held_out)} (evaluation) share {reason}"
+                )
+    if collisions:
+        warnings.append(
+            "REPOSITORY HOLDOUT VIOLATION: "
+            + "; ".join(sorted(collisions))
+            + "; datasets were written for authoring only, and evaluation planning will refuse them"
+        )
+    return warnings
+
+
 def compile_data(
     config: Mapping[str, Any],
     project_root: Path,
@@ -195,23 +380,32 @@ def compile_data(
     artifact_value = config.get("project", {}).get("artifact_dir", ".autotrainer")
     artifact_dir = _resolve(root, str(artifact_value))
     compiled_dir = artifact_dir / "compiled"
+    report_path = compiled_dir / "compile-report.json"
+    had_previous_report = _invalidate_previous_report(report_path)
     empty_sft: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     empty_rl: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     repository_locks = _repository_lock(scan)
     scan_errors = [f"source scan: {value}" for value in scan.get("errors", [])]
+    # A failed retry may leave old dataset bytes for diagnosis, but the success
+    # report was already invalidated, so no evaluation plan can trust them.
     if scan_errors:
-        return _report(
-            sft_records=empty_sft,
-            rl_records=empty_rl,
-            repository_locks=repository_locks,
-            destinations={},
-            root=root,
-            errors=scan_errors,
-            warnings=["compilation aborted before writing artifacts because source inspection failed"],
+        return _return_failed_report(
+            report_path,
+            _report(
+                sft_records=empty_sft,
+                rl_records=empty_rl,
+                repository_locks=repository_locks,
+                destinations={},
+                root=root,
+                errors=scan_errors,
+                warnings=[
+                    "compilation aborted before writing artifacts because source inspection failed"
+                ],
+            ),
+            persist=had_previous_report,
         )
 
     destinations, destination_errors = _output_destinations(config, root, artifact_dir)
-    report_path = compiled_dir / "compile-report.json"
     source_paths = _source_input_paths(config, root)
     for key, destination in destinations.items():
         if destination == report_path:
@@ -223,14 +417,20 @@ def compile_data(
                 f"{key[0]}.{key[1]} would overwrite a declared source input: {destination}"
             )
     if destination_errors:
-        return _report(
-            sft_records=empty_sft,
-            rl_records=empty_rl,
-            repository_locks=repository_locks,
-            destinations=destinations,
-            root=root,
-            errors=destination_errors,
-            warnings=["compilation aborted before writing artifacts because output paths are unsafe"],
+        return _return_failed_report(
+            report_path,
+            _report(
+                sft_records=empty_sft,
+                rl_records=empty_rl,
+                repository_locks=repository_locks,
+                destinations=destinations,
+                root=root,
+                errors=destination_errors,
+                warnings=[
+                    "compilation aborted before writing artifacts because output paths are unsafe"
+                ],
+            ),
+            persist=had_previous_report,
         )
 
     source_specs = config.get("sources", [])
@@ -246,6 +446,8 @@ def compile_data(
     task_ids: set[str] = set()
     group_partitions: dict[str, str] = {}
 
+    # Phase one builds and validates every record in memory. No declared trainer
+    # dataset is touched until all sources and cross-split invariants pass.
     for source in source_specs:
         if not isinstance(source, Mapping):
             continue
@@ -284,6 +486,8 @@ def compile_data(
                     errors.append(f"duplicate task id: {manifest.task_id}")
                     continue
                 task_ids.add(manifest.task_id)
+                # Related task variants move as one group. Splitting variants
+                # across train/evaluation would leak the same project family.
                 previous_partition = group_partitions.setdefault(manifest.group_id, manifest.split)
                 if previous_partition != manifest.split:
                     errors.append(
@@ -322,6 +526,9 @@ def compile_data(
                     "manifest_path": str(manifest_path),
                     "task_root": str(manifest_path.parent),
                     "source_path": str(source_path),
+                    # Source IDs are user-selected labels. The scanner-derived
+                    # identity is what downstream holdout gates compare.
+                    "source_repository_identity": locked.get("repository_identity"),
                     "source_revision": revision,
                     "environment_backend": config["environment"]["backend"],
                     "environment_image": config["environment"]["image"],
@@ -340,6 +547,8 @@ def compile_data(
         warnings.append("no executable training tasks were compiled for GRPO")
     if not rl_records["evaluation"]:
         warnings.append("no held-out executable evaluation tasks were compiled")
+    warnings.extend(_repository_exposure_warnings(repository_locks))
+    warnings.extend(_repository_holdout_warnings(rl_records))
 
     for key, records in (
         (("sft", "train"), sft_records["train"]),
@@ -348,24 +557,32 @@ def compile_data(
         (("rl", "evaluation"), rl_records["evaluation"]),
     ):
         if records and key not in destinations:
-            section = "sft" if key[0] == "sft" else "grpo"
-            field = "dataset" if key[1] == "train" else "eval_dataset"
+            if key == ("rl", "evaluation"):
+                section, field = "evaluation", "dataset"
+            else:
+                section = "sft" if key[0] == "sft" else "grpo"
+                field = "dataset" if key[1] == "train" else "eval_dataset"
             errors.append(
                 f"compiled {key[0]} {key[1]} records require {section}.{field}"
             )
 
     if errors:
         warnings.append("compilation produced no dataset artifacts because validation failed")
-        return _report(
-            sft_records=sft_records,
-            rl_records=rl_records,
-            repository_locks=repository_locks,
-            destinations=destinations,
-            root=root,
-            errors=errors,
-            warnings=warnings,
+        return _return_failed_report(
+            report_path,
+            _report(
+                sft_records=sft_records,
+                rl_records=rl_records,
+                repository_locks=repository_locks,
+                destinations=destinations,
+                root=root,
+                errors=errors,
+                warnings=warnings,
+            ),
+            persist=had_previous_report,
         )
 
+    # Phase two writes the complete validated set using per-file atomic replace.
     artifacts: dict[str, str] = {}
     for key, records in (
         (("sft", "train"), sft_records["train"]),
@@ -379,6 +596,12 @@ def compile_data(
         _atomic_jsonl(path, records)
         artifacts[f"{key[0]}_{key[1]}"] = str(path)
 
+    # Hash dataset bytes before writing the report. Direct evaluation verifies
+    # these digests so a stale exposure ledger cannot bless replaced JSONL.
+    artifact_sha256 = {
+        key: _sha256_file(Path(path))
+        for key, path in sorted(artifacts.items())
+    }
     artifacts["report"] = str(report_path)
     report = _report(
         sft_records=sft_records,
@@ -389,9 +612,9 @@ def compile_data(
         errors=[],
         warnings=warnings,
         artifacts=artifacts,
+        artifact_sha256=artifact_sha256,
     )
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_json(report_path, report)
     return report
 
 

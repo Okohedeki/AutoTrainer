@@ -15,13 +15,15 @@ from autotrainer.config import default_config  # noqa: E402
 from autotrainer.sources import scan_sources  # noqa: E402
 
 
-def _task_manifest(*, task_id: str, split: str, group_id: str) -> dict:
+def _task_manifest(
+    *, task_id: str, split: str, group_id: str, source_id: str = "site"
+) -> dict:
     return {
         "version": "1.0",
         "task": {
             "id": task_id,
             "instruction": "Repair the component while preserving its existing public behavior.",
-            "sourceId": "site",
+            "sourceId": source_id,
             "startingRevision": "locked",
             "split": split,
             "groupId": group_id,
@@ -143,12 +145,22 @@ def _fixture(root: Path, *, evaluation: bool = False) -> tuple[dict, dict, Path]
                     task_id="evaluation-task",
                     split="evaluation",
                     group_id="evaluation-family",
+                    source_id="evaluation-site",
                 )
             ),
             encoding="utf-8",
         )
         sources.extend(
             [
+                {
+                    "id": "evaluation-site",
+                    "kind": "repository",
+                    "uri": "site",
+                    "revision": "HEAD",
+                    "partition": "evaluation",
+                    "roles": ["evaluation"],
+                    "include": ["src/**"],
+                },
                 {
                     "id": "accepted-evaluation",
                     "kind": "sft_jsonl",
@@ -291,6 +303,10 @@ class CompilerTests(unittest.TestCase):
                 .splitlines()[0]
             )
             self.assertEqual(rl_row["source_revision"], scan["sources"][0]["commit"])
+            self.assertEqual(
+                rl_row["source_repository_identity"],
+                scan["sources"][0]["repository_identity"],
+            )
 
     def test_aborts_before_writing_when_source_scan_has_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -316,11 +332,20 @@ class CompilerTests(unittest.TestCase):
             config["sft"]["dataset"] = ".artifacts/data/custom-sft-train.jsonl"
             config["sft"]["eval_dataset"] = ".artifacts/data/custom-sft-eval.jsonl"
             config["grpo"]["dataset"] = ".artifacts/data/custom-grpo-train.jsonl"
-            config["grpo"]["eval_dataset"] = ".artifacts/data/custom-grpo-eval.jsonl"
+            config["evaluation"]["dataset"] = ".artifacts/data/custom-final-eval.jsonl"
+            # This is a separately supplied training-validation input. The
+            # compiler must neither replace nor report it as the final holdout.
+            training_eval = root / ".artifacts" / "data" / "grpo-validation.jsonl"
+            training_eval.parent.mkdir(parents=True)
+            training_eval.write_text('{"task_id":"training-validation"}\n', encoding="utf-8")
+            config["grpo"]["eval_dataset"] = ".artifacts/data/grpo-validation.jsonl"
 
             report = compile_data(config, root, scan)
 
             self.assertEqual(report["errors"], [])
+            self.assertTrue(
+                any("REPOSITORY HOLDOUT VIOLATION" in item for item in report["warnings"])
+            )
             for key in (
                 "sft_train",
                 "sft_evaluation",
@@ -328,6 +353,14 @@ class CompilerTests(unittest.TestCase):
                 "rl_evaluation",
             ):
                 self.assertTrue(Path(report["artifacts"][key]).is_file())
+            self.assertEqual(
+                Path(report["artifacts"]["rl_evaluation"]),
+                root / ".artifacts" / "data" / "custom-final-eval.jsonl",
+            )
+            self.assertEqual(
+                training_eval.read_text(encoding="utf-8"),
+                '{"task_id":"training-validation"}\n',
+            )
             self.assertFalse((root / ".artifacts" / "compiled" / "sft" / "train.jsonl").exists())
             on_disk = json.loads(Path(report["artifacts"]["report"]).read_text(encoding="utf-8"))
             self.assertEqual(on_disk, report)
@@ -367,6 +400,7 @@ class CompilerTests(unittest.TestCase):
             config["project"]["artifact_dir"] = ".artifacts"
             config["sft"]["dataset"] = ".artifacts/data/sft.jsonl"
             config["grpo"]["dataset"] = ".artifacts/data/grpo.jsonl"
+            config["evaluation"]["dataset"] = ".artifacts/data/final-evaluation.jsonl"
             task_path.write_text("{invalid-json", encoding="utf-8")
 
             report = compile_data(config, root, scan)

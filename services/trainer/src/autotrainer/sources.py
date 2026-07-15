@@ -20,6 +20,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from .manifest import TaskManifest
 
@@ -183,6 +184,104 @@ def _git(repository: Path, *arguments: str) -> tuple[bool, str]:
         detail = (completed.stderr or completed.stdout).strip().replace("\r", " ").replace("\n", " ")
         return False, detail[-800:] or f"git exited with status {completed.returncode}"
     return True, completed.stdout.strip()
+
+
+def _canonical_remote_host(hostname: str, port: int | None, scheme: str) -> str:
+    """Normalize a remote host while retaining meaningful non-default ports."""
+
+    host = hostname.rstrip(".").casefold()
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        # Hashing the case-folded Unicode host remains credential-safe. Git will
+        # report an unusable URL later if the host itself is malformed.
+        pass
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    defaults = {"http": 80, "https": 443, "ssh": 22, "git": 9418}
+    return host if port is None or defaults.get(scheme) == port else f"{host}:{port}"
+
+
+def _canonical_remote_path(value: str) -> str:
+    """Normalize the repository portion shared by HTTPS and SSH spellings."""
+
+    path = re.sub(r"/+", "/", unquote(value).replace("\\", "/")).strip("/")
+    if path.casefold().endswith(".git"):
+        path = path[:-4]
+    return path.rstrip("/").casefold()
+
+
+def _canonical_repository_locator(value: str, git_root: Path) -> str:
+    """Return a credential-free locator shared by equivalent Git URL forms.
+
+    Git has no repository UUID. V1 therefore treats the same normalized remote
+    host/path as one repository across HTTPS, SSH URL, and SCP syntax. Userinfo,
+    query strings, and fragments are intentionally discarded so access tokens
+    cannot alter holdout identity or enter persisted source locks.
+    """
+
+    text = value.strip()
+    parsed = urlsplit(text)
+    scheme = parsed.scheme.casefold()
+    if scheme in {"http", "https", "ssh", "git"} and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        host = _canonical_remote_host(parsed.hostname, port, scheme)
+        return f"remote:{host}/{_canonical_remote_path(parsed.path)}"
+
+    # SCP-style Git URLs have no `//`, so urllib treats their host as a scheme.
+    # Check them explicitly after URL forms and before interpreting a relative
+    # local path. A Windows drive path is excluded by its slash/backslash tail.
+    scp = re.fullmatch(
+        r"(?:(?:[^@/:\\]+)@)?(?P<host>\[[^\]]+\]|[^:/\\]+):(?P<path>[^\\].*)",
+        text,
+    )
+    if scp and not re.fullmatch(r"[A-Za-z]", scp.group("host")):
+        host_value = scp.group("host").strip("[]")
+        host = _canonical_remote_host(host_value, None, "ssh")
+        return f"remote:{host}/{_canonical_remote_path(scp.group('path'))}"
+
+    if scheme == "file":
+        path_text = unquote(parsed.path)
+        if re.match(r"^/[A-Za-z]:/", path_text):
+            path_text = path_text[1:]
+        if parsed.netloc and parsed.netloc.casefold() != "localhost":
+            path_text = f"//{parsed.netloc}{path_text}"
+        local = Path(path_text).expanduser()
+    else:
+        local = Path(text).expanduser()
+    if not local.is_absolute():
+        local = git_root / local
+    return "local:" + local.resolve().as_posix().casefold().rstrip("/")
+
+
+def _repository_identity(repository: Path, git_root: Path) -> str:
+    """Return one credential-safe identity for aliases or clones of a repository."""
+
+    ok, origin = _git(repository, "remote", "get-url", "origin")
+    if ok and origin.strip():
+        value = origin.strip()
+    else:
+        # Linked worktrees have different working roots but one common object
+        # store; treating them as distinct would let a path alias evade holdout.
+        common_ok, common_directory = _git(
+            repository,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        )
+        value = (
+            common_directory.strip()
+            if common_ok and common_directory.strip()
+            else git_root.resolve().as_posix()
+        )
+    canonical = _canonical_repository_locator(value, git_root)
+    # Persist only the digest. Even if a future URL form is not recognized,
+    # credentials and host paths never appear in the public scan artifact.
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _matches(path: str, patterns: Sequence[str]) -> bool:
@@ -367,6 +466,7 @@ def _scan_repository(
             "eligible_bytes": 0,
             "eligible_file_count": 0,
             "files": [],
+            "repository_identity": None,
             "requested_revision": str(source.get("revision", "HEAD")),
             "skipped": {},
         }
@@ -394,6 +494,7 @@ def _scan_repository(
         return _finish(result), []
     git_root = Path(git_root_value).resolve()
     result["git_root"] = _display_path(git_root, project_root)
+    result["repository_identity"] = _repository_identity(repository, git_root)
 
     revision = result["requested_revision"] or "HEAD"
     ok, commit = _git(repository, "rev-parse", "--verify", f"{revision}^{{commit}}")

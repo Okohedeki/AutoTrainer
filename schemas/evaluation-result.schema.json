@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autotrainer.local/schemas/evaluation-result.schema.json",
+  "title": "AutoTrainer evaluation result envelope v1",
+  "$comment": "Producer scores are intentionally absent. AutoTrainer replays the submitted patch and computes every trusted score locally.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plan_id",
+    "trial_id",
+    "suite_id",
+    "arm_id",
+    "task_id",
+    "repetition",
+    "seed",
+    "status",
+    "producer",
+    "usage",
+    "output"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "plan_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "trial_id": { "type": "string", "minLength": 1 },
+    "suite_id": { "enum": ["model_benchmark", "fable_ab"] },
+    "arm_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "repetition": { "type": "integer", "minimum": 0 },
+    "seed": { "type": "integer", "minimum": 0 },
+    "status": { "enum": ["completed", "failed", "timeout"] },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "orchestration_sha256",
+        "model_revision",
+        "adapter_sha256",
+        "seed_honored",
+        "fallback_models_used"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "orchestration_sha256": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+        "model_revision": { "type": "string", "pattern": "^[0-9a-fA-F]{40,64}$" },
+        "adapter_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+          ]
+        },
+        "seed_honored": { "const": true },
+        "fallback_models_used": { "const": false }
+      }
+    },
+    "usage": {
+      "$comment": "Usage is retained for efficiency reporting and does not affect trusted task correctness.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 },
+        "wall_time_seconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "output": {
+      "$comment": "Artifact paths are relative to this JSON file. Each regular file is limited to 10 MiB during ingestion.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "patch": { "$ref": "#/$defs/relative_file" },
+        "transcript": { "$ref": "#/$defs/relative_file" },
+        "review_artifact": { "$ref": "#/$defs/relative_file" }
+      }
+    }
+  },
+  "$defs": {
+    "relative_file": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          { "pattern": "^(?:[A-Za-z]:|[/\\\\])" },
+          { "pattern": "(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)" }
+        ]
+      }
+    }
+  }
+}

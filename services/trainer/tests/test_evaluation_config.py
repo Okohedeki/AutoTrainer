@@ -13,6 +13,12 @@ from autotrainer.config import default_config, validate_mapping  # noqa: E402
 from autotrainer.planner import build_plan  # noqa: E402
 
 
+TRAIN_REPOSITORY_IDENTITY = "sha256:" + "1" * 64
+EVALUATION_REPOSITORY_IDENTITY = "sha256:" + "2" * 64
+TRAIN_COMMIT = "c" * 40
+EVALUATION_COMMIT = "d" * 40
+
+
 def evaluation_config() -> dict:
     payload = default_config(revision="a" * 40)
     reference = payload["evaluation"]["arms"]["reference_9b"]["model"]
@@ -34,6 +40,24 @@ def evaluation_scan() -> dict:
         "warnings": [],
         "sources": [
             {
+                "id": "training-repository-1",
+                "kind": "repository",
+                "partition": "train",
+                "status": "ready",
+                "eligible_file_count": 1,
+                "repository_identity": TRAIN_REPOSITORY_IDENTITY,
+                "commit": TRAIN_COMMIT,
+            },
+            {
+                "id": "evaluation-repository-1",
+                "kind": "repository",
+                "partition": "evaluation",
+                "status": "ready",
+                "eligible_file_count": 1,
+                "repository_identity": EVALUATION_REPOSITORY_IDENTITY,
+                "commit": EVALUATION_COMMIT,
+            },
+            {
                 "id": "held-out-frontend",
                 "kind": "task_pack",
                 "partition": "evaluation",
@@ -51,8 +75,10 @@ def evaluation_scan() -> dict:
     }
 
 
-def write_compiled_evaluation(root: Path) -> Path:
-    destination = root / ".autotrainer" / "compiled" / "rl" / "evaluation.jsonl"
+def write_compiled_evaluation(
+    root: Path, relative: str = ".autotrainer/compiled/rl/evaluation.jsonl"
+) -> Path:
+    destination = root / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"task_id": "evaluation-task-1"}) + "\n", encoding="utf-8")
     return destination
@@ -161,8 +187,36 @@ class EvaluationConfigTests(unittest.TestCase):
         self.assertTrue(any("model_benchmark.metric" in error for error in report.errors))
         self.assertTrue(any("model_benchmark.minimum_tasks" in error for error in report.errors))
 
+    def test_rejects_training_validation_that_reuses_final_benchmark(self) -> None:
+        payload = evaluation_config()
+        payload["grpo"]["eval_dataset"] = ".autotrainer/data/../compiled/rl/evaluation.jsonl"
+
+        report = validate_mapping(payload)
+
+        self.assertTrue(
+            any(
+                "grpo.eval_dataset must be separate from evaluation.dataset" in error
+                for error in report.errors
+            )
+        )
+
 
 class EvaluationPlannerTests(unittest.TestCase):
+    def test_uses_declared_final_dataset_instead_of_artifact_convention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = evaluation_config()
+            payload["evaluation"]["dataset"] = "benchmarks/final.jsonl"
+            payload["grpo"]["eval_dataset"] = "training/grpo-validation.jsonl"
+            final_dataset = write_compiled_evaluation(root, "benchmarks/final.jsonl")
+            write_adapter(root)
+
+            plan = build_plan(payload, root, evaluation_scan())
+
+            evaluation = plan["stages"]["evaluation"]
+            self.assertEqual(evaluation["status"], "inputs_ready")
+            self.assertEqual(evaluation["compiled_dataset"], str(final_dataset))
+
     def test_runtime_inputs_are_ready_only_with_compiled_tasks_and_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,6 +235,54 @@ class EvaluationPlannerTests(unittest.TestCase):
             self.assertEqual(
                 evaluation["suites"]["fable_ab"]["runner_status"],
                 "awaiting_external_results",
+            )
+            self.assertFalse(
+                any("repository holdout" in item for item in evaluation["blockers"])
+            )
+
+    def test_repository_holdout_blocks_source_aliases_and_exact_commit_clones(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = evaluation_config()
+            write_compiled_evaluation(root)
+            write_adapter(root)
+
+            alias_scan = evaluation_scan()
+            alias_scan["sources"][1]["repository_identity"] = TRAIN_REPOSITORY_IDENTITY
+            alias_plan = build_plan(payload, root, alias_scan)
+            self.assertTrue(
+                any(
+                    "share repository identity" in item
+                    for item in alias_plan["stages"]["evaluation"]["blockers"]
+                )
+            )
+
+            clone_scan = evaluation_scan()
+            clone_scan["sources"][1]["commit"] = TRAIN_COMMIT
+            clone_plan = build_plan(payload, root, clone_scan)
+            self.assertTrue(
+                any(
+                    "share exact commit" in item
+                    for item in clone_plan["stages"]["evaluation"]["blockers"]
+                )
+            )
+
+    def test_repository_holdout_fails_closed_without_scanner_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = evaluation_config()
+            write_compiled_evaluation(root)
+            write_adapter(root)
+            scan = evaluation_scan()
+            del scan["sources"][1]["repository_identity"]
+
+            plan = build_plan(payload, root, scan)
+
+            self.assertTrue(
+                any(
+                    "lack repository_identity" in item
+                    for item in plan["stages"]["evaluation"]["blockers"]
+                )
             )
 
     def test_missing_compiled_evaluation_dataset_blocks_only_evaluation(self) -> None:

@@ -88,6 +88,20 @@ def _positive_int(section: Mapping[str, Any], key: str, errors: list[str]) -> No
         errors.append(f"{key} must be a positive integer")
 
 
+def _resolved_config_path(value: Any, root: Path | None) -> Path | None:
+    """Return one canonical identity for cross-section path comparisons."""
+
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        # Validation can run before a config file has been written. Using one
+        # shared anchor still detects equivalent relative spellings such as
+        # ``data/eval.jsonl`` and ``data/./eval.jsonl``.
+        candidate = (root if root is not None else Path.cwd()) / candidate
+    return candidate.resolve()
+
+
 def _evaluation_model_ref(value: Any, label: str, errors: list[str]) -> str:
     if value == "project":
         return "project"
@@ -118,6 +132,11 @@ def _evaluation_model_ref(value: Any, label: str, errors: list[str]) -> str:
 
 
 def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> None:
+    dataset = evaluation.get("dataset")
+    if not isinstance(dataset, (str, Path)) or not str(dataset).strip():
+        errors.append("evaluation.dataset is required")
+    elif Path(dataset).suffix.lower() != ".jsonl":
+        errors.append("evaluation.dataset must end in .jsonl")
     if not str(evaluation.get("task_pack", "")).strip():
         errors.append("evaluation.task_pack is required")
     if evaluation.get("task_split") != "evaluation":
@@ -496,6 +515,13 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
 
     evaluation = _mapping(data.get("evaluation"), "evaluation", errors)
     _validate_evaluation(evaluation, errors)
+    grpo_eval_path = _resolved_config_path(grpo.get("eval_dataset"), root)
+    final_eval_path = _resolved_config_path(evaluation.get("dataset"), root)
+    if grpo_eval_path is not None and grpo_eval_path == final_eval_path:
+        errors.append(
+            "grpo.eval_dataset must be separate from evaluation.dataset; "
+            "training validation cannot reuse the final benchmark"
+        )
     if not any(
         isinstance(source, Mapping)
         and source.get("partition") == "evaluation"
@@ -626,6 +652,7 @@ def default_config(
             "episode_timeout_seconds": 900,
         },
         "evaluation": {
+            "dataset": ".autotrainer/compiled/rl/evaluation.jsonl",
             "task_pack": "held-out-frontend",
             "task_split": "evaluation",
             "repetitions": 3,

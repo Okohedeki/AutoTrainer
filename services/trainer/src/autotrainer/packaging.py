@@ -43,6 +43,8 @@ def _sha256(path: Path) -> str:
 def _copy_tree(source: Path, destination: Path) -> None:
     if not source.is_dir():
         raise PackagingError(f"adapter directory does not exist: {source}")
+    # A published adapter must be a self-contained file tree. Symlinks could
+    # make the package depend on—or accidentally copy—files outside the run.
     for candidate in source.rglob("*"):
         if candidate.is_symlink():
             raise PackagingError(f"packages do not accept symlinks: {candidate}")
@@ -65,6 +67,8 @@ def _candidate_arm(plan: Mapping[str, Any]) -> str:
         for decision in plan.get("decisions", {}).values()
         if isinstance(decision, Mapping) and decision.get("candidate")
     }
+    # Both success decisions must point at the same trained arm. Packaging a
+    # different winner for each suite would make the artifact claim ambiguous.
     if len(candidates) != 1:
         raise PackagingError(
             "evaluation decisions must identify one shared candidate arm before packaging"
@@ -139,6 +143,8 @@ def build_adapter_package(
     if not summary_path.is_file():
         raise PackagingError("evaluation summary is missing; run `autotrainer evaluate report`")
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    # `allow_unverified` changes the package label, never the recorded proof.
+    # It exists for development handoffs and cannot manufacture a winner claim.
     verified = summary.get("v1_success_criteria_verified") is True
     if not verified and not allow_unverified:
         raise PackagingError(
@@ -172,6 +178,8 @@ def build_adapter_package(
     if not isinstance(include, list) or not all(isinstance(item, str) for item in include):
         raise PackagingError("package.include must be a list of artifact names")
 
+    # Assemble in a sibling temporary directory so validation failures cannot
+    # leave a destination that looks like a complete package.
     with tempfile.TemporaryDirectory(prefix=f".{package_name}-", dir=destination.parent) as temporary:
         staging = Path(temporary) / "package"
         staging.mkdir()
@@ -227,6 +235,8 @@ def build_adapter_package(
         lock_path = _artifact_dir(config, root) / "autotrainer.lock.json"
         if lock_path.is_file():
             shutil.copyfile(lock_path, staging / "autotrainer.lock.json")
+        # The manifest intentionally excludes itself, avoiding a recursive hash
+        # while still covering every payload file the consumer will load.
         manifest = {
             "schema_version": 1,
             "package_name": package_name,
