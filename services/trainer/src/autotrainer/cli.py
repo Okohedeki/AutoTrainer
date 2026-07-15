@@ -80,6 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     source_scan = source_sub.add_parser("scan")
     source_scan.add_argument("--write", action="store_true", help="write lock and raw reference artifacts")
     _config_argument(source_scan)
+    source_materialize = source_sub.add_parser(
+        "materialize", help="clone a declared repository and pin its detached commit"
+    )
+    source_materialize.add_argument("source_id")
+    source_materialize.add_argument("--destination", type=Path, default=None)
+    source_materialize.add_argument(
+        "--no-update",
+        action="store_true",
+        help="leave the source URI unchanged after cloning",
+    )
+    _config_argument(source_materialize)
 
     validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
     _config_argument(validate)
@@ -112,6 +123,59 @@ def build_parser() -> argparse.ArgumentParser:
     train_rl = train_sub.add_parser("rl", help="continue the SFT adapter with GRPO environments")
     train_rl.add_argument("--dry-run", action="store_true")
     _config_argument(train_rl)
+
+    evaluate = subparsers.add_parser(
+        "evaluate",
+        aliases=["benchmark"],
+        help="plan, execute, ingest, and report held-out comparisons",
+    )
+    evaluate_sub = evaluate.add_subparsers(dest="evaluate_command", required=True)
+    evaluate_plan = evaluate_sub.add_parser("plan", help="freeze the paired evaluation matrix")
+    evaluate_plan.add_argument("--write", action="store_true")
+    _config_argument(evaluate_plan)
+    evaluate_run = evaluate_sub.add_parser(
+        "run", help="execute a suite whose runner is an explicit argv command"
+    )
+    evaluate_run.add_argument("--suite", required=True)
+    evaluate_run.add_argument("--resume", action="store_true")
+    _config_argument(evaluate_run)
+    evaluate_export = evaluate_sub.add_parser(
+        "export", help="export verifier-free requests for an external runner such as Fable"
+    )
+    evaluate_export.add_argument("--suite", required=True)
+    evaluate_export.add_argument("--output", type=Path, required=True)
+    _config_argument(evaluate_export)
+    evaluate_ingest = evaluate_sub.add_parser(
+        "ingest", help="ingest patches and re-score them in the trusted local environment"
+    )
+    evaluate_ingest.add_argument("input", type=Path)
+    evaluate_ingest.add_argument("--suite", required=True)
+    _config_argument(evaluate_ingest)
+    evaluate_report = evaluate_sub.add_parser(
+        "report", help="write separate model-benchmark and Fable A/B reports"
+    )
+    _config_argument(evaluate_report)
+    evaluate_review = evaluate_sub.add_parser("review", help="manage blind website reviews")
+    review_sub = evaluate_review.add_subparsers(dest="review_command", required=True)
+    review_export = review_sub.add_parser("export", help="create deterministic blind pairs")
+    review_export.add_argument("--suite", required=True)
+    review_export.add_argument("--output", type=Path, required=True)
+    _config_argument(review_export)
+    review_import = review_sub.add_parser("import", help="import immutable blind choices")
+    review_import.add_argument("input", type=Path)
+    review_import.add_argument("--suite", required=True)
+    _config_argument(review_import)
+
+    package = subparsers.add_parser(
+        "package", help="assemble the evaluated LoRA adapter and audit artifacts"
+    )
+    package.add_argument("--output", type=Path, default=None)
+    package.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="build a clearly marked development artifact without a verified winner claim",
+    )
+    _config_argument(package)
 
     return parser
 
@@ -178,6 +242,25 @@ def _run_source(arguments: argparse.Namespace) -> int:
         config.data["sources"].append(declared)
         _save_loaded(config)
         _emit(declared, as_json=arguments.json)
+        return 0
+
+    if arguments.source_command == "materialize":
+        from .sources import materialize_repository
+
+        result = materialize_repository(
+            config.data,
+            config.root,
+            arguments.source_id,
+            destination=arguments.destination,
+        )
+        if not arguments.no_update:
+            for index, source in enumerate(config.data["sources"]):
+                if source.get("id") == arguments.source_id:
+                    config.data["sources"][index] = result["updated_source"]
+                    break
+            _save_loaded(config)
+        result["config_updated"] = not arguments.no_update
+        _emit(result, as_json=arguments.json)
         return 0
 
     from .sources import scan_sources
@@ -297,6 +380,83 @@ def _run_train(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_evaluate(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config, check_paths=True)
+    from .evaluation import (
+        build_evaluation_plan,
+        build_evaluation_reports,
+        export_blind_review,
+        export_evaluation_suite,
+        import_blind_reviews,
+        ingest_evaluation_results,
+        run_command_suite,
+        write_evaluation_plan,
+    )
+
+    if arguments.evaluate_command == "plan":
+        result = (
+            write_evaluation_plan(config.data, config.root)
+            if arguments.write
+            else build_evaluation_plan(config.data, config.root)
+        )
+    elif arguments.evaluate_command == "run":
+        result = run_command_suite(
+            config.data,
+            config.root,
+            arguments.suite,
+            resume=arguments.resume,
+        )
+    elif arguments.evaluate_command == "export":
+        result = export_evaluation_suite(
+            config.data,
+            config.root,
+            arguments.suite,
+            arguments.output,
+        )
+    elif arguments.evaluate_command == "ingest":
+        result = ingest_evaluation_results(
+            config.data,
+            config.root,
+            arguments.suite,
+            arguments.input,
+        )
+    elif arguments.evaluate_command == "report":
+        result = build_evaluation_reports(config.data, config.root)
+    elif arguments.evaluate_command == "review" and arguments.review_command == "export":
+        result = export_blind_review(
+            config.data,
+            config.root,
+            arguments.suite,
+            arguments.output,
+        )
+    elif arguments.evaluate_command == "review" and arguments.review_command == "import":
+        result = import_blind_reviews(
+            config.data,
+            config.root,
+            arguments.suite,
+            arguments.input,
+        )
+    else:
+        raise ConfigError(f"unhandled evaluation command: {arguments.evaluate_command}")
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
+def _run_package(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config, check_paths=True)
+    from .packaging import build_adapter_package
+
+    result = build_adapter_package(
+        config.data,
+        config.root,
+        config_path=config.path,
+        output_dir=arguments.output,
+        allow_unverified=arguments.allow_unverified,
+    )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -321,6 +481,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_doctor(arguments)
         if arguments.command == "train":
             return _run_train(arguments)
+        if arguments.command in {"evaluate", "benchmark"}:
+            return _run_evaluate(arguments)
+        if arguments.command == "package":
+            return _run_package(arguments)
     except (ConfigError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
