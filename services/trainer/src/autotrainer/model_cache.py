@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
-from .config import ConfigError, load_config, write_config
+from .config import ConfigError, load_config, project_config_mutation, write_config
 from .locking import _resolve_huggingface_revision
 
 
@@ -109,11 +109,19 @@ def inspect_model_cache(config_path: str | Path) -> dict[str, Any]:
         result["status"] = "revision_unresolved"
         return result
 
+    configured_cache_dir = _configured_cache_dir(config).resolve()
     receipt = _read_receipt(config.artifact_dir)
+    receipt_cache_dir: Path | None = None
+    if receipt and str(receipt.get("cache_dir", "")).strip():
+        receipt_cache_dir = Path(str(receipt["cache_dir"])).expanduser().resolve()
     if (
         receipt
         and receipt.get("model_id") == model_id
         and receipt.get("revision") == revision.lower()
+        # A receipt proves only the cache it was written for. If the user
+        # relocates model.cache_dir, the old snapshot must not make the new
+        # empty folder look downloaded.
+        and receipt_cache_dir == configured_cache_dir
         and Path(str(receipt.get("snapshot_path", ""))).is_dir()
     ):
         result.update(
@@ -188,20 +196,42 @@ def materialize_model(config_path: str | Path) -> dict[str, Any]:
         ) from error
 
     file_count, logical_bytes = _snapshot_size(snapshot)
-    config.data["model"]["revision"] = resolved_revision
-    write_config(config.path, config.data, overwrite=True)
-    receipt = {
-        "schema_version": 1,
-        "model_id": model_id,
-        "requested_revision": requested_revision,
-        "revision": resolved_revision,
-        "snapshot_path": str(snapshot),
-        "cache_dir": str(cache_dir),
-        "file_count": file_count,
-        "logical_bytes": logical_bytes,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    receipt_path = _write_receipt(config.artifact_dir, receipt)
+    with project_config_mutation(config.path):
+        # The download may take hours, so never commit the stale mapping read
+        # before it began. Re-read and patch only our revision, preserving
+        # sources (and every other setting) changed while blobs downloaded.
+        current = load_config(config.path)
+        current_model = current.data["model"]
+        current_id = str(current_model.get("id", "")).strip()
+        current_revision = str(current_model.get("revision", "")).strip()
+        current_cache_dir = _configured_cache_dir(current).resolve()
+        if current_id != model_id or current_revision not in {
+            requested_revision,
+            resolved_revision,
+        }:
+            raise ModelCacheError(
+                "The selected model changed while its snapshot downloaded; "
+                "the new selection was preserved. Start its download when ready."
+            )
+        if current_cache_dir != cache_dir.resolve():
+            raise ModelCacheError(
+                "The model cache folder changed while its snapshot downloaded; "
+                "the new folder was preserved. Start the download again."
+            )
+        current_model["revision"] = resolved_revision
+        write_config(current.path, current.data, overwrite=True)
+        receipt = {
+            "schema_version": 1,
+            "model_id": model_id,
+            "requested_revision": requested_revision,
+            "revision": resolved_revision,
+            "snapshot_path": str(snapshot),
+            "cache_dir": str(cache_dir),
+            "file_count": file_count,
+            "logical_bytes": logical_bytes,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        receipt_path = _write_receipt(current.artifact_dir, receipt)
     return {
         "status": "downloaded",
         **receipt,

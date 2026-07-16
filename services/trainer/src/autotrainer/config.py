@@ -6,16 +6,41 @@ read and write this same contract rather than keeping a second model catalogue.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, Mapping
+import threading
+from typing import Any, Iterator, Mapping
 
 import yaml
 
 
 class ConfigError(ValueError):
     """Raised when an AutoTrainer project configuration is invalid."""
+
+
+# GUI requests can finish in a different order than they started.  Every
+# read/modify/write operation uses the lock for its project so one request
+# cannot replace unrelated YAML fields written by another request.
+_CONFIG_LOCKS_GUARD = threading.Lock()
+_CONFIG_MUTATION_LOCKS: dict[Path, threading.RLock] = {}
+
+
+@contextmanager
+def project_config_mutation(path: str | Path) -> Iterator[Path]:
+    """Serialize one project's in-process YAML read/modify/write operations.
+
+    Long work that does not mutate YAML (for example downloading model blobs)
+    should happen before entering this context.  Callers must re-read the
+    returned path inside the context and merge only the fields they own.
+    """
+
+    config_path = Path(path).expanduser().resolve()
+    with _CONFIG_LOCKS_GUARD:
+        lock = _CONFIG_MUTATION_LOCKS.setdefault(config_path, threading.RLock())
+    with lock:
+        yield config_path
 
 
 ALLOWED_SOURCE_KINDS = {"repository", "sft_jsonl", "task_pack"}

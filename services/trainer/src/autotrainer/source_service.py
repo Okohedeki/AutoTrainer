@@ -15,15 +15,19 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import threading
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from .config import ConfigError, load_config, validate_mapping, write_config
+from .config import (
+    ConfigError,
+    load_config,
+    project_config_mutation,
+    validate_mapping,
+    write_config,
+)
 from .sources import materialize_repository
 
 
-_SOURCE_MUTATION_LOCK = threading.RLock()
 _SOURCE_ID_PATTERN = re.compile(r"[^a-z0-9._-]+")
 _GITHUB_PART_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _GITHUB_SCP_PATTERN = re.compile(r"^(?:[^@\s]+@)?github\.com:(?P<path>[^?#]+)$", re.IGNORECASE)
@@ -346,7 +350,7 @@ def add_source(
     supplied = str(value).strip()
     if not supplied:
         raise ConfigError("source value is required")
-    with _SOURCE_MUTATION_LOCK:
+    with project_config_mutation(config_path):
         config = load_config(config_path)
         inferred_origin = "local"
         if kind is None:
@@ -417,7 +421,7 @@ def remove_source(config_path: str | Path, source_id: str) -> dict[str, Any]:
     requested_id = str(source_id).strip()
     if not requested_id:
         raise ConfigError("source id is required")
-    with _SOURCE_MUTATION_LOCK:
+    with project_config_mutation(config_path):
         config = load_config(config_path)
         matching = [source for source in config.sources if str(source.get("id")) == requested_id]
         if not matching:

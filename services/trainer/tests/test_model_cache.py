@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,8 @@ from autotrainer.model_cache import (  # noqa: E402
     materialize_model,
     require_materialized_model,
 )
+from autotrainer.model_service import select_model  # noqa: E402
+from autotrainer.source_service import add_source  # noqa: E402
 
 
 class ModelCacheTests(unittest.TestCase):
@@ -75,6 +79,141 @@ class ModelCacheTests(unittest.TestCase):
         receipt_text = Path(result["receipt"]).read_text(encoding="utf-8")
         self.assertNotIn("secret-token", receipt_text)
         self.assertEqual(json.loads(receipt_text)["snapshot_path"], str(snapshot.resolve()))
+
+    def test_download_completion_merges_a_source_added_while_blobs_download(self) -> None:
+        """A slow model request must not replace a faster source request."""
+
+        resolved = "c" * 40
+        snapshot = self.root / ".autotrainer" / "model-cache" / "snapshot"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}", encoding="utf-8")
+        examples = self.root / "accepted.jsonl"
+        examples.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Build the card"},
+                        {"role": "assistant", "content": "Done"},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        download_started = threading.Event()
+        finish_download = threading.Event()
+
+        def slow_download(**_kwargs: object) -> str:
+            download_started.set()
+            if not finish_download.wait(timeout=5):
+                raise AssertionError("test did not release the model download")
+            return str(snapshot)
+
+        with (
+            patch(
+                "autotrainer.model_cache._resolve_huggingface_revision",
+                return_value=resolved,
+            ),
+            patch(
+                "autotrainer.model_cache._hub_functions",
+                return_value=(slow_download, object()),
+            ),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            future = executor.submit(materialize_model, self.config_path)
+            self.assertTrue(download_started.wait(timeout=2))
+            try:
+                added = add_source(self.config_path, str(examples))
+            finally:
+                # Always unblock the worker so a failed assertion cannot hang
+                # the suite inside ThreadPoolExecutor.__exit__.
+                finish_download.set()
+            result = future.result(timeout=5)
+
+        config = load_config(self.config_path)
+        self.assertEqual(result["revision"], resolved)
+        self.assertEqual(config.model["revision"], resolved)
+        self.assertEqual([source["id"] for source in config.sources], [added["source"]["id"]])
+
+    def test_relocated_cache_does_not_trust_the_old_receipt(self) -> None:
+        resolved = "d" * 40
+        old_cache = self.root / ".autotrainer" / "model-cache"
+        snapshot = old_cache / "snapshot"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}", encoding="utf-8")
+
+        with (
+            patch(
+                "autotrainer.model_cache._resolve_huggingface_revision",
+                return_value=resolved,
+            ),
+            patch(
+                "autotrainer.model_cache._hub_functions",
+                return_value=(lambda **_kwargs: str(snapshot), object()),
+            ),
+        ):
+            materialize_model(self.config_path)
+
+        relocated = self.root / "relocated-cache"
+        config = load_config(self.config_path)
+        config.data["model"]["cache_dir"] = str(relocated)
+        write_config(config.path, config.data, overwrite=True)
+
+        def missing_from_new_cache(**kwargs: object) -> str:
+            self.assertEqual(Path(str(kwargs["cache_dir"])).resolve(), relocated.resolve())
+            raise FileNotFoundError("new cache is empty")
+
+        with patch(
+            "autotrainer.model_cache._hub_functions",
+            return_value=(missing_from_new_cache, object()),
+        ):
+            state = inspect_model_cache(self.config_path)
+
+        self.assertEqual(state["status"], "not_downloaded")
+        self.assertIsNone(state["snapshot_path"])
+        self.assertEqual(state["cache_dir"], str(relocated.resolve()))
+
+    def test_download_does_not_overwrite_a_new_model_selection(self) -> None:
+        original_resolution = "e" * 40
+        new_revision = "f" * 40
+        snapshot = self.root / ".autotrainer" / "model-cache" / "snapshot"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}", encoding="utf-8")
+        download_started = threading.Event()
+        finish_download = threading.Event()
+
+        def slow_download(**_kwargs: object) -> str:
+            download_started.set()
+            if not finish_download.wait(timeout=5):
+                raise AssertionError("test did not release the model download")
+            return str(snapshot)
+
+        with (
+            patch(
+                "autotrainer.model_cache._resolve_huggingface_revision",
+                return_value=original_resolution,
+            ),
+            patch(
+                "autotrainer.model_cache._hub_functions",
+                return_value=(slow_download, object()),
+            ),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            future = executor.submit(materialize_model, self.config_path)
+            self.assertTrue(download_started.wait(timeout=2))
+            try:
+                select_model(
+                    self.config_path,
+                    "qwen3.5-9b-text",
+                    revision=new_revision,
+                )
+            finally:
+                finish_download.set()
+            with self.assertRaisesRegex(ModelCacheError, "selected model changed"):
+                future.result(timeout=5)
+
+        self.assertEqual(load_config(self.config_path).model["revision"], new_revision)
+        self.assertFalse((self.root / ".autotrainer" / "models" / "current.json").exists())
 
     def test_exact_snapshot_check_is_local_only(self) -> None:
         calls: list[dict[str, object]] = []
