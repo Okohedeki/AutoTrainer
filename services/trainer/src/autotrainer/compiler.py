@@ -18,6 +18,7 @@ from typing import Any
 
 from .history import HistoryError, approved_history_records
 from .manifest import TaskManifest
+from .sources import normalize_sft_record
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -505,15 +506,21 @@ def compile_data(
     }
     # Repository files themselves remain evidence only. The sole repository-
     # derived SFT rows are the reviewed records returned by the history core.
-    sft_records: dict[str, list[Mapping[str, Any]]] = {
-        "train": [dict(record) for record in history_records],
-        "evaluation": [],
-    }
+    sft_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     rl_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     errors: list[str] = []
     warnings: list[str] = []
     task_ids: set[str] = set()
     group_partitions: dict[str, str] = {}
+
+    # History and explicit JSONL meet at this canonicalization boundary. It
+    # prevents one dataset from mixing strings, full conversations, and
+    # conversational prompt/completion columns that Arrow cannot type safely.
+    for position, record in enumerate(history_records, 1):
+        try:
+            sft_records["train"].append(normalize_sft_record(record))
+        except ValueError as error:
+            errors.append(f"history record {position}: {error}")
 
     # Phase one builds and validates every record in memory. No declared trainer
     # dataset is touched until all sources and cross-split invariants pass.
@@ -537,7 +544,7 @@ def compile_data(
                     value = json.loads(line)
                     if not isinstance(value, Mapping):
                         raise ValueError("record must be an object")
-                    sft_records[partition].append(dict(value))
+                    sft_records[partition].append(normalize_sft_record(value))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                 errors.append(f"{source_id}: cannot compile {path}:{line_number}: {error}")
         elif kind == "task_pack":

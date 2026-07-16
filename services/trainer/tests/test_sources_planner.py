@@ -317,6 +317,12 @@ class SourceScanTests(unittest.TestCase):
             rows = [
                 {"messages": [{"role": "user", "content": "Build a card"}, {"role": "assistant", "content": "Here is the patch"}]},
                 {"prompt": "Build a navbar", "completion": "Here is the implementation"},
+                {
+                    "prompt": [{"role": "user", "content": "Build a footer"}],
+                    "completion": [
+                        {"role": "assistant", "content": "Here is the implementation"}
+                    ],
+                },
             ]
             dataset.write_text(
                 "\n".join(json.dumps(row) for row in rows) + "\n{not-json}\n", encoding="utf-8"
@@ -335,10 +341,10 @@ class SourceScanTests(unittest.TestCase):
 
             source = scan_sources(config, root)["sources"][0]
 
-            self.assertEqual(source["valid_record_count"], 2)
+            self.assertEqual(source["valid_record_count"], 3)
             self.assertEqual(source["invalid_record_count"], 1)
             self.assertEqual(source["status"], "blocked")
-            self.assertTrue(any(":3:" in error for error in source["errors"]))
+            self.assertTrue(any(":4:" in error for error in source["errors"]))
 
     def test_task_pack_resolves_repository_snapshot_and_declared_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

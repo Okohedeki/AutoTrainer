@@ -15,6 +15,10 @@ from autotrainer.compiler import _atomic_jsonl, compile_data  # noqa: E402
 from autotrainer.config import default_config  # noqa: E402
 from autotrainer.history import list_history, review_history  # noqa: E402
 from autotrainer.sources import scan_sources  # noqa: E402
+from autotrainer.training.common import (  # noqa: E402
+    inspect_sft_dataset,
+    validate_sft_token_lengths,
+)
 
 
 def _task_manifest(
@@ -426,6 +430,16 @@ class CompilerTests(unittest.TestCase):
             explicit = root / "accepted.jsonl"
             explicit.write_text(
                 json.dumps({"prompt": "Build a card", "completion": "Verified result"})
+                + "\n"
+                + json.dumps(
+                    {
+                        "messages": [
+                            {"role": "system", "content": "Follow the local style."},
+                            {"role": "user", "content": "Build a navbar"},
+                            {"role": "assistant", "content": "Verified navbar result"},
+                        ]
+                    }
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -447,12 +461,40 @@ class CompilerTests(unittest.TestCase):
             ]
 
             self.assertEqual(combined["errors"], [])
-            self.assertEqual(combined["counts"]["sft_train"], 2)
+            self.assertEqual(combined["counts"]["sft_train"], 3)
             self.assertEqual(
                 sum(row.get("source_type") == "approved_git_change" for row in combined_rows),
                 1,
             )
-            self.assertTrue(any(row.get("prompt") == "Build a card" for row in combined_rows))
+            self.assertTrue(
+                any(row["prompt"][0]["content"] == "Build a card" for row in combined_rows)
+            )
+            self.assertTrue(all("messages" not in row for row in combined_rows))
+            self.assertTrue(
+                all(
+                    isinstance(row["prompt"], list)
+                    and isinstance(row["completion"], list)
+                    and all(message["role"] == "assistant" for message in row["completion"])
+                    for row in combined_rows
+                )
+            )
+
+            dataset_path = Path(combined["artifacts"]["sft_train"])
+            self.assertEqual(
+                inspect_sft_dataset(dataset_path)["format"],
+                "conversational-prompt-completion",
+            )
+
+            class CountingTokenizer:
+                def apply_chat_template(self, messages: list[dict], **_: object) -> list[int]:
+                    return list(range(sum(len(message["content"]) for message in messages)))
+
+            self.assertEqual(
+                validate_sft_token_lengths(CountingTokenizer(), dataset_path, max_length=20_000)[
+                    "record_count"
+                ],
+                3,
+            )
 
     def test_pending_history_repository_compiles_zero_sft_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..sources import normalize_sft_record
+
 
 SUPPORTED_SCHEMA_VERSION = 1
 SUPPORTED_MODEL_ID = "Qwen/Qwen3.5-9B"
@@ -407,22 +409,21 @@ def _validate_messages(value: Any, field: str, *, require_assistant: bool) -> No
 def inspect_sft_dataset(path: Path) -> dict[str, Any]:
     record = _first_json_record(path)
     _reject_multimodal(record)
-    if "messages" in record:
-        _validate_messages(record["messages"], "sft.dataset.messages", require_assistant=True)
-        dataset_format = "conversational-messages"
-    elif "prompt" in record and "completion" in record:
-        _validate_messages(record["prompt"], "sft.dataset.prompt", require_assistant=False)
-        _validate_messages(
-            record["completion"], "sft.dataset.completion", require_assistant=True
-        )
-        dataset_format = "conversational-prompt-completion"
-    else:
+    try:
+        normalized = normalize_sft_record(record)
+    except ValueError as error:
+        raise TrainingConfigurationError(f"sft.dataset {error}") from error
+    if (
+        "messages" in record
+        or record.get("prompt") != normalized["prompt"]
+        or record.get("completion") != normalized["completion"]
+    ):
         raise TrainingConfigurationError(
-            "sft.dataset records must contain conversational messages, or prompt and completion"
+            "sft.dataset must use compiled conversational prompt and completion message lists"
         )
     return {
         "path": str(path),
-        "format": dataset_format,
+        "format": "conversational-prompt-completion",
         "first_record_fields": sorted(str(key) for key in record),
     }
 
@@ -471,19 +472,22 @@ def validate_sft_token_lengths(
     records = _json_records(path)
     for position, record in records:
         _reject_multimodal(record)
-        if "messages" in record:
-            messages = record["messages"]
-            _validate_messages(messages, "sft.dataset.messages", require_assistant=True)
-        elif "prompt" in record and "completion" in record:
-            prompt = record["prompt"]
-            completion = record["completion"]
-            _validate_messages(prompt, "sft.dataset.prompt", require_assistant=False)
-            _validate_messages(completion, "sft.dataset.completion", require_assistant=True)
-            messages = [*prompt, *completion]
-        else:
+        try:
+            normalized = normalize_sft_record(record)
+        except ValueError as error:
             raise TrainingConfigurationError(
-                f"sft.dataset record {position} must contain messages or prompt and completion"
+                f"sft.dataset record {position}: {error}"
+            ) from error
+        if (
+            "messages" in record
+            or record.get("prompt") != normalized["prompt"]
+            or record.get("completion") != normalized["completion"]
+        ):
+            raise TrainingConfigurationError(
+                f"sft.dataset record {position} must use compiled conversational "
+                "prompt and completion message lists"
             )
+        messages = [*normalized["prompt"], *normalized["completion"]]
 
         token_ids = tokenizer.apply_chat_template(
             messages,

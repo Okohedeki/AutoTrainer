@@ -545,7 +545,13 @@ def _scan_repository(
     return _finish(result), documents
 
 
-def _validate_message_list(value: Any, *, require_assistant: bool) -> str | None:
+def _validate_message_list(
+    value: Any,
+    *,
+    require_user: bool,
+    require_assistant: bool,
+    assistant_only: bool = False,
+) -> str | None:
     if not isinstance(value, list) or not value:
         return "must be a non-empty message list"
     roles: set[str] = set()
@@ -556,37 +562,108 @@ def _validate_message_list(value: Any, *, require_assistant: bool) -> str | None
         content = message.get("content")
         if role not in {"system", "user", "assistant", "tool"}:
             return f"message {index}.role is invalid"
+        if assistant_only and role != "assistant":
+            return f"message {index}.role must be assistant"
         if not isinstance(content, str) or not content.strip():
             return f"message {index}.content must be non-empty text"
         roles.add(str(role))
-    if "user" not in roles:
+    if require_user and "user" not in roles:
         return "must contain a user message"
     if require_assistant and "assistant" not in roles:
         return "must contain an assistant message"
     return None
 
 
+def normalize_sft_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one trainer-safe conversational prompt/completion record.
+
+    User datasets commonly use either a complete ``messages`` conversation or
+    plain prompt/completion strings. Compiled datasets cannot safely mix those
+    schemas: Arrow infers one column type, and the trainer's completion-loss
+    boundary needs an explicit answer. This conversion is therefore the single
+    boundary between accepted source shapes and the compiled V1 SFT contract.
+    """
+
+    if not isinstance(record, Mapping):
+        raise ValueError("record must be a JSON object")
+
+    normalized = dict(record)
+    if "messages" in record:
+        messages = record["messages"]
+        error = _validate_message_list(
+            messages,
+            require_user=True,
+            require_assistant=True,
+        )
+        if error:
+            raise ValueError(f"messages {error}")
+        # One example teaches the final assistant response. Earlier assistant
+        # turns remain context, which preserves valid multi-turn demonstrations.
+        if messages[-1].get("role") != "assistant":
+            raise ValueError("messages must end with the assistant response to train")
+        prompt = messages[:-1]
+        completion = [messages[-1]]
+        normalized.pop("messages", None)
+    elif "prompt" in record and "completion" in record:
+        prompt = record["prompt"]
+        completion = record["completion"]
+        if isinstance(prompt, str) and isinstance(completion, str):
+            prompt = [{"role": "user", "content": prompt}]
+            completion = [{"role": "assistant", "content": completion}]
+        elif not isinstance(prompt, list) or not isinstance(completion, list):
+            raise ValueError(
+                "prompt and completion must both be text or both be message lists"
+            )
+    else:
+        raise ValueError("record must contain messages or prompt and completion")
+
+    prompt_error = _validate_message_list(
+        prompt,
+        require_user=True,
+        require_assistant=False,
+    )
+    if prompt_error:
+        raise ValueError(f"prompt {prompt_error}")
+    completion_error = _validate_message_list(
+        completion,
+        require_user=False,
+        require_assistant=True,
+        assistant_only=True,
+    )
+    if completion_error:
+        raise ValueError(f"completion {completion_error}")
+
+    # Strip message-level extras so every row has the exact role/content shape
+    # expected by chat templates, while retaining record-level provenance.
+    normalized["prompt"] = [
+        {"role": str(message["role"]), "content": str(message["content"])}
+        for message in prompt
+    ]
+    normalized["completion"] = [
+        {"role": "assistant", "content": str(message["content"])}
+        for message in completion
+    ]
+    return normalized
+
+
 def _validate_sft_record(record: Any) -> tuple[str | None, str | None]:
     if not isinstance(record, Mapping):
         return None, "record must be a JSON object"
     if "messages" in record:
-        error = _validate_message_list(record["messages"], require_assistant=True)
-        return "messages", error
-    if "prompt" in record and "completion" in record:
-        prompt = record["prompt"]
-        completion = record["completion"]
-        if isinstance(prompt, str) and isinstance(completion, str):
-            if not prompt.strip() or not completion.strip():
-                return "prompt_completion", "prompt and completion must be non-empty text"
-            return "prompt_completion", None
-        prompt_error = _validate_message_list(prompt, require_assistant=False)
-        if prompt_error:
-            return "conversational_prompt_completion", f"prompt {prompt_error}"
-        completion_error = _validate_message_list(completion, require_assistant=True)
-        if completion_error:
-            return "conversational_prompt_completion", f"completion {completion_error}"
-        return "conversational_prompt_completion", None
-    return None, "record must contain messages or prompt and completion"
+        record_format = "messages"
+    elif "prompt" in record and "completion" in record:
+        record_format = (
+            "prompt_completion"
+            if isinstance(record["prompt"], str) and isinstance(record["completion"], str)
+            else "conversational_prompt_completion"
+        )
+    else:
+        return None, "record must contain messages or prompt and completion"
+    try:
+        normalize_sft_record(record)
+    except ValueError as error:
+        return record_format, str(error)
+    return record_format, None
 
 
 def _scan_sft_jsonl(source: Mapping[str, Any], index: int, project_root: Path) -> dict[str, Any]:
@@ -1333,4 +1410,4 @@ def scan_sources(
     return scan
 
 
-__all__ = ["materialize_repository", "scan_sources"]
+__all__ = ["materialize_repository", "normalize_sft_record", "scan_sources"]

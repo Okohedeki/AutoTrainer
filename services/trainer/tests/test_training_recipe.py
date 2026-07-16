@@ -28,10 +28,10 @@ class TrainingRecipeTests(unittest.TestCase):
         self.sft_dataset.write_text(
             json.dumps(
                 {
-                    "messages": [
-                        {"role": "user", "content": "Create a pricing page."},
-                        {"role": "assistant", "content": "I will inspect the repository."},
-                    ]
+                    "prompt": [{"role": "user", "content": "Create a pricing page."}],
+                    "completion": [
+                        {"role": "assistant", "content": "I will inspect the repository."}
+                    ],
                 }
             )
             + "\n",
@@ -113,6 +113,30 @@ class TrainingRecipeTests(unittest.TestCase):
             result["recipe"]["model"]["cache_dir"],
             str((self.project_root / ".autotrainer" / "model-cache").resolve()),
         )
+
+    def test_sft_dry_run_rejects_an_uncompiled_messages_record(self) -> None:
+        self.sft_dataset.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Create a pricing page."},
+                        {"role": "assistant", "content": "Here is the result."},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            TrainingConfigurationError, "compiled conversational prompt and completion"
+        ):
+            run_sft(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/sft-output"),
+                dry_run=True,
+            )
 
     def test_sft_checks_every_full_conversation_with_the_real_tokenizer_boundary(self) -> None:
         second = {
