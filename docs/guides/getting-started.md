@@ -114,6 +114,27 @@ autotrainer source list --config autotrainer.yaml
 autotrainer source scan --config autotrainer.yaml
 ```
 
+## Choose and download the model
+
+For the human workflow, start the loopback backend from the repository root and run the web app in a second terminal:
+
+```bash
+autotrainer serve --config examples/frontend-expert/autotrainer.yaml
+npm run dev
+```
+
+Use **Choose the training base** in the Overview. The GUI saves the selected model, immutable revision, and cache path to `autotrainer.yaml` before downloading. Public models do not require a key. For gated models, authenticate with the normal Hugging Face login or provide `HF_TOKEN` to the backend process; AutoTrainer never writes that token to project files.
+
+Agents use the equivalent commands:
+
+```bash
+autotrainer model use qwen3.5-9b-text --config examples/frontend-expert/autotrainer.yaml
+autotrainer model status --config examples/frontend-expert/autotrainer.yaml
+autotrainer model download --config examples/frontend-expert/autotrainer.yaml
+```
+
+Successful download resolves the revision, writes it back to YAML, and records `.autotrainer/models/current.json`. Real SFT and GRPO runs then require that exact snapshot locally and load it with network access disabled.
+
 To create a standalone project, initialize it and then add your own repository, demonstration, and task-pack source declarations. Copy authored data or task files only when you also update every `uri`, `sourceId`, and repository-relative `workingDirectory`:
 
 ```bash

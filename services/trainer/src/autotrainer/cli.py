@@ -67,7 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     _config_argument(model_download)
     model_use = model_sub.add_parser("use")
     model_use.add_argument("model")
-    model_use.add_argument("--revision", required=True)
+    model_use.add_argument(
+        "--revision",
+        default=None,
+        help="immutable revision; supported catalogue models use their pinned default",
+    )
     model_use.add_argument(
         "--cache-dir",
         default=None,

@@ -11,7 +11,15 @@ Each experiment must answer two questions:
 
 ## Source of truth
 
-`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app is currently a read-only preview; the intended GUI will edit and run those same contracts through the shared local backend while the CLI remains an equivalent reproducibility interface. It is not a second orchestration system and must not create hidden GUI-only state.
+`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app performs model selection and download through a loopback-only local API; that API and the CLI call the same Python service functions. The GUI is not a second orchestration system and must not create hidden GUI-only state. Training launch and telemetry will follow this same boundary as their job contract is implemented.
+
+## Human and agent interfaces
+
+- Humans use the GUI to select a validated training base, review its immutable revision and cache, and download it.
+- Agents use `autotrainer model use`, `model status`, and `model download` for the equivalent operations.
+- Both paths mutate the same YAML, call `model_service`, and receive the same cache states.
+- `autotrainer serve` binds only to loopback and exposes a versioned `/api/v1` contract; it does not accept arbitrary shell commands.
+- Hugging Face credentials remain process environment input. They are never returned by the API or written to YAML and receipts.
 
 Repository code, SFT demonstrations, and RL task packs are deliberately different source kinds. Static code can establish vocabulary and style, but it is not supervised data without an instruction and accepted response, and it is not RL data without a resettable starting state and hidden verifier.
 

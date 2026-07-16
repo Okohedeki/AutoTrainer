@@ -36,6 +36,7 @@ test("the GUI and CLI share the real model lifecycle", async () => {
   const panel = await readFile(new URL("src/ModelSetupPanel.tsx", root), "utf8");
   const api = await readFile(new URL("src/api.ts", root), "utf8");
   const vite = await readFile(new URL("vite.config.ts", root), "utf8");
+  const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
   assert.match(panel, /Choose the training base/);
   assert.match(panel, /Only V1 profiles validated for one-GPU training/);
   assert.match(panel, /await selectProjectModel/);
@@ -45,6 +46,7 @@ test("the GUI and CLI share the real model lifecycle", async () => {
   assert.match(api, /\/api\/v1\/model\/select/);
   assert.match(api, /\/api\/v1\/model\/download/);
   assert.match(vite, /127\.0\.0\.1:8765/);
+  assert.match(snapshot, /autotrainer model download --config/);
 });
 
 test("the example snapshot cannot imply a downloaded or active model", async () => {

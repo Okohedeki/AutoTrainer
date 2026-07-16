@@ -262,6 +262,24 @@ export const evaluationSuites = [
 // commands. Credentials and other secrets must never be embedded here.
 export const commands: CommandDefinition[] = [
   {
+    id: "backend",
+    label: "Start human backend",
+    description: "Expose the same model and training operations to the local GUI on loopback only.",
+    command: "autotrainer serve --config examples/frontend-expert/autotrainer.yaml",
+  },
+  {
+    id: "model-status",
+    label: "Inspect model cache",
+    description: "Agent equivalent of the GUI model status, without making a network request.",
+    command: "autotrainer model status --config examples/frontend-expert/autotrainer.yaml",
+  },
+  {
+    id: "model-download",
+    label: "Download base model",
+    description: "Agent equivalent of Download model: pin, materialize, verify, and record the snapshot.",
+    command: "autotrainer model download --config examples/frontend-expert/autotrainer.yaml",
+  },
+  {
     id: "validate",
     label: "Validate inputs",
     description: "Check YAML, source declarations, recipes, and paths without loading the model.",

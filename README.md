@@ -23,6 +23,8 @@ Fable + base 9B vs Fable + the same trained candidate
 ## What is usable now
 
 - A project CLI for model and source declaration, validation, scanning, compilation, locking, planning, and runtime checks.
+- A loopback-only local API and GUI model setup that use the same service operations as the CLI.
+- Immutable Hugging Face model download receipts and offline-only training loads.
 - Deterministic repository inventories and direct SFT JSONL compilation.
 - Versioned executable frontend task packs with a Docker/Podman security boundary.
 - A guarded Hugging Face QLoRA SFT runner.
@@ -31,7 +33,7 @@ Fable + base 9B vs Fable + the same trained candidate
 - Immutable, paired evaluation plans with local result verification, separate model/Fable reports, and blind-review import/export.
 - Winner-gated LoRA adapter packaging with auditable file hashes and an explicitly labeled unverified-development escape hatch.
 
-The evaluation and packaging workflow is implemented, but this checkout does not contain the evidence for a verified V1 winner. A real run still needs enough independent held-out project families, pinned model-agent and Fable runners, a completed 9B SFT/GRPO run, and blind Fable reviews. The dashboard remains a read-only product preview; it does not launch jobs. See the [V1 handoff plan](docs/V1-HANDOFF.md) for the ordered continuation work.
+The evaluation and packaging workflow is implemented, but this checkout does not contain the evidence for a verified V1 winner. A real run still needs enough independent held-out project families, pinned model-agent and Fable runners, a completed 9B SFT/GRPO run, and blind Fable reviews. The GUI now performs model selection and download through the shared local backend; training launch and telemetry remain guarded until their backend job contract is connected. See the [V1 handoff plan](docs/V1-HANDOFF.md) for the ordered continuation work.
 
 ## Quickstart
 
@@ -65,8 +67,9 @@ Edit the `model` section or use the CLI:
 ```bash
 autotrainer models list
 autotrainer model use qwen3.5-9b-text \
-  --revision YOUR_IMMUTABLE_HUGGING_FACE_COMMIT \
   --config autotrainer.yaml
+autotrainer model status --config autotrainer.yaml
+autotrainer model download --config autotrainer.yaml
 ```
 
 The V1 trainable project model is `Qwen/Qwen3.5-9B`, loaded through the text-only `Qwen3_5ForCausalLM` path. AutoTrainer never loads its processor, image inputs, or vision encoder, and aborts if a different class is instantiated. A custom model can be declared for authoring, but the guarded V1 training backend currently supports only this tested profile; the separately pinned 9B benchmark reference may use a different model through its external runner.
@@ -76,6 +79,7 @@ model:
   provider: huggingface
   id: Qwen/Qwen3.5-9B
   revision: YOUR_IMMUTABLE_HUGGING_FACE_COMMIT
+  cache_dir: .autotrainer/model-cache
   loader: qwen3_5_text
   trust_remote_code: false
   dtype: bfloat16
@@ -87,7 +91,7 @@ model:
     compute_dtype: bfloat16
 ```
 
-`autotrainer lock` resolves a mutable Hugging Face revision and local Git revisions into `.autotrainer/autotrainer.lock.json`. A published experiment should never rely on `main`.
+`model download` resolves a mutable Hugging Face revision, writes the immutable commit back to YAML, downloads the complete snapshot, and records a token-free receipt. Real training is offline-only and refuses a missing or mutable model. `autotrainer lock` records that model identity with local Git revisions in `.autotrainer/autotrainer.lock.json`. A published experiment should never rely on `main`.
 
 ## Point it at repositories and data
 
@@ -175,11 +179,14 @@ npm ci
 npm test
 ```
 
-The web preview is optional:
+Run the human GUI with the local backend and Vite in separate terminals:
 
 ```bash
+autotrainer serve --config examples/frontend-expert/autotrainer.yaml
 npm run dev
 ```
+
+The GUI calls `/api/v1`; Vite forwards it to the loopback backend at `127.0.0.1:8765`. Agents use the equivalent `autotrainer model ...` commands against the same YAML and model-service code.
 
 ## License
 

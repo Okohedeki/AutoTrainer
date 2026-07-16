@@ -73,6 +73,19 @@ class CliTests(unittest.TestCase):
                 "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
             )
 
+    def test_agent_cli_uses_the_same_pinned_catalog_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "autotrainer.yaml"
+            write_config(path, default_config(revision="main"), overwrite=False)
+            self.assertEqual(
+                main(["model", "use", "qwen3.5-9b-text", "--config", str(path)]),
+                0,
+            )
+            self.assertEqual(
+                load_config(path).model["revision"],
+                "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+            )
+
     def test_reference_model_cannot_be_selected_as_the_training_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "autotrainer.yaml"
