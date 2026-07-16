@@ -36,7 +36,13 @@ const trainingStageLabels: Record<NonNullable<TrainingJob["stage"]>, string> = {
 // Preparation folds the old validate, scan, compile, plan, and Doctor sequence
 // into one human action. Detailed evidence remains in the API response for the
 // agent CLI, while this panel shows only the next decision.
-export default function PreparePanel({ revision = 0 }: { revision?: number }) {
+export default function PreparePanel({
+  revision = 0,
+  onTrainingActiveChange,
+}: {
+  revision?: number;
+  onTrainingActiveChange?: (active: boolean) => void;
+}) {
   const [result, setResult] = useState<PreparationResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +123,12 @@ export default function PreparePanel({ revision = 0 }: { revision?: number }) {
     .map((stage) => stage.output_dir)
     .filter((value): value is string => Boolean(value))
     .at(-1);
+
+  useEffect(() => {
+    // The API remains the enforcement boundary; this callback also makes the
+    // page visibly immutable while one training job owns the project snapshot.
+    onTrainingActiveChange?.(trainingActive);
+  }, [onTrainingActiveChange, trainingActive]);
 
   return (
     <section className="panel setup-step prepare-panel" aria-labelledby="prepare-heading" data-tour="prepare">

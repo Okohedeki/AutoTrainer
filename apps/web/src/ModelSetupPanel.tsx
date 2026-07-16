@@ -39,7 +39,13 @@ function readableBytes(value?: number): string {
 
 // This is the human-facing model lifecycle. Every mutation goes through the
 // local API and lands in autotrainer.yaml before a model download can begin.
-export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: () => void }) {
+export default function ModelSetupPanel({
+  onModelChanged,
+  disabled = false,
+}: {
+  onModelChanged?: () => void;
+  disabled?: boolean;
+}) {
   const [workspace, setWorkspace] = useState<ModelWorkspace | null>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [action, setAction] = useState<ActionState>("idle");
@@ -90,6 +96,7 @@ export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: (
       ? { label: "Connecting", tone: "muted" as const }
       : cacheLabel(cache, selectionChanged);
   const busy = action !== "idle";
+  const locked = busy || disabled;
 
   const changeModel = (alias: string) => {
     setSelectedModel(alias);
@@ -161,7 +168,7 @@ export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: (
               id="base-model"
               value={selectedModel}
               onChange={(event) => changeModel(event.target.value)}
-              disabled={!connected || busy}
+              disabled={!connected || locked}
             >
               {trainableModels.length > 0
                 ? trainableModels.map(([alias, model]) => <option key={alias} value={alias}>{model.id} · {model.parameters}</option>)
@@ -172,7 +179,7 @@ export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: (
           <button
             className="primary-button model-download"
             type="submit"
-            disabled={!connected || busy || (cache?.status === "downloaded" && !selectionChanged)}
+            disabled={!connected || locked || (cache?.status === "downloaded" && !selectionChanged)}
           >
             {action === "downloading" ? "Downloading…" : cache?.status === "downloaded" && !selectionChanged ? "Downloaded" : "Select & download"}
           </button>
@@ -183,17 +190,17 @@ export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: (
           <div className="advanced-fields">
             <label htmlFor="model-revision">
               <span>Exact version</span>
-              <input id="model-revision" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={!connected || busy} spellCheck={false} />
+              <input id="model-revision" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={!connected || locked} spellCheck={false} />
             </label>
             <label htmlFor="model-cache">
               <span>Download folder</span>
-              <input id="model-cache" value={cacheDir} onChange={(event) => setCacheDir(event.target.value)} disabled={!connected || busy} spellCheck={false} />
+              <input id="model-cache" value={cacheDir} onChange={(event) => setCacheDir(event.target.value)} disabled={!connected || locked} spellCheck={false} />
             </label>
             <div className="advanced-meta">
               <span>{readableBytes(cache?.logical_bytes)}</span>
               <span>{cache?.hf_token_configured ? "Access key found" : "Public models need no key"}</span>
             </div>
-            <button className="secondary-button" type="button" onClick={() => void saveSelection()} disabled={!connected || busy || !selectionChanged}>
+            <button className="secondary-button" type="button" onClick={() => void saveSelection()} disabled={!connected || locked || !selectionChanged}>
               {action === "saving" ? "Saving…" : "Save settings"}
             </button>
           </div>

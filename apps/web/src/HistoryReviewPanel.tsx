@@ -13,9 +13,11 @@ import {
 export default function HistoryReviewPanel({
   refreshKey = 0,
   onHistoryChanged,
+  disabled = false,
 }: {
   refreshKey?: number;
   onHistoryChanged?: () => void;
+  disabled?: boolean;
 }) {
   const [workspace, setWorkspace] = useState<HistoryWorkspace | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -113,7 +115,7 @@ export default function HistoryReviewPanel({
             <strong>Review history changed</strong>
             <p>An earlier approval no longer matches this repository. Retire it before preparing new training data.</p>
           </div>
-          <button className="secondary-button" type="button" onClick={() => void retireStale()} disabled={busy}>
+          <button className="secondary-button" type="button" onClick={() => void retireStale()} disabled={busy || disabled}>
             {busy ? "Retiring..." : "Retire old approval"}
           </button>
         </div>
@@ -131,7 +133,7 @@ export default function HistoryReviewPanel({
               id="history-instruction"
               value={instruction}
               onChange={(event) => setInstruction(event.target.value)}
-              disabled={busy}
+              disabled={busy || disabled}
               rows={3}
             />
           </label>
@@ -159,7 +161,7 @@ export default function HistoryReviewPanel({
               type="checkbox"
               checked={rightsConfirmed}
               onChange={(event) => setRightsConfirmed(event.target.checked)}
-              disabled={busy}
+              disabled={busy || disabled}
             />
             <span>I have the right to use this change for training.</span>
           </label>
@@ -167,14 +169,14 @@ export default function HistoryReviewPanel({
           {error && <div className="source-error history-error" role="alert">{error}</div>}
 
           <div className="history-actions">
-            <button className="text-button" type="button" onClick={() => void review("rejected")} disabled={busy}>
+            <button className="text-button" type="button" onClick={() => void review("rejected")} disabled={busy || disabled}>
               Skip
             </button>
             <button
               className="primary-button"
               type="button"
               onClick={() => void review("approved")}
-              disabled={busy || !rightsConfirmed || !instruction.trim()}
+              disabled={busy || disabled || !rightsConfirmed || !instruction.trim()}
             >
               {busy ? "Saving…" : "Approve example"}
             </button>

@@ -24,12 +24,14 @@ test("the page is one clear three-step setup flow", async () => {
   const app = await source("src/App.tsx");
   assert.match(app, /Make a small model excellent at your work/);
   assert.match(app, /<ModelSetupPanel(?:\s+[^>]*)?\s*\/>/);
-  assert.match(app, /<SourceSetupPanel onSourcesChanged=\{sourcesChanged\} \/>/);
-  assert.match(app, /<HistoryReviewPanel refreshKey=\{sourceRevision\} onHistoryChanged=\{projectChanged\} \/>/);
-  assert.match(app, /<PreparePanel revision=\{projectRevision\} \/>/);
+  assert.match(app, /<SourceSetupPanel(?:\s+[^>]*)?\s*\/>/);
+  assert.match(app, /<HistoryReviewPanel[\s\S]*?\/>/);
+  assert.match(app, /<PreparePanel(?:\s+[^>]*)?\s*\/>/);
   assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<HistoryReviewPanel"));
   assert.ok(app.indexOf("<HistoryReviewPanel") < app.indexOf("<PreparePanel"));
   assert.match(app, /aria-label="Training setup"/);
+  assert.match(app, /disabled={trainingActive}/);
+  assert.match(app, /onTrainingActiveChange={setTrainingActive}/);
   assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
   await assert.rejects(access(new URL("src/data.ts", root)));
 });

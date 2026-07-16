@@ -94,6 +94,7 @@ export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [projectRevision, setProjectRevision] = useState(0);
+  const [trainingActive, setTrainingActive] = useState(false);
   const [walkthroughStep, setWalkthroughStep] = useState<number | null>(() => {
     try {
       return window.localStorage.getItem(WALKTHROUGH_STORAGE_KEY) ? null : 0;
@@ -166,10 +167,14 @@ export default function App() {
           </section>
 
           <div className="setup-flow" aria-label="Training setup">
-            <ModelSetupPanel onModelChanged={projectChanged} />
-            <SourceSetupPanel onSourcesChanged={sourcesChanged} />
-            <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} />
-            <PreparePanel revision={projectRevision} />
+            <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
+            <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
+            <HistoryReviewPanel
+              refreshKey={sourceRevision}
+              onHistoryChanged={projectChanged}
+              disabled={trainingActive}
+            />
+            <PreparePanel revision={projectRevision} onTrainingActiveChange={setTrainingActive} />
           </div>
 
           <section className="proof-note" aria-labelledby="proof-heading">

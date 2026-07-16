@@ -16,7 +16,13 @@ const purposeLabels: Record<ProjectSource["purpose"], string> = {
 // One field is deliberate: the backend infers whether the user supplied a
 // GitHub repository, local Git checkout, demonstration file, or task pack.
 // Those distinctions remain available in YAML without becoming setup chores.
-export default function SourceSetupPanel({ onSourcesChanged }: { onSourcesChanged?: () => void }) {
+export default function SourceSetupPanel({
+  onSourcesChanged,
+  disabled = false,
+}: {
+  onSourcesChanged?: () => void;
+  disabled?: boolean;
+}) {
   const [sources, setSources] = useState<ProjectSource[]>([]);
   const [value, setValue] = useState("");
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -96,11 +102,11 @@ export default function SourceSetupPanel({ onSourcesChanged }: { onSourcesChange
             value={value}
             onChange={(event) => setValue(event.target.value)}
             placeholder="github.com/you/project or C:\\path\\to\\work"
-            disabled={connected === false || busy !== null}
+            disabled={connected === false || busy !== null || disabled}
             spellCheck={false}
             autoComplete="off"
           />
-          <button className="primary-button" type="submit" disabled={connected === false || busy !== null || !value.trim()}>
+          <button className="primary-button" type="submit" disabled={connected === false || busy !== null || disabled || !value.trim()}>
             {busy === "add" ? "Adding…" : "Add"}
           </button>
         </div>
@@ -122,7 +128,7 @@ export default function SourceSetupPanel({ onSourcesChanged }: { onSourcesChange
               <button
                 type="button"
                 onClick={() => void removeSource(source)}
-                disabled={busy !== null}
+                disabled={busy !== null || disabled}
                 aria-label={`Remove ${source.label}`}
               >
                 {busy === source.id ? "Removing…" : "Remove"}
