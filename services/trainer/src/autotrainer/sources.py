@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .history import HistoryError, list_history
 from .manifest import TaskManifest
 
 
@@ -1227,6 +1228,63 @@ def scan_sources(
         scan["warnings"].extend(f"{clean['id']}: {message}" for message in clean["warnings"])
     scan["sources"] = finalized
 
+    # History discovery may inspect candidate patches, but the general source
+    # scan exposes only review counts and source IDs. Candidate content remains
+    # behind the explicit history-review endpoint and never leaks into routine
+    # readiness responses.
+    history_errors: list[str] = []
+    history_summary: dict[str, Any] = {}
+    approved_history_source_ids: list[str] = []
+    history_source_ids: list[str] = []
+    try:
+        history = list_history(config, root, write=write)
+        history_summary = dict(history.get("summary", {}))
+        history_errors.extend(str(value) for value in history.get("errors", []))
+        history_source_ids = sorted(
+            {
+                str(source.get("source_id"))
+                for source in history.get("sources", [])
+                if isinstance(source, Mapping) and str(source.get("source_id", "")).strip()
+            }
+        )
+        approved_history_source_ids = sorted(
+            {
+                str(candidate.get("source_id"))
+                for candidate in history.get("candidates", [])
+                if isinstance(candidate, Mapping)
+                and candidate.get("decision") == "approved"
+                and str(candidate.get("source_id", "")).strip()
+            }
+        )
+    except HistoryError as error:
+        history_errors.append(str(error))
+
+    stale_reviews = int(history_summary.get("stale_reviews", 0) or 0)
+    if stale_reviews:
+        history_errors.append(
+            f"{stale_reviews} approved history review(s) are stale; review history again"
+        )
+    scan["history"] = {
+        "approved_source_ids": approved_history_source_ids,
+        "errors": sorted(dict.fromkeys(history_errors)),
+        "source_ids": history_source_ids,
+        "summary": history_summary,
+    }
+
+    # Attribute per-source discovery failures when possible so the source row
+    # and aggregate scanner state both fail closed. Store-level and stale-review
+    # errors remain global because they cannot be assigned safely to one source.
+    source_by_id = {str(source.get("id")): source for source in finalized}
+    for error in scan["history"]["errors"]:
+        source_id, separator, detail = error.partition(":")
+        source = source_by_id.get(source_id) if separator else None
+        if source is not None:
+            source.setdefault("errors", []).append(f"history: {detail.strip()}")
+            _finish(source)
+            scan["errors"].append(f"{source_id}: history: {detail.strip()}")
+        else:
+            scan["errors"].append(f"history: {error}")
+
     repositories_found = [item for item in finalized if item["kind"] == "repository"]
     sft_found = [item for item in finalized if item["kind"] == "sft_jsonl"]
     tasks_found = [item for item in finalized if item["kind"] == "task_pack"]
@@ -1246,8 +1304,16 @@ def scan_sources(
             item["status"] == "needs_materialization" for item in finalized
         ),
         "repository_count": len(repositories_found),
+        "approved_history_record_count": int(history_summary.get("approved", 0) or 0),
+        "considered_history_commit_count": int(history_summary.get("considered", 0) or 0),
+        "excluded_history_candidate_count": int(history_summary.get("excluded", 0) or 0),
+        "history_source_count": int(history_summary.get("source_count", 0) or 0),
+        "pending_history_review_count": int(history_summary.get("pending", 0) or 0),
+        "rejected_history_review_count": int(history_summary.get("rejected", 0) or 0),
+        "reviewable_history_candidate_count": int(history_summary.get("reviewable", 0) or 0),
         "sft_source_count": len(sft_found),
         "source_count": len(finalized),
+        "stale_history_review_count": stale_reviews,
         "task_pack_count": len(tasks_found),
         "train_ready_task_count": sum(
             sum(

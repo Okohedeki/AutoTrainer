@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from .compiler import compile_data
+from .compiler import compile_data, invalidate_compile_provenance
 from .config import ConfigError, ProjectConfig, validate_mapping
 from .doctor import run_doctor
 from .planner import build_plan
@@ -101,7 +101,12 @@ def _recipe(scan: Mapping[str, Any]) -> str:
     summary = scan.get("summary", {})
     if not isinstance(summary, Mapping):
         summary = {}
-    has_examples = int(summary.get("valid_sft_record_count", 0) or 0) > 0
+    # Explicit JSONL and approved history are both deliberate demonstrations.
+    # Pending history and raw repository files remain non-training evidence.
+    example_count = int(summary.get("valid_sft_record_count", 0) or 0) + int(
+        summary.get("approved_history_record_count", 0) or 0
+    )
+    has_examples = example_count > 0
     has_tasks = int(summary.get("train_ready_task_count", 0) or 0) > 0
     if has_examples and has_tasks:
         return "both"
@@ -172,6 +177,15 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
         "warnings": list(validation_report.warnings),
     }
 
+    # A new preparation attempt invalidates earlier successful provenance
+    # before history/source discovery can fail. Evaluation must never trust a
+    # compiled dataset after one of its approvals becomes stale.
+    provenance_error: str | None = None
+    try:
+        invalidate_compile_provenance(config.data, config.root)
+    except Exception as error:  # defensive boundary around an atomic file update
+        provenance_error = f"cannot invalidate prior compiled provenance: {error}"
+
     # A full read-only scan preserves proof diagnostics. The lock and compiled
     # datasets intentionally contain train sources only, so an unfinished Fable
     # or held-out source cannot prevent preparation of usable training inputs.
@@ -182,6 +196,8 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
     scan_errors = [str(value) for value in full_scan.get("errors", [])]
     later_scan = [error for error in scan_errors if _proof_scan_error(error, config.data)]
     blocking_scan = [error for error in scan_errors if error not in later_scan]
+    if provenance_error:
+        blocking_scan.insert(0, provenance_error)
 
     training_data = _training_config(config.data)
     training_scan: dict[str, Any] = {"errors": [], "warnings": [], "summary": {}}
@@ -202,7 +218,11 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
     scan_detail["later_proof"] = later_scan
     scan_detail["training"] = training_scan
 
-    recipe = _recipe(training_scan if training_scan.get("summary") else full_scan)
+    readiness_scan = training_scan if training_scan.get("summary") else full_scan
+    recipe = _recipe(readiness_scan)
+    readiness_summary = readiness_scan.get("summary", {})
+    if not isinstance(readiness_summary, Mapping):
+        readiness_summary = {}
 
     try:
         plan = build_plan(config.data, config.root, full_scan)
@@ -230,7 +250,13 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
         next_action = {"title": "Fix the first source", "detail": source_error[0]}
     elif recipe == "needs_training_data":
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "blocked"), _step("runtime", "waiting")]
-        next_action = {"title": "Add training data", "detail": "Add accepted examples, executable tasks, or both."}
+        if int(readiness_summary.get("pending_history_review_count", 0) or 0) > 0:
+            next_action = {
+                "title": "Review accepted changes",
+                "detail": "Approve a useful Git change before using it as a training example.",
+            }
+        else:
+            next_action = {"title": "Add training data", "detail": "Add accepted examples, executable tasks, or both."}
     elif compile_errors:
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "blocked"), _step("runtime", "waiting")]
         next_action = {"title": "Fix compiled training data", "detail": compile_errors[0]}

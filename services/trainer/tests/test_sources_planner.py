@@ -11,6 +11,7 @@ from pathlib import Path
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
+from autotrainer.history import list_history, review_history  # noqa: E402
 from autotrainer.planner import build_plan  # noqa: E402
 from autotrainer.sources import (  # noqa: E402
     _write_text_atomic,
@@ -44,6 +45,21 @@ def create_repository(root: Path, name: str = "frontend") -> tuple[Path, str]:
     run_git(repository, "add", ".")
     run_git(repository, "commit", "-m", "fixture")
     return repository, run_git(repository, "rev-parse", "HEAD")
+
+
+def create_reviewable_repository(
+    root: Path, name: str = "frontend"
+) -> tuple[Path, str, str]:
+    """Create one focused change whose parent and tip are both immutable."""
+
+    repository, parent = create_repository(root, name)
+    (repository / "src" / "App.tsx").write_text(
+        "export function App() { return <main>Welcome</main>; }\n",
+        encoding="utf-8",
+    )
+    run_git(repository, "add", ".")
+    run_git(repository, "commit", "-m", "Make the application greeting clearer")
+    return repository, parent, run_git(repository, "rev-parse", "HEAD")
 
 
 def clone_repository(source: Path, destination: Path) -> Path:
@@ -171,6 +187,34 @@ class SourceScanTests(unittest.TestCase):
             self.assertEqual([item["path"] for item in source["files"]], ["src/App.tsx", "src/styles.css"])
             self.assertTrue(source["dirty"])
             self.assertFalse(marker.exists())
+
+    def test_history_discovery_errors_block_the_source_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, _commit = create_repository(root)
+            source = repository_source(repository, "HEAD")
+
+            scan = scan_sources({"sources": [source]}, root)
+
+            self.assertEqual(scan["sources"][0]["status"], "blocked")
+            self.assertTrue(any("immutable repository revision" in error for error in scan["errors"]))
+            self.assertEqual(scan["summary"]["approved_history_record_count"], 0)
+
+    def test_evaluation_repository_history_is_not_training_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, _parent, revision = create_reviewable_repository(root)
+            source = {
+                **repository_source(repository, revision),
+                "partition": "evaluation",
+            }
+
+            scan = scan_sources({"sources": [source]}, root)
+
+            self.assertEqual(scan["errors"], [])
+            self.assertEqual(scan["summary"]["history_source_count"], 0)
+            self.assertEqual(scan["summary"]["approved_history_record_count"], 0)
+            self.assertEqual(scan["history"]["approved_source_ids"], [])
 
     def test_repository_aliases_share_a_credential_safe_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -508,6 +552,80 @@ class PlannerTests(unittest.TestCase):
             self.assertTrue(any("sft.dataset" in blocker for blocker in plan["blockers"]))
             self.assertTrue(any("grpo.dataset" in blocker for blocker in plan["blockers"]))
             self.assertTrue(plan["static_only"])
+
+    def test_only_approved_history_makes_a_repository_sft_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, _parent, revision = create_reviewable_repository(root)
+            config = {
+                "project": {"name": "history-teach", "artifact_dir": ".autotrainer"},
+                "model": {
+                    "provider": "huggingface",
+                    "id": "Qwen/Qwen3.5-9B",
+                    "revision": "a" * 40,
+                    "trust_remote_code": False,
+                },
+                "sources": [repository_source(repository, revision)],
+                "sft": {
+                    "enabled": True,
+                    "dataset": ".autotrainer/compiled/sft/train.jsonl",
+                },
+                "grpo": {"enabled": False},
+                "evaluation": {},
+            }
+
+            pending_scan = scan_sources(config, root)
+            pending_plan = build_plan(config, root, pending_scan)
+            self.assertEqual(pending_scan["summary"]["pending_history_review_count"], 1)
+            self.assertEqual(pending_plan["stages"]["sft"]["valid_example_count"], 0)
+            self.assertEqual(pending_plan["stages"]["sft"]["status"], "blocked")
+
+            candidate = list_history(config, root, write=False)["candidates"][0]
+            review_history(
+                config,
+                root,
+                candidate_id=candidate["candidate_id"],
+                decision="approved",
+                instruction="Make the primary interface greeting clearer for the user.",
+                rights_confirmed=True,
+            )
+            approved_scan = scan_sources(config, root)
+            approved_plan = build_plan(config, root, approved_scan)
+
+            self.assertEqual(approved_scan["summary"]["approved_history_record_count"], 1)
+            self.assertEqual(approved_scan["history"]["approved_source_ids"], ["frontend"])
+            # Routine readiness includes no candidate object or accepted patch.
+            serialized = json.dumps(approved_scan, sort_keys=True)
+            self.assertNotIn('"candidates"', serialized)
+            self.assertNotIn('"patch"', serialized)
+            self.assertEqual(approved_plan["stages"]["sft"]["status"], "inputs_ready")
+            self.assertEqual(approved_plan["stages"]["sft"]["valid_example_count"], 1)
+            self.assertEqual(approved_plan["stages"]["sft"]["source_ids"], ["frontend"])
+
+            # A direct source selection is not the compiler's merged output;
+            # its readiness must not silently include reviewed history rows.
+            explicit = root / "explicit.jsonl"
+            explicit.write_text(
+                json.dumps({"prompt": "Build a card", "completion": "Verified result"})
+                + "\n",
+                encoding="utf-8",
+            )
+            config["sources"].append(
+                {
+                    "id": "explicit",
+                    "kind": "sft_jsonl",
+                    "uri": explicit.name,
+                    "partition": "train",
+                    "roles": ["demonstrations"],
+                }
+            )
+            config["sft"]["dataset"] = "explicit"
+            direct_plan = build_plan(config, root, scan_sources(config, root))
+            self.assertEqual(direct_plan["stages"]["sft"]["valid_example_count"], 1)
+            self.assertEqual(direct_plan["stages"]["sft"]["source_ids"], ["explicit"])
+            self.assertEqual(
+                direct_plan["stages"]["sft"]["approved_history_example_count"], 0
+            )
 
     def test_sft_stage_is_inputs_ready_for_a_valid_declared_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

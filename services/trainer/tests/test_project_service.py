@@ -17,7 +17,13 @@ from autotrainer.config import default_config, write_config  # noqa: E402
 from autotrainer.project_service import prepare_project  # noqa: E402
 
 
-def scan_result(examples: int, tasks: int) -> dict:
+def scan_result(
+    examples: int,
+    tasks: int,
+    *,
+    approved_history: int = 0,
+    pending_history: int = 0,
+) -> dict:
     return {
         "errors": [],
         "warnings": [],
@@ -25,6 +31,8 @@ def scan_result(examples: int, tasks: int) -> dict:
         "summary": {
             "valid_sft_record_count": examples,
             "train_ready_task_count": tasks,
+            "approved_history_record_count": approved_history,
+            "pending_history_review_count": pending_history,
         },
     }
 
@@ -56,9 +64,27 @@ class ProjectServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def prepare_with(self, examples: int, tasks: int, doctor: dict | None = None) -> dict:
-        full = scan_result(examples, tasks)
-        training = scan_result(examples, tasks)
+    def prepare_with(
+        self,
+        examples: int,
+        tasks: int,
+        doctor: dict | None = None,
+        *,
+        approved_history: int = 0,
+        pending_history: int = 0,
+    ) -> dict:
+        full = scan_result(
+            examples,
+            tasks,
+            approved_history=approved_history,
+            pending_history=pending_history,
+        )
+        training = scan_result(
+            examples,
+            tasks,
+            approved_history=approved_history,
+            pending_history=pending_history,
+        )
         with (
             patch("autotrainer.project_service.scan_sources", side_effect=[full, training]),
             patch(
@@ -106,6 +132,40 @@ class ProjectServiceTests(unittest.TestCase):
             result["details"]["validation"]["later_proof"],
         )
         self.assertIsNone(result["next_action"])
+
+    def test_approved_history_counts_as_teach_data(self) -> None:
+        result = self.prepare_with(0, 0, approved_history=1)
+
+        self.assertEqual(result["recipe"], "teach")
+        self.assertEqual(result["status"], "ready")
+
+    def test_pending_history_is_the_next_action_before_adding_data(self) -> None:
+        result = self.prepare_with(0, 0, pending_history=2)
+
+        self.assertEqual(result["recipe"], "needs_training_data")
+        self.assertEqual(result["next_action"]["title"], "Review accepted changes")
+
+    def test_source_failure_invalidates_prior_compiled_provenance(self) -> None:
+        report = self.root / ".autotrainer" / "compiled" / "compile-report.json"
+        report.parent.mkdir(parents=True)
+        report.write_text('{"errors":[],"fingerprint":"previous-success"}\n', encoding="utf-8")
+        failed_scan = {
+            "errors": ["history: an approved review is stale"],
+            "warnings": [],
+            "sources": [],
+            "summary": {},
+        }
+        with (
+            patch("autotrainer.project_service.scan_sources", return_value=failed_scan),
+            patch("autotrainer.project_service.build_plan", return_value=plan_result()),
+            patch("autotrainer.project_service.run_doctor", return_value=READY_DOCTOR),
+        ):
+            result = prepare_project(self.config_path)
+
+        invalidated = report.read_text(encoding="utf-8")
+        self.assertEqual(result["next_action"]["title"], "Fix the first source")
+        self.assertNotIn("previous-success", invalidated)
+        self.assertIn("previous provenance was invalidated", invalidated)
 
     def test_returns_only_the_first_configuration_blocker(self) -> None:
         payload = default_config()

@@ -227,6 +227,22 @@ def build_plan(
         "This is a static input plan: it does not download a model, import CUDA libraries, execute repository code, run verifiers, or start training.",
     ]
     declared_sources = _sources(scan)
+    history = _mapping(scan.get("history"))
+    history_summary = _mapping(history.get("summary"))
+    scan_summary = _mapping(scan.get("summary"))
+    approved_history_count = int(
+        scan_summary.get(
+            "approved_history_record_count", history_summary.get("approved", 0)
+        )
+        or 0
+    )
+    approved_history_source_ids = sorted(
+        {
+            _string(value)
+            for value in history.get("approved_source_ids", [])
+            if _string(value)
+        }
+    )
 
     model_config = _mapping(config.get("model"))
     model_blockers: list[str] = []
@@ -309,6 +325,8 @@ def build_plan(
     sft_reference = sft_config.get("dataset")
     sft_source: Mapping[str, Any] | None = None
     sft_sources: list[Mapping[str, Any]] = []
+    included_history_count = 0
+    included_history_source_ids: list[str] = []
     if sft_requested:
         if not _string(sft_reference):
             sft_blockers.append(
@@ -322,14 +340,20 @@ def build_plan(
                 if _string(sft_reference).replace("\\", "/").endswith(
                     ".autotrainer/compiled/sft/train.jsonl"
                 ):
+                    # The compiler merges all explicit demonstrations with
+                    # approved history only at its managed SFT destination.
+                    included_history_count = approved_history_count
+                    included_history_source_ids = approved_history_source_ids
                     sft_sources = [
                         source
                         for source in declared_sources
                         if source.get("kind") == "sft_jsonl"
                         and source.get("partition") == "train"
                     ]
-                    if not sft_sources:
-                        sft_blockers.append("no train sft_jsonl source is declared for compile")
+                    if not sft_sources and included_history_count < 1:
+                        sft_blockers.append(
+                            "no train sft_jsonl source or approved history example is available for compile"
+                        )
                 else:
                     sft_blockers.append(
                         f"sft.dataset {_string(sft_reference)!r} is neither a declared source nor the compiled SFT path"
@@ -343,9 +367,25 @@ def build_plan(
                     sft_blockers.append(
                         f"SFT source {candidate.get('id')!r} did not pass inspection"
                     )
-            if sft_sources and sum(int(item.get("valid_record_count", 0)) for item in sft_sources) < 1:
+            if (
+                sft_sources
+                and sum(int(item.get("valid_record_count", 0)) for item in sft_sources)
+                + included_history_count
+                < 1
+            ):
                 sft_blockers.append("the SFT datasets contain no valid examples")
-    sft_example_count = sum(int(item.get("valid_record_count", 0)) for item in sft_sources)
+    # A reviewed Git change is an explicit prompt/completion example; raw files
+    # and pending candidates still contribute zero to training readiness.
+    sft_example_count = (
+        sum(int(item.get("valid_record_count", 0)) for item in sft_sources)
+        + included_history_count
+    )
+    sft_source_ids = sorted(
+        {
+            *(str(source.get("id")) for source in sft_sources),
+            *included_history_source_ids,
+        }
+    )
     plan_errors.extend(f"sft: {message}" for message in sft_blockers)
     plan_warnings.extend(f"sft: {message}" for message in sft_warnings)
     sft_plan = {
@@ -353,7 +393,9 @@ def build_plan(
         "status": _stage_status(sft_requested, sft_blockers),
         "dataset_reference": _string(sft_reference) or None,
         "source_id": str(sft_source.get("id")) if sft_source else None,
-        "source_ids": [str(source.get("id")) for source in sft_sources],
+        "source_ids": sft_source_ids,
+        "approved_history_example_count": included_history_count,
+        "approved_history_source_ids": included_history_source_ids,
         "valid_example_count": sft_example_count,
         "blockers": sft_blockers,
         "warnings": sft_warnings,

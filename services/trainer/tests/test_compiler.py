@@ -13,6 +13,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.compiler import _atomic_jsonl, compile_data  # noqa: E402
 from autotrainer.config import default_config  # noqa: E402
+from autotrainer.history import list_history, review_history  # noqa: E402
 from autotrainer.sources import scan_sources  # noqa: E402
 
 
@@ -181,6 +182,74 @@ def _fixture(root: Path, *, evaluation: bool = False) -> tuple[dict, dict, Path]
     return config, scan_sources(config, root), task_path
 
 
+def _reviewable_history_fixture(root: Path) -> tuple[dict, Path, str]:
+    repository = root / "history-site"
+    (repository / "src").mkdir(parents=True)
+    app = repository / "src" / "App.tsx"
+    app.write_text("export const label = 'Before';\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=AutoTrainer Test",
+            "-c",
+            "user.email=test@autotrainer.local",
+            "commit",
+            "-qm",
+            "Initial fixture",
+        ],
+        check=True,
+    )
+    parent = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
+    app.write_text("export const label = 'After';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=AutoTrainer Test",
+            "-c",
+            "user.email=test@autotrainer.local",
+            "commit",
+            "-qm",
+            "Make the application label easier to understand",
+        ],
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
+    config = default_config(name="history-compiler", revision="a" * 40)
+    config["sources"] = [
+        {
+            "id": "history-site",
+            "kind": "repository",
+            "uri": repository.name,
+            "revision": revision,
+            "partition": "train",
+            "roles": ["style", "history"],
+            "include": ["src/**"],
+        }
+    ]
+    return config, repository, parent
+
+
 class CompilerTests(unittest.TestCase):
     def test_atomic_dataset_writes_use_unique_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -327,6 +396,105 @@ class CompilerTests(unittest.TestCase):
                 rl_row["source_repository_identity"],
                 scan["sources"][0]["repository_identity"],
             )
+
+    def test_approved_history_compiles_alone_and_combines_with_explicit_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _repository, _parent = _reviewable_history_fixture(root)
+            candidate = list_history(config, root, write=False)["candidates"][0]
+            review_history(
+                config,
+                root,
+                candidate_id=candidate["candidate_id"],
+                decision="approved",
+                instruction="Make the application label clearer for people using the interface.",
+                rights_confirmed=True,
+            )
+
+            history_only = compile_data(config, root, scan_sources(config, root))
+
+            self.assertEqual(history_only["errors"], [])
+            self.assertEqual(history_only["counts"]["sft_train"], 1)
+            history_rows = [
+                json.loads(line)
+                for line in Path(history_only["artifacts"]["sft_train"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(history_rows[0]["source_type"], "approved_git_change")
+
+            explicit = root / "accepted.jsonl"
+            explicit.write_text(
+                json.dumps({"prompt": "Build a card", "completion": "Verified result"})
+                + "\n",
+                encoding="utf-8",
+            )
+            config["sources"].append(
+                {
+                    "id": "accepted",
+                    "kind": "sft_jsonl",
+                    "uri": explicit.name,
+                    "partition": "train",
+                    "roles": ["demonstrations"],
+                }
+            )
+            combined = compile_data(config, root, scan_sources(config, root))
+            combined_rows = [
+                json.loads(line)
+                for line in Path(combined["artifacts"]["sft_train"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+            self.assertEqual(combined["errors"], [])
+            self.assertEqual(combined["counts"]["sft_train"], 2)
+            self.assertEqual(
+                sum(row.get("source_type") == "approved_git_change" for row in combined_rows),
+                1,
+            )
+            self.assertTrue(any(row.get("prompt") == "Build a card" for row in combined_rows))
+
+    def test_pending_history_repository_compiles_zero_sft_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _repository, _parent = _reviewable_history_fixture(root)
+
+            report = compile_data(config, root, scan_sources(config, root))
+
+            self.assertEqual(report["errors"], [])
+            self.assertEqual(report["counts"]["sft_train"], 0)
+            self.assertNotIn("sft_train", report["artifacts"])
+            self.assertFalse(
+                (root / ".autotrainer" / "compiled" / "sft" / "train.jsonl").exists()
+            )
+
+    def test_stale_history_approval_blocks_scan_and_compilation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, repository, parent = _reviewable_history_fixture(root)
+            candidate = list_history(config, root, write=False)["candidates"][0]
+            review_history(
+                config,
+                root,
+                candidate_id=candidate["candidate_id"],
+                decision="approved",
+                instruction="Make the application label clearer for people using the interface.",
+                rights_confirmed=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "checkout", "-q", "--detach", parent],
+                check=True,
+            )
+            config["sources"][0]["revision"] = parent
+
+            scan = scan_sources(config, root)
+            report = compile_data(config, root, scan)
+
+            self.assertEqual(scan["summary"]["stale_history_review_count"], 1)
+            self.assertTrue(any("stale" in error for error in scan["errors"]))
+            self.assertTrue(report["errors"])
+            self.assertEqual(report["counts"]["sft_train"], 0)
+            self.assertEqual(report["artifacts"], {})
 
     def test_aborts_before_writing_when_source_scan_has_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .history import HistoryError, approved_history_records
 from .manifest import TaskManifest
 
 
@@ -474,13 +475,40 @@ def compile_data(
             persist=had_previous_report,
         )
 
+    # Approved history is re-derived here instead of trusting readiness counts.
+    # This preserves the review boundary and makes stale approvals or discovery
+    # failures stop compilation even when a caller supplies an incomplete scan.
+    try:
+        history_records = approved_history_records(config, root)
+    except HistoryError as error:
+        return _return_failed_report(
+            report_path,
+            _report(
+                sft_records=empty_sft,
+                rl_records=empty_rl,
+                repository_locks=repository_locks,
+                destinations=destinations,
+                root=root,
+                errors=[f"history: {error}"],
+                warnings=[
+                    "compilation aborted before writing artifacts because reviewed history is not current"
+                ],
+            ),
+            persist=had_previous_report,
+        )
+
     source_specs = config.get("sources", [])
     repositories = {
         str(source["id"]): source
         for source in source_specs
         if isinstance(source, Mapping) and source.get("kind") == "repository"
     }
-    sft_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
+    # Repository files themselves remain evidence only. The sole repository-
+    # derived SFT rows are the reviewed records returned by the history core.
+    sft_records: dict[str, list[Mapping[str, Any]]] = {
+        "train": [dict(record) for record in history_records],
+        "evaluation": [],
+    }
     rl_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     errors: list[str] = []
     warnings: list[str] = []
