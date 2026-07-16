@@ -120,9 +120,9 @@
     "sft": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "dataset", "output_dir", "max_length", "per_device_train_batch_size", "gradient_accumulation_steps", "learning_rate", "num_train_epochs", "bf16", "tf32", "gradient_checkpointing", "completion_only_loss", "assistant_only_loss", "packing", "seed", "logging_steps", "save_steps"],
+      "required": ["enabled"],
       "properties": {
-        "enabled": { "const": true },
+        "enabled": { "type": "boolean" },
         "dataset": { "$ref": "#/$defs/path" },
         "eval_dataset": { "$ref": "#/$defs/path" },
         "output_dir": { "$ref": "#/$defs/path" },
@@ -141,17 +141,26 @@
         "logging_steps": { "type": "integer", "minimum": 1 },
         "save_steps": { "type": "integer", "minimum": 1 },
         "save_total_limit": { "type": "integer", "minimum": 1 }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": ["dataset", "output_dir", "max_length", "per_device_train_batch_size", "gradient_accumulation_steps", "learning_rate", "num_train_epochs", "bf16", "tf32", "gradient_checkpointing", "completion_only_loss", "assistant_only_loss", "packing", "seed", "logging_steps", "save_steps"]
+          }
+        }
+      ]
     },
     "grpo": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "algorithm", "dataset", "sft_adapter", "output_dir", "max_steps", "per_device_train_batch_size", "gradient_accumulation_steps", "num_generations", "generation_batch_size", "max_completion_length", "max_tool_calling_iterations", "learning_rate", "beta", "loss_type", "bf16", "tf32", "gradient_checkpointing", "use_vllm", "temperature", "top_p", "top_k", "seed"],
+      "required": ["enabled"],
       "properties": {
-        "enabled": { "const": true },
+        "enabled": { "type": "boolean" },
         "algorithm": { "const": "grpo" },
         "dataset": { "$ref": "#/$defs/path" },
         "eval_dataset": { "$ref": "#/$defs/path" },
+        "start_from": { "$ref": "#/$defs/path" },
         "sft_adapter": { "$ref": "#/$defs/path" },
         "output_dir": { "$ref": "#/$defs/path" },
         "max_steps": { "type": "integer", "minimum": 1 },
@@ -175,7 +184,19 @@
         "logging_steps": { "type": "integer", "minimum": 1 },
         "save_steps": { "type": "integer", "minimum": 1 },
         "save_total_limit": { "type": "integer", "minimum": 1 }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": ["algorithm", "dataset", "output_dir", "max_steps", "per_device_train_batch_size", "gradient_accumulation_steps", "num_generations", "generation_batch_size", "max_completion_length", "max_tool_calling_iterations", "learning_rate", "beta", "loss_type", "bf16", "tf32", "gradient_checkpointing", "use_vllm", "temperature", "top_p", "top_k", "seed"],
+            "anyOf": [
+              { "required": ["start_from"] },
+              { "required": ["sft_adapter"] }
+            ]
+          }
+        }
+      ]
     },
     "environment": {
       "type": "object",

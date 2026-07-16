@@ -552,6 +552,58 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual(plan["stages"]["sft"]["valid_example_count"], 1)
             self.assertEqual(plan["status"], "inputs_ready")
 
+    def test_practice_stage_accepts_base_or_a_complete_selected_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = root / "selected-adapter"
+            adapter.mkdir()
+            (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+            (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
+            config = {
+                "project": {"name": "practice"},
+                "model": {
+                    "provider": "huggingface",
+                    "id": "Qwen/Qwen3.5-9B",
+                    "revision": "a" * 40,
+                    "trust_remote_code": False,
+                },
+                "sources": [],
+                "sft": {"enabled": False},
+                "grpo": {"enabled": True, "dataset": "tasks", "start_from": "base"},
+                "environment": {"factory": "package.environment:create"},
+                "evaluation": {},
+            }
+            scan = {
+                "errors": [],
+                "warnings": [],
+                "sources": [
+                    {
+                        "id": "tasks",
+                        "kind": "task_pack",
+                        "uri": "tasks",
+                        "partition": "train",
+                        "status": "ready",
+                        "tasks": [{"ready": True, "split": "train"}],
+                    }
+                ],
+                "summary": {},
+            }
+
+            base_plan = build_plan(config, root, scan)
+            self.assertEqual(base_plan["stages"]["sft"]["status"], "not_requested")
+            self.assertEqual(base_plan["stages"]["grpo"]["status"], "inputs_ready")
+            self.assertEqual(
+                base_plan["stages"]["grpo"]["start_from"],
+                {"type": "base", "path": None},
+            )
+
+            config["grpo"]["start_from"] = str(adapter)
+            adapter_plan = build_plan(config, root, scan)
+            self.assertEqual(adapter_plan["stages"]["grpo"]["status"], "inputs_ready")
+            self.assertEqual(
+                adapter_plan["stages"]["grpo"]["start_from"]["type"], "adapter"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

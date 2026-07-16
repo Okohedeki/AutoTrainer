@@ -408,18 +408,35 @@ def build_plan(
             )
             if grpo_sources and ready_train_tasks < 1:
                 grpo_blockers.append("the GRPO task packs have no statically ready train tasks")
-        adapter_reference = grpo_config.get(
-            "sft_adapter", grpo_config.get("start_from")
+        start_reference = grpo_config.get(
+            "start_from", grpo_config.get("sft_adapter")
         )
-        if not _string(adapter_reference):
+        if not _string(start_reference):
             grpo_blockers.append(
-                "grpo.start_from or grpo.sft_adapter must identify the supervised LoRA adapter"
+                "grpo.start_from must be 'base' or identify a compatible LoRA adapter"
             )
-        elif sft_requested and not sft_blockers:
+            start_from_plan: dict[str, Any] | None = None
+        elif _string(start_reference) == "base":
+            start_from_plan = {"type": "base", "path": None}
+            if sft_requested:
+                grpo_blockers.append(
+                    "both-stage training requires GRPO to continue sft.output_dir, not base"
+                )
+        else:
+            adapter_path = _project_path(root, start_reference)
+            start_from_plan = {
+                "type": "adapter",
+                "path": str(adapter_path) if adapter_path is not None else None,
+            }
+            if not sft_requested and adapter_path is not None:
+                grpo_blockers.extend(_adapter_artifact_blockers(adapter_path))
+        if sft_requested and _string(start_reference) != "base":
             expected_output = _string(sft_config.get("output_dir"))
-            if expected_output and _string(adapter_reference) != expected_output:
-                grpo_warnings.append(
-                    "GRPO adapter input differs from sft.output_dir; verify it was produced from the same base revision"
+            expected_path = _project_path(root, expected_output)
+            selected_path = _project_path(root, start_reference)
+            if expected_path is not None and selected_path is not None and expected_path != selected_path:
+                grpo_blockers.append(
+                    "both-stage training requires grpo.start_from to equal sft.output_dir"
                 )
         environment = _mapping(config.get("environment"))
         factory = _string(environment.get("factory"))
@@ -430,7 +447,8 @@ def build_plan(
                 "environment.factory must be a dotted or module:attribute path"
             )
     else:
-        adapter_reference = None
+        start_reference = None
+        start_from_plan = None
         factory = None
     grpo_ready_tasks = (
         sum(
@@ -449,7 +467,14 @@ def build_plan(
         "source_id": str(grpo_source.get("id")) if grpo_source else None,
         "source_ids": [str(source.get("id")) for source in grpo_sources],
         "ready_task_count": grpo_ready_tasks,
-        "sft_adapter": _string(adapter_reference) or None,
+        # ``sft_adapter`` remains as a compatibility projection for older
+        # clients; ``start_from`` is the actual stage-neutral contract.
+        "start_from": start_from_plan,
+        "sft_adapter": (
+            _string(start_reference)
+            if _string(start_reference) and _string(start_reference) != "base"
+            else None
+        ),
         "environment_factory": _string(factory) or None,
         "blockers": grpo_blockers,
         "warnings": grpo_warnings,

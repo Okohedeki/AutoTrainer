@@ -565,7 +565,7 @@ def inspect_adapter(path: Path, expected_model_id: str, expected_revision: str) 
     config_path = path / "adapter_config.json"
     if not config_path.is_file():
         raise TrainingConfigurationError(
-            f"grpo.sft_adapter is not a PEFT adapter; missing {config_path}"
+            f"grpo.start_from is not a PEFT adapter; missing {config_path}"
         )
     try:
         adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -578,18 +578,18 @@ def inspect_adapter(path: Path, expected_model_id: str, expected_revision: str) 
     base_model = adapter_config.get("base_model_name_or_path")
     if base_model != expected_model_id:
         raise TrainingConfigurationError(
-            "The SFT adapter base model does not match model.id: "
+            "The GRPO input adapter base model does not match model.id: "
             f"adapter={base_model!r}, recipe={expected_model_id!r}"
         )
     peft_type = adapter_config.get("peft_type")
     if peft_type not in {None, "LORA"}:
         raise TrainingConfigurationError(
-            f"grpo.sft_adapter must be a LoRA adapter; found peft_type={peft_type!r}"
+            f"grpo.start_from must be a LoRA adapter; found peft_type={peft_type!r}"
         )
     adapter_revision = adapter_config.get("revision")
     if adapter_revision and adapter_revision != expected_revision:
         raise TrainingConfigurationError(
-            "The SFT adapter base revision does not match model.revision: "
+            "The GRPO input adapter base revision does not match model.revision: "
             f"adapter={adapter_revision!r}, recipe={expected_revision!r}"
         )
     return {

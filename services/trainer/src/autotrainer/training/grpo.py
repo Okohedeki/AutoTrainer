@@ -1,4 +1,4 @@
-"""Guarded text-only GRPO continuation from an existing SFT adapter."""
+"""Guarded text-only GRPO from the selected base or a compatible LoRA adapter."""
 
 from __future__ import annotations
 
@@ -35,14 +35,15 @@ def resolve_grpo_recipe(
 ) -> dict[str, Any]:
     """Resolve a GRPO recipe without importing PyTorch or Hugging Face packages.
 
-    GRPO is deliberately a continuation stage: ``grpo.sft_adapter`` must point
-    to a real PEFT adapter produced by SFT, and the RL task implementation must
-    be supplied as ``environment.factory``.  AutoTrainer does not silently
-    substitute a toy reward or environment.
+    ``grpo.start_from`` is explicit: ``base`` creates a fresh QLoRA policy for
+    practice-only RL, while a path continues a verified compatible PEFT adapter.
+    The legacy ``sft_adapter`` key remains readable for existing projects.
     """
 
     recipe = base_recipe(config, project_root=project_root, output_dir=output_dir)
     section = get_section(config, "grpo")
+    if section.get("enabled", True) is False:
+        raise TrainingConfigurationError("GRPO is disabled for the selected training recipe")
     environment_section = get_section(config, "environment")
     root = Path(recipe["project_root"])
 
@@ -53,14 +54,27 @@ def resolve_grpo_recipe(
         if eval_value is not None
         else None
     )
-    adapter_path = resolve_input_directory(
-        section.get("sft_adapter"), root, "grpo.sft_adapter"
+    start_value = section.get("start_from", section.get("sft_adapter"))
+    if not isinstance(start_value, str) or not start_value.strip():
+        raise TrainingConfigurationError(
+            "grpo.start_from must be 'base' or point to a compatible LoRA adapter"
+        )
+    start_value = start_value.strip()
+    sft_section = config.get("sft", {})
+    sft_enabled = not isinstance(sft_section, Mapping) or sft_section.get("enabled", True) is not False
+    if start_value == "base" and sft_enabled:
+        raise TrainingConfigurationError(
+            "both-stage training requires GRPO to continue the SFT adapter, not base"
+        )
+    adapter_path = (
+        None
+        if start_value == "base"
+        else resolve_input_directory(start_value, root, "grpo.start_from")
     )
     destination = Path(recipe["output_dir"])
-    if destination == adapter_path:
+    if adapter_path is not None and destination == adapter_path:
         raise TrainingConfigurationError(
-            "output_dir must differ from grpo.sft_adapter so the SFT baseline is not "
-            "overwritten"
+            "output_dir must differ from grpo.start_from so the input adapter is not overwritten"
         )
 
     factory_path = validate_factory_path(environment_section.get("factory"))
@@ -141,10 +155,19 @@ def resolve_grpo_recipe(
 
     dataset = inspect_grpo_dataset(dataset_path)
     eval_dataset = inspect_grpo_dataset(eval_path) if eval_path is not None else None
-    adapter = inspect_adapter(
-        adapter_path,
-        expected_model_id=recipe["model"]["id"],
-        expected_revision=recipe["model"]["revision"],
+    adapter = (
+        inspect_adapter(
+            adapter_path,
+            expected_model_id=recipe["model"]["id"],
+            expected_revision=recipe["model"]["revision"],
+        )
+        if adapter_path is not None
+        else None
+    )
+    start_from = (
+        {"type": "adapter", "adapter": adapter}
+        if adapter is not None
+        else {"type": "base", "adapter": None}
     )
     recipe["stage"] = "grpo"
     recipe["environment"] = {
@@ -159,6 +182,8 @@ def resolve_grpo_recipe(
     recipe["grpo"] = {
         "dataset": dataset,
         "eval_dataset": eval_dataset,
+        "start_from": start_from,
+        # Compatibility projection for clients that still display this field.
         "sft_adapter": adapter,
         "per_device_train_batch_size": batch_size,
         "gradient_accumulation_steps": accumulation,
@@ -216,7 +241,7 @@ def run_grpo(
     output_dir: Path,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Validate and optionally continue an SFT LoRA adapter with tool-use GRPO."""
+    """Validate and optionally train a QLoRA policy with verified tool-use GRPO."""
 
     recipe = resolve_grpo_recipe(config, project_root=project_root, output_dir=output_dir)
     if dry_run:
@@ -229,7 +254,12 @@ def run_grpo(
     try:
         import torch
         from datasets import load_dataset
-        from peft import PeftModel, prepare_model_for_kbit_training
+        from peft import (
+            LoraConfig,
+            PeftModel,
+            get_peft_model,
+            prepare_model_for_kbit_training,
+        )
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         from trl import GRPOConfig, GRPOTrainer
         from trl.chat_template_utils import get_training_chat_template
@@ -292,17 +322,32 @@ def run_grpo(
             base_model,
             use_gradient_checkpointing=stage["gradient_checkpointing"],
         )
-        policy = PeftModel.from_pretrained(
-            base_model,
-            stage["sft_adapter"]["path"],
-            is_trainable=True,
-        )
+        if stage["start_from"]["type"] == "base":
+            # Practice-only RL still trains a small LoRA policy; "base" means
+            # no supervised warm-up, never full-parameter 4-bit training.
+            policy = get_peft_model(
+                base_model,
+                LoraConfig(
+                    task_type=qlora["task_type"],
+                    target_modules=qlora["target_modules"],
+                    r=qlora["rank"],
+                    lora_alpha=qlora["alpha"],
+                    lora_dropout=qlora["dropout"],
+                    bias=qlora["bias"],
+                ),
+            )
+        else:
+            policy = PeftModel.from_pretrained(
+                base_model,
+                stage["start_from"]["adapter"]["path"],
+                is_trainable=True,
+            )
         trainable_parameters = sum(
             parameter.numel() for parameter in policy.parameters() if parameter.requires_grad
         )
         if trainable_parameters == 0:
             raise TrainingRuntimeError(
-                "The SFT adapter loaded with no trainable parameters; GRPO cannot continue it"
+                "The GRPO policy has no trainable adapter parameters"
             )
 
         train_dataset = _load_json_dataset(load_dataset, stage["dataset"])

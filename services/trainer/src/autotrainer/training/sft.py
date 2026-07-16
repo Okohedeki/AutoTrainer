@@ -32,6 +32,8 @@ def resolve_sft_recipe(
 
     recipe = base_recipe(config, project_root=project_root, output_dir=output_dir)
     section = get_section(config, "sft")
+    if section.get("enabled", True) is False:
+        raise TrainingConfigurationError("SFT is disabled for the selected training recipe")
     root = Path(recipe["project_root"])
 
     dataset_path = resolve_input_file(section.get("dataset"), root, "sft.dataset")

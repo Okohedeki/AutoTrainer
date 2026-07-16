@@ -139,6 +139,55 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
 
+    def test_practice_dry_run_creates_a_fresh_qlora_policy_from_base(self) -> None:
+        config = self.config()
+        config["sft"]["enabled"] = False
+        config["grpo"].pop("sft_adapter")
+        config["grpo"]["start_from"] = "base"
+
+        result = run_grpo(
+            config,
+            project_root=self.project_root,
+            output_dir=Path("artifacts/grpo-output"),
+            dry_run=True,
+        )
+
+        self.assertEqual(result["recipe"]["grpo"]["start_from"]["type"], "base")
+        self.assertIsNone(result["recipe"]["grpo"]["sft_adapter"])
+
+    def test_both_recipe_cannot_skip_its_sft_adapter(self) -> None:
+        config = self.config()
+        config["grpo"].pop("sft_adapter")
+        config["grpo"]["start_from"] = "base"
+
+        with self.assertRaisesRegex(TrainingConfigurationError, "both-stage"):
+            run_grpo(
+                config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+                dry_run=True,
+            )
+
+    def test_disabled_stage_runners_fail_closed(self) -> None:
+        sft_config = self.config()
+        sft_config["sft"]["enabled"] = False
+        with self.assertRaisesRegex(TrainingConfigurationError, "SFT is disabled"):
+            run_sft(
+                sft_config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/sft-output"),
+                dry_run=True,
+            )
+
+        grpo_config = self.config()
+        grpo_config["grpo"]["enabled"] = False
+        with self.assertRaisesRegex(TrainingConfigurationError, "GRPO is disabled"):
+            run_grpo(
+                grpo_config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+                dry_run=True,
+            )
     def test_grpo_rejects_invalid_generation_arithmetic(self) -> None:
         config = self.config()
         config["grpo"]["gradient_accumulation_steps"] = 3

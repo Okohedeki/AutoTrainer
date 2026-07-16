@@ -470,7 +470,11 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         errors.append("qlora.target_modules must be all-linear or a non-empty list")
 
     sft = _mapping(data.get("sft"), "sft", errors)
-    if sft.get("enabled") is not False:
+    sft_enabled = sft.get("enabled", True)
+    if not isinstance(sft_enabled, bool):
+        errors.append("sft.enabled must be a boolean")
+        sft_enabled = True
+    if sft_enabled:
         _positive_int(sft, "per_device_train_batch_size", errors)
         _positive_int(sft, "gradient_accumulation_steps", errors)
         _positive_int(sft, "max_length", errors)
@@ -478,7 +482,11 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
             errors.append("sft.learning_rate must be positive")
 
     grpo = _mapping(data.get("grpo"), "grpo", errors)
-    if grpo.get("enabled") is not False:
+    grpo_enabled = grpo.get("enabled", True)
+    if not isinstance(grpo_enabled, bool):
+        errors.append("grpo.enabled must be a boolean")
+        grpo_enabled = True
+    if grpo_enabled:
         for key in (
             "per_device_train_batch_size",
             "gradient_accumulation_steps",
@@ -500,8 +508,20 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
                     "GRPO effective batch (per_device_train_batch_size × gradient_accumulation_steps) "
                     "must be divisible by num_generations"
                 )
-        if grpo.get("sft_adapter") in {None, "", "base"}:
-            errors.append("grpo.sft_adapter must point to the SFT adapter; RL continues the QLoRA adapter")
+        start_from = grpo.get("start_from", grpo.get("sft_adapter"))
+        if start_from in {None, ""}:
+            errors.append("grpo.start_from must be 'base' or point to a LoRA adapter")
+        # When both stages are requested, RL must actually continue the adapter
+        # produced by this SFT stage. Practice-only RL may instead start from the
+        # selected base model or a separately supplied compatible adapter.
+        if sft_enabled:
+            if start_from == "base":
+                errors.append("both-stage training requires GRPO to continue sft.output_dir, not base")
+            else:
+                sft_output = _resolved_config_path(sft.get("output_dir"), root)
+                grpo_input = _resolved_config_path(start_from, root)
+                if sft_output is not None and grpo_input is not None and sft_output != grpo_input:
+                    errors.append("both-stage training requires grpo.start_from to equal sft.output_dir")
         if grpo.get("use_vllm") is not False:
             warnings.append("grpo.use_vllm is not supported by the reference one-GPU V1 profile")
 
@@ -620,7 +640,7 @@ def default_config(
             "enabled": True,
             "algorithm": "grpo",
             "dataset": ".autotrainer/compiled/rl/train.jsonl",
-            "sft_adapter": ".autotrainer/checkpoints/sft",
+            "start_from": ".autotrainer/checkpoints/sft",
             "output_dir": ".autotrainer/checkpoints/grpo",
             "per_device_train_batch_size": 1,
             "gradient_accumulation_steps": 2,

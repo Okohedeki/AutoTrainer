@@ -23,7 +23,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(report.errors, ())
         self.assertEqual(payload["model"]["id"], "Qwen/Qwen3.5-9B")
         self.assertEqual(payload["model"]["quantization"]["quant_type"], "nf4")
-        self.assertEqual(payload["grpo"]["sft_adapter"], ".autotrainer/checkpoints/sft")
+        self.assertEqual(payload["grpo"]["start_from"], ".autotrainer/checkpoints/sft")
+
+    def test_conditional_stage_recipes_validate_honestly(self) -> None:
+        teach = default_config()
+        teach["grpo"] = {"enabled": False}
+        self.assertEqual(validate_mapping(teach).errors, ())
+
+        practice = default_config()
+        practice["sft"] = {"enabled": False}
+        practice["grpo"]["start_from"] = "base"
+        self.assertEqual(validate_mapping(practice).errors, ())
+
+        both_from_base = default_config()
+        both_from_base["grpo"]["start_from"] = "base"
+        self.assertTrue(
+            any("both-stage" in error for error in validate_mapping(both_from_base).errors)
+        )
 
     def test_rejects_group_size_that_does_not_divide_effective_batch(self) -> None:
         payload = default_config()
