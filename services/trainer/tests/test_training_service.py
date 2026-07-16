@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -7,6 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 
@@ -113,29 +115,128 @@ class TrainingServiceTests(unittest.TestCase):
         run_grpo.assert_not_called()
 
     def test_job_manager_serializes_jobs_and_reaches_completion(self) -> None:
-        manager = TrainingJobManager()
+        manager = TrainingJobManager(self.config_path)
+        secret = "hf_this_must_never_reach_the_job_record"
+        stage_result = {
+            "status": "completed",
+            "stage": "sft",
+            "output_dir": str(self.root / ".autotrainer" / "adapters" / "sft"),
+            "metrics": {"train_loss": 0.25, "note": secret},
+            "dependencies": {"HF_TOKEN": secret},
+            "recipe": {"token": secret},
+        }
 
         def run(_path: Path, *, on_progress: object) -> dict[str, object]:
             on_progress("sft", "Teaching from approved examples.")  # type: ignore[operator]
             time.sleep(0.03)
-            return {"status": "completed", "recipe": "teach", "stages": []}
+            return {"status": "completed", "recipe": "teach", "stages": [stage_result]}
 
         with patch("autotrainer.training_service.run_project_training", side_effect=run):
-            queued = manager.start(self.config_path)
+            queued = manager.start()
             # The worker may leave the queue before start() returns; both states
             # prove the same single job was accepted.
             self.assertIn(queued["status"], {"queued", "running"})
             with self.assertRaisesRegex(TrainingServiceError, "already running"):
-                manager.start(self.config_path)
+                manager.start()
             deadline = time.monotonic() + 2
             while manager.snapshot()["status"] not in {"completed", "failed"}:
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(0.01)
+        manager.close()
 
         completed = manager.snapshot()
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["recipe"], "teach")
         self.assertEqual(completed["stage"], "sft")
+        self.assertEqual(
+            completed["result"],
+            {
+                "status": "completed",
+                "recipe": "teach",
+                "stages": [
+                    {
+                        "status": "completed",
+                        "stage": "sft",
+                        "output_dir": str(
+                            self.root / ".autotrainer" / "adapters" / "sft"
+                        ),
+                        "metrics": {"train_loss": 0.25},
+                    }
+                ],
+            },
+        )
+
+        record_text = manager.record_path.read_text(encoding="utf-8")
+        record = json.loads(record_text)
+        self.assertEqual(record, {"schema_version": 1, "job": completed})
+        self.assertNotIn(secret, record_text)
+        self.assertEqual(list(manager.record_path.parent.glob("*.tmp")), [])
+
+        # A new backend process restores the terminal result instead of hiding
+        # the output as the old in-memory-only manager did.
+        restored = TrainingJobManager(self.config_path)
+        self.assertEqual(restored.snapshot(), completed)
+
+    def test_live_saved_job_becomes_interrupted_and_a_retry_can_start(self) -> None:
+        record_path = self.root / ".autotrainer" / "training" / "current-job.json"
+        record_path.parent.mkdir(parents=True)
+        for status in ("queued", "running"):
+            with self.subTest(status=status):
+                record_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "job": {
+                                "id": "a" * 32,
+                                "status": status,
+                                "recipe": None,
+                                "stage": "prepare",
+                                "message": "Old backend owned this thread.",
+                                "result": None,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                manager = TrainingJobManager(self.config_path)
+                interrupted = manager.snapshot()
+                self.assertEqual(interrupted["status"], "interrupted")
+                self.assertIn("backend stopped", interrupted["message"])
+                self.assertEqual(
+                    json.loads(record_path.read_text(encoding="utf-8"))["job"],
+                    interrupted,
+                )
+
+        with patch(
+            "autotrainer.training_service.run_project_training",
+            return_value={"status": "completed", "recipe": "teach", "stages": []},
+        ):
+            accepted = manager.start()
+            self.assertNotEqual(accepted["id"], "a" * 32)
+            manager.close()
+        self.assertEqual(manager.snapshot()["status"], "completed")
+
+    def test_worker_is_non_daemon_and_close_waits_for_it(self) -> None:
+        manager = TrainingJobManager(self.config_path)
+        entered = Event()
+        release = Event()
+
+        def run(_path: Path, *, on_progress: object) -> dict[str, object]:
+            entered.set()
+            release.wait(timeout=2)
+            return {"status": "completed", "recipe": "teach", "stages": []}
+
+        try:
+            with patch("autotrainer.training_service.run_project_training", side_effect=run):
+                manager.start()
+                self.assertTrue(entered.wait(timeout=1))
+                self.assertIsNotNone(manager._worker)
+                self.assertFalse(manager._worker.daemon)  # type: ignore[union-attr]
+                release.set()
+                manager.close()
+        finally:
+            release.set()
+        self.assertEqual(manager.snapshot()["status"], "completed")
 
     def test_agent_cli_auto_uses_the_same_training_pipeline(self) -> None:
         completed = {"status": "completed", "recipe": "teach", "stages": []}

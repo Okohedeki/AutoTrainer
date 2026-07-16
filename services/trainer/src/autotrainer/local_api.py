@@ -49,7 +49,15 @@ class LocalApiServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], config_path: Path):
         super().__init__(address, handler)
         self.config_path = config_path
-        self.training = TrainingJobManager()
+        self.training = TrainingJobManager(config_path)
+
+    def server_close(self) -> None:
+        """Close the socket, then let an active non-daemon training write finish."""
+
+        try:
+            super().server_close()
+        finally:
+            self.training.close()
 
 
 class LocalApiHandler(BaseHTTPRequestHandler):
@@ -226,7 +234,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     )
                 self._send_json(
                     HTTPStatus.ACCEPTED,
-                    self.server.training.start(self.server.config_path),
+                    self.server.training.start(),
                 )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})

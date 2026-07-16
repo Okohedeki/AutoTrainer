@@ -171,7 +171,17 @@ class LocalApiTests(unittest.TestCase):
     def test_training_endpoints_use_the_server_owned_single_job_manager(self) -> None:
         status, idle = self.request("GET", "/api/v1/training")
         self.assertEqual(status, 200)
-        self.assertEqual(idle["status"], "idle")
+        self.assertEqual(
+            idle,
+            {
+                "id": None,
+                "status": "idle",
+                "recipe": None,
+                "stage": None,
+                "message": "No training job has started.",
+                "result": None,
+            },
+        )
 
         queued = {
             "id": "job-1",
@@ -179,13 +189,14 @@ class LocalApiTests(unittest.TestCase):
             "recipe": None,
             "stage": "prepare",
             "message": "Training is queued.",
+            "result": None,
         }
         with patch.object(self.server.training, "start", return_value=queued) as start:
             status, result = self.request("POST", "/api/v1/training/start", {})
 
         self.assertEqual(status, 202)
         self.assertEqual(result, queued)
-        start.assert_called_once_with(self.config_path.resolve())
+        start.assert_called_once_with()
 
         status, rejected = self.request(
             "POST", "/api/v1/training/start", {"learning_rate": 1}
