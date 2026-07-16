@@ -39,7 +39,7 @@ function readableBytes(value?: number): string {
 
 // This is the human-facing model lifecycle. Every mutation goes through the
 // local API and lands in autotrainer.yaml before a model download can begin.
-export default function ModelSetupPanel() {
+export default function ModelSetupPanel({ onModelChanged }: { onModelChanged?: () => void }) {
   const [workspace, setWorkspace] = useState<ModelWorkspace | null>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [action, setAction] = useState<ActionState>("idle");
@@ -102,6 +102,7 @@ export default function ModelSetupPanel() {
     setError(null);
     try {
       await selectProjectModel({ model: selectedModel, revision, cache_dir: cacheDir });
+      onModelChanged?.();
       hydrate(await getModelWorkspace());
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "Could not save these settings.");
@@ -116,7 +117,9 @@ export default function ModelSetupPanel() {
     try {
       // Saving first guarantees the GUI downloads precisely what it displays.
       await selectProjectModel({ model: selectedModel, revision, cache_dir: cacheDir });
+      onModelChanged?.();
       await downloadProjectModel();
+      onModelChanged?.();
       hydrate(await getModelWorkspace());
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "The model download did not complete.");

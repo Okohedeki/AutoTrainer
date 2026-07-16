@@ -93,6 +93,7 @@ function Walkthrough({
 export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
   const [sourceRevision, setSourceRevision] = useState(0);
+  const [projectRevision, setProjectRevision] = useState(0);
   const [walkthroughStep, setWalkthroughStep] = useState<number | null>(() => {
     try {
       return window.localStorage.getItem(WALKTHROUGH_STORAGE_KEY) ? null : 0;
@@ -130,6 +131,13 @@ export default function App() {
     // Repository history is discovered after a source is pinned, so refresh
     // the optional review queue without making the user reload the page.
     setSourceRevision((value) => value + 1);
+    setProjectRevision((value) => value + 1);
+  }, []);
+
+  const projectChanged = useCallback(() => {
+    // A Ready result describes one exact model/data snapshot. Any successful
+    // setup mutation removes that stale result until Prepare checks it again.
+    setProjectRevision((value) => value + 1);
   }, []);
 
   return (
@@ -158,10 +166,10 @@ export default function App() {
           </section>
 
           <div className="setup-flow" aria-label="Training setup">
-            <ModelSetupPanel />
+            <ModelSetupPanel onModelChanged={projectChanged} />
             <SourceSetupPanel onSourcesChanged={sourcesChanged} />
-            <HistoryReviewPanel refreshKey={sourceRevision} />
-            <PreparePanel />
+            <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} />
+            <PreparePanel revision={projectRevision} />
           </div>
 
           <section className="proof-note" aria-labelledby="proof-heading">

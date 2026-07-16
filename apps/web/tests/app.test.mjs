@@ -23,12 +23,12 @@ test("build emits the focused AutoTrainer application", async () => {
 test("the page is one clear three-step setup flow", async () => {
   const app = await source("src/App.tsx");
   assert.match(app, /Make a small model excellent at your work/);
-  assert.match(app, /<ModelSetupPanel \/>/);
+  assert.match(app, /<ModelSetupPanel(?:\s+[^>]*)?\s*\/>/);
   assert.match(app, /<SourceSetupPanel onSourcesChanged=\{sourcesChanged\} \/>/);
-  assert.match(app, /<HistoryReviewPanel refreshKey=\{sourceRevision\} \/>/);
-  assert.match(app, /<PreparePanel \/>/);
+  assert.match(app, /<HistoryReviewPanel refreshKey=\{sourceRevision\} onHistoryChanged=\{projectChanged\} \/>/);
+  assert.match(app, /<PreparePanel revision=\{projectRevision\} \/>/);
   assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<HistoryReviewPanel"));
-  assert.ok(app.indexOf("<HistoryReviewPanel") < app.indexOf("<PreparePanel />"));
+  assert.ok(app.indexOf("<HistoryReviewPanel") < app.indexOf("<PreparePanel"));
   assert.match(app, /aria-label="Training setup"/);
   assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
   await assert.rejects(access(new URL("src/data.ts", root)));
@@ -93,6 +93,7 @@ test("reviewed history approves one real change at a time", async () => {
 
 test("one preparation action returns an honest next step", async () => {
   const panel = await source("src/PreparePanel.tsx");
+  const app = await source("src/App.tsx");
   const api = await source("src/api.ts");
   assert.match(panel, /<h2 id="prepare-heading">Prepare training<\/h2>/);
   assert.match(panel, /await prepareProject/);
@@ -101,6 +102,11 @@ test("one preparation action returns an honest next step", async () => {
   assert.match(panel, /Action needed/);
   assert.match(panel, /Do this next/);
   assert.match(api, /\/api\/v1\/prepare/);
+  assert.match(panel, /\[revision\]/);
+  assert.match(panel, /setResult\(null\)/);
+  assert.match(app, /onModelChanged={projectChanged}/);
+  assert.match(app, /onHistoryChanged={projectChanged}/);
+  assert.match(app, /<PreparePanel revision={projectRevision}/);
 });
 
 test("training starts only after readiness and follows the real job record", async () => {

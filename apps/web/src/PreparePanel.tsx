@@ -36,13 +36,20 @@ const trainingStageLabels: Record<NonNullable<TrainingJob["stage"]>, string> = {
 // Preparation folds the old validate, scan, compile, plan, and Doctor sequence
 // into one human action. Detailed evidence remains in the API response for the
 // agent CLI, while this panel shows only the next decision.
-export default function PreparePanel() {
+export default function PreparePanel({ revision = 0 }: { revision?: number }) {
   const [result, setResult] = useState<PreparationResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
   const [trainingBusy, setTrainingBusy] = useState(false);
   const [trainingError, setTrainingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Preparation is evidence about one exact project snapshot. Hiding it on
+    // mutation prevents the GUI from displaying a stale Ready/Start state.
+    setResult(null);
+    setError(null);
+  }, [revision]);
 
   useEffect(() => {
     const controller = new AbortController();

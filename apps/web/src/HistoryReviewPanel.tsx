@@ -10,7 +10,13 @@ import {
 // History is optional input, so an empty or unavailable history endpoint does
 // not add another setup card. The panel appears only when there is real work to
 // review or an approved example worth acknowledging.
-export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: number }) {
+export default function HistoryReviewPanel({
+  refreshKey = 0,
+  onHistoryChanged,
+}: {
+  refreshKey?: number;
+  onHistoryChanged?: () => void;
+}) {
   const [workspace, setWorkspace] = useState<HistoryWorkspace | null>(null);
   const [instruction, setInstruction] = useState("");
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
@@ -63,6 +69,7 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
           : { candidate_id: candidate.candidate_id, decision },
       );
       setWorkspace(next);
+      onHistoryChanged?.();
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "That review could not be saved.");
     } finally {
@@ -75,6 +82,7 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
     setError(null);
     try {
       setWorkspace(await retireStaleHistoryReviews());
+      onHistoryChanged?.();
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "The old approval could not be retired.");
     } finally {
