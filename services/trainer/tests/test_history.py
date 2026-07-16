@@ -419,6 +419,30 @@ class HistoryServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(HistoryError, "prior approval is stale"):
             approved_history_records(replacement_config, self.root)
 
+    def test_removing_a_source_retires_its_review_without_deleting_the_audit(self) -> None:
+        repository, revision = self.create_focused_history()
+        config = self.config(repository, revision)
+        candidate = list_history(config, self.root)["candidates"][0]
+        review_history(
+            config,
+            self.root,
+            candidate_id=candidate["candidate_id"],
+            decision="approved",
+            instruction="Clarify the application label without changing its public API.",
+            rights_confirmed=True,
+        )
+
+        removed = dict(config)
+        removed["sources"] = []
+        result = list_history(removed, self.root)
+
+        self.assertEqual(result["summary"]["stale_reviews"], 0)
+        self.assertEqual(result["summary"]["orphaned_reviews"], 1)
+        self.assertEqual(approved_history_records(removed, self.root), [])
+        self.assertTrue(
+            (self.root / ".autotrainer" / "history" / "reviews.json").is_file()
+        )
+
     def test_only_train_history_sources_are_discovered(self) -> None:
         repository, revision = self.create_focused_history()
         evaluation = self.config(repository, revision, partition="evaluation")

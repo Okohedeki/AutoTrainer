@@ -1015,6 +1015,37 @@ def list_history(
     # Sources are already sorted and each source yields newest-first mainline
     # changes, which is both deterministic and the useful review order.
     current_ids = {str(item["candidate_id"]) for item in candidates}
+    declared_source_ids = {str(source.get("id", "")) for source in sources}
+    current_identities = {
+        str(report["source_id"]): str(report["repository_identity"])
+        for report in reports
+    }
+
+    def stale_authority(review: Mapping[str, Any]) -> bool:
+        if review.get("decision") != "approved":
+            return False
+        source_id = str(review.get("source_id", ""))
+        identity = str(review.get("repository_identity", ""))
+        # Legacy reviews without source metadata stay fail-closed. New reviews
+        # stop carrying authority when their repository is deliberately removed
+        # or replaced by another repository under the same display ID.
+        if not source_id:
+            return True
+        if source_id not in declared_source_ids:
+            return False
+        current_identity = current_identities.get(source_id)
+        return not identity or current_identity is None or identity == current_identity
+
+    stale_reviews = sum(
+        candidate_id not in current_ids and stale_authority(review)
+        for candidate_id, review in reviews.items()
+    )
+    orphaned_reviews = sum(
+        candidate_id not in current_ids
+        and review.get("decision") == "approved"
+        and not stale_authority(review)
+        for candidate_id, review in reviews.items()
+    )
     summary = {
         "approved": sum(item["decision"] == "approved" for item in candidates),
         "considered": sum(int(report["considered"]) for report in reports),
@@ -1023,12 +1054,10 @@ def list_history(
         "rejected": sum(item["decision"] == "rejected" for item in candidates),
         "reviewable": len(candidates),
         "source_count": len(reports),
+        "orphaned_reviews": orphaned_reviews,
         # Rejected candidates are not training authority. Only an approval that
         # left the locked ancestry must block later compilation.
-        "stale_reviews": sum(
-            candidate_id not in current_ids and review.get("decision") == "approved"
-            for candidate_id, review in reviews.items()
-        ),
+        "stale_reviews": stale_reviews,
     }
     return {
         "candidates": candidates,
@@ -1087,7 +1116,13 @@ def review_history(
         raise HistoryError("candidate is missing or stale; refresh history before reviewing")
     candidate = matching[0]
 
-    review: dict[str, Any] = {"decision": selected_decision}
+    # Source identity lets a later source removal retire this authority without
+    # deleting the audit record. It is a digest, never a path or remote URL.
+    review: dict[str, Any] = {
+        "decision": selected_decision,
+        "repository_identity": candidate["repository_identity"],
+        "source_id": candidate["source_id"],
+    }
     if selected_decision == "approved":
         if rights_confirmed is not True:
             raise HistoryError("confirm the right to train on this change before approval")
