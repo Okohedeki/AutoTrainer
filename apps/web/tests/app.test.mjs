@@ -20,19 +20,23 @@ test("build emits the focused AutoTrainer application", async () => {
   assert.ok(assets.some((name) => name.endsWith(".css")));
 });
 
-test("the page is one clear three-step setup flow", async () => {
+test("the page is an operating console around the focused setup flow", async () => {
   const app = await source("src/App.tsx");
-  assert.match(app, /Make a small model excellent at your work/);
+  assert.match(app, /className="console-shell"/);
+  assert.match(app, /className="sidebar"/);
+  assert.match(app, />Setup</);
+  assert.match(app, />Training</);
+  assert.match(app, /Build the training run/);
   assert.match(app, /<ModelSetupPanel(?:\s+[^>]*)?\s*\/>/);
   assert.match(app, /<SourceSetupPanel(?:\s+[^>]*)?\s*\/>/);
   assert.match(app, /<HistoryReviewPanel[\s\S]*?\/>/);
   assert.match(app, /<PreparePanel(?:\s+[^>]*)?\s*\/>/);
+  assert.match(app, /<TrainingMonitorPanel/);
   assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<HistoryReviewPanel"));
-  assert.ok(app.indexOf("<HistoryReviewPanel") < app.indexOf("<PreparePanel"));
   assert.match(app, /aria-label="Training setup"/);
   assert.match(app, /disabled={trainingActive}/);
   assert.match(app, /onTrainingActiveChange={setTrainingActive}/);
-  assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
+  assert.doesNotMatch(app, /className="hero"|proof-note|site-footer|CommandDrawer/);
   await assert.rejects(access(new URL("src/data.ts", root)));
 });
 
@@ -113,6 +117,7 @@ test("one preparation action returns an honest next step", async () => {
 
 test("training starts only after readiness and follows the real job record", async () => {
   const panel = await source("src/PreparePanel.tsx");
+  const monitor = await source("src/TrainingMonitorPanel.tsx");
   const api = await source("src/api.ts");
   assert.match(api, /export type TrainingJob/);
   assert.match(api, /status: "idle" \| "queued" \| "running" \| "completed" \| "failed" \| "interrupted"/);
@@ -132,6 +137,11 @@ test("training starts only after readiness and follows the real job record", asy
   assert.match(panel, /Train again/);
   assert.match(panel, /Retry training/);
   assert.doesNotMatch(panel, /type="range"|percentage|progress bar|view logs|learning rate|rank|alpha/i);
+  assert.match(monitor, /await|then\(\(next\)|getTrainingJob/);
+  assert.match(monitor, /window\.setInterval/);
+  assert.match(monitor, /job\?\.result\?\.stages|job\.result\?\.stages/);
+  assert.match(monitor, /Nothing fabricated/);
+  assert.doesNotMatch(monitor, /type="range"|Math\.random/);
 });
 
 test("the first run has exactly three accessible walkthrough steps", async () => {
@@ -156,10 +166,11 @@ test("normal UI stays plain, truthful, and free of research jargon", async () =>
     source("src/SourceSetupPanel.tsx"),
     source("src/HistoryReviewPanel.tsx"),
     source("src/PreparePanel.tsx"),
+    source("src/TrainingMonitorPanel.tsx"),
     source("index.html"),
   ]).then((files) => files.join("\n"));
 
-  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab|dashboard/);
+  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab/);
   assert.doesNotMatch(visibleUi, /status:\s*["']running["']|training started|job queued/i);
   assert.match(visibleUi, /Training never starts by accident/);
 });

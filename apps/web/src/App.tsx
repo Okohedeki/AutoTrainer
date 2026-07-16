@@ -1,20 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getBackendHealth, getTrainingJob, type BackendHealth } from "./api";
 import HistoryReviewPanel from "./HistoryReviewPanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import PreparePanel from "./PreparePanel";
 import SourceSetupPanel from "./SourceSetupPanel";
+import TrainingMonitorPanel from "./TrainingMonitorPanel";
 
 const WALKTHROUGH_STORAGE_KEY = "autotrainer.walkthrough.v2";
 
-type WalkthroughStep = {
-  target: string;
-  label: string;
-  title: string;
-  body: string;
-};
+type ViewId = "setup" | "training";
+type WalkthroughStep = { target: string; label: string; title: string; body: string };
 
-// Onboarding mirrors the only three decisions on the page. It explains the
-// product without creating a second demo flow that can drift from real setup.
+// The walkthrough points at real controls in the operating console. It does
+// not create a separate demo path or describe features that are not connected.
 const walkthroughSteps: WalkthroughStep[] = [
   {
     target: '[data-tour="model"]',
@@ -54,7 +52,6 @@ function Walkthrough({
   useEffect(() => {
     document.querySelector<HTMLElement>(step.target)?.scrollIntoView({ block: "center" });
     dialogRef.current?.querySelector<HTMLElement>("button")?.focus();
-
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
@@ -65,14 +62,7 @@ function Walkthrough({
   return (
     <div className="walkthrough-layer">
       <div className="walkthrough-shade" aria-hidden="true" />
-      <aside
-        ref={dialogRef}
-        className="walkthrough-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="walkthrough-title"
-        aria-describedby="walkthrough-body"
-      >
+      <aside ref={dialogRef} className="walkthrough-card" role="dialog" aria-modal="true" aria-labelledby="walkthrough-title" aria-describedby="walkthrough-body">
         <span className="walkthrough-progress">{step.label}</span>
         <h2 id="walkthrough-title">{step.title}</h2>
         <p id="walkthrough-body">{step.body}</p>
@@ -80,9 +70,7 @@ function Walkthrough({
           <button className="text-button" type="button" onClick={onClose}>Skip</button>
           <div>
             {stepIndex > 0 && <button className="secondary-button" type="button" onClick={onBack}>Back</button>}
-            <button className="primary-button" type="button" onClick={onNext}>
-              {finalStep ? "Start setup" : "Next"}
-            </button>
+            <button className="primary-button" type="button" onClick={onNext}>{finalStep ? "Start setup" : "Next"}</button>
           </div>
         </div>
       </aside>
@@ -92,6 +80,9 @@ function Walkthrough({
 
 export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
+  const [activeView, setActiveView] = useState<ViewId>("setup");
+  const [health, setHealth] = useState<BackendHealth | null>(null);
+  const [backendConnected, setBackendConnected] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [projectRevision, setProjectRevision] = useState(0);
   const [trainingActive, setTrainingActive] = useState(false);
@@ -103,6 +94,32 @@ export default function App() {
     }
   });
   const walkthroughOpen = walkthroughStep !== null;
+
+  useEffect(() => {
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const [nextHealth, job] = await Promise.all([getBackendHealth(), getTrainingJob()]);
+        if (stopped) return;
+        setHealth(nextHealth);
+        setBackendConnected(true);
+        setTrainingActive(job.status === "queued" || job.status === "running");
+      } catch {
+        if (!stopped) setBackendConnected(false);
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, 2_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const projectName = useMemo(() => {
+    const parts = health?.config.replaceAll("\\", "/").split("/") ?? [];
+    return parts.at(-2) || "Local project";
+  }, [health]);
 
   const rememberWalkthrough = useCallback(() => {
     try {
@@ -129,65 +146,85 @@ export default function App() {
   }, [rememberWalkthrough]);
 
   const sourcesChanged = useCallback(() => {
-    // Repository history is discovered after a source is pinned, so refresh
-    // the optional review queue without making the user reload the page.
     setSourceRevision((value) => value + 1);
     setProjectRevision((value) => value + 1);
   }, []);
 
   const projectChanged = useCallback(() => {
-    // A Ready result describes one exact model/data snapshot. Any successful
-    // setup mutation removes that stale result until Prepare checks it again.
     setProjectRevision((value) => value + 1);
   }, []);
 
+  const openView = (view: ViewId) => {
+    setActiveView(view);
+    window.scrollTo({ top: 0, behavior: "auto" });
+  };
+
   return (
     <>
-      <div className="app-shell" inert={walkthroughOpen ? true : undefined}>
-        <header className="site-header">
-          <a className="brand" href="#top" aria-label="AutoTrainer home">
-            <span aria-hidden="true">A</span>
-            <strong>AutoTrainer</strong>
-          </a>
-          <button
-            ref={restartButtonRef}
-            className="text-button walkthrough-restart"
-            type="button"
-            onClick={() => setWalkthroughStep(0)}
-          >
-            Walkthrough
-          </button>
-        </header>
-
-        <main id="top">
-          <section className="hero" aria-labelledby="page-title">
-            <p className="eyebrow">Local model training</p>
-            <h1 id="page-title">Make a small model excellent at your work</h1>
-            <p>Choose a model, show it the work that matters, and prepare a training path your machine can run.</p>
-          </section>
-
-          <div className="setup-flow" aria-label="Training setup">
-            <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
-            <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
-            <HistoryReviewPanel
-              refreshKey={sourceRevision}
-              onHistoryChanged={projectChanged}
-              disabled={trainingActive}
-            />
-            <PreparePanel revision={projectRevision} onTrainingActiveChange={setTrainingActive} />
+      <div className="console-shell" inert={walkthroughOpen ? true : undefined}>
+        <aside className="sidebar">
+          <div className="brand-row">
+            <span className="brand-mark" aria-hidden="true">A</span>
+            <div><strong>AutoTrainer</strong><small>Local training console</small></div>
           </div>
 
-          <section className="proof-note" aria-labelledby="proof-heading">
-            <p className="panel-kicker">After training</p>
-            <h2 id="proof-heading">Prove the specialist is better</h2>
-            <p>Compare it with the original model on work neither version saw during training.</p>
-          </section>
-        </main>
+          <div className="project-context">
+            <span className="project-avatar" aria-hidden="true">{projectName.slice(0, 2).toUpperCase()}</span>
+            <div><strong>{projectName}</strong><small>autotrainer.yaml</small></div>
+            <span className="project-state">Local</span>
+          </div>
 
-        <footer className="site-footer">
-          <span>AutoTrainer</span>
-          <span>Your files stay on this machine.</span>
-        </footer>
+          <nav className="primary-nav" aria-label="Project navigation">
+            <button className={activeView === "setup" ? "active" : ""} type="button" onClick={() => openView("setup")} aria-current={activeView === "setup" ? "page" : undefined}>
+              <span className="nav-icon" aria-hidden="true">01</span><span className="nav-label">Setup</span>
+            </button>
+            <button className={activeView === "training" ? "active" : ""} type="button" onClick={() => openView("training")} aria-current={activeView === "training" ? "page" : undefined}>
+              <span className="nav-icon" aria-hidden="true">02</span><span className="nav-label">Training</span>{trainingActive && <small>live</small>}
+            </button>
+          </nav>
+
+          <div className="sidebar-runtime">
+            <div><span className={`health-dot ${backendConnected ? "good" : "danger"}`} aria-hidden="true" /><strong>Local backend</strong></div>
+            <p>{backendConnected ? "Connected on this machine" : "Not connected"}</p>
+          </div>
+        </aside>
+
+        <div className="console-main">
+          <header className="topbar">
+            <div className="breadcrumbs"><span>Projects</span><b>/</b><strong>{projectName}</strong><span className={`status-chip ${backendConnected ? "good" : "danger"}`}>{backendConnected ? "connected" : "offline"}</span></div>
+            <div className="topbar-actions">
+              {health?.config && <code className="config-source">{health.config}</code>}
+              <button ref={restartButtonRef} className="walkthrough-restart" type="button" onClick={() => { setActiveView("setup"); setWalkthroughStep(0); }}>Walkthrough</button>
+            </div>
+          </header>
+
+          <main className="page-content">
+            <header className="page-heading">
+              <div>
+                <p className="eyebrow">{activeView === "setup" ? "Project setup" : "Local execution"}</p>
+                <div className="title-row"><h1>{activeView === "setup" ? "Build the training run" : "Training run"}</h1>{trainingActive && <span className="status-chip info">running</span>}</div>
+                <p className="page-description">{activeView === "setup"
+                  ? "Choose the exact model, add your work, review useful examples, and prove this machine is ready."
+                  : "Watch the durable local job record, completed stages, real trainer metrics, and output paths."}</p>
+              </div>
+            </header>
+
+            {activeView === "setup" ? (
+              <>
+                <div className="workspace-grid" aria-label="Training setup">
+                  <div className="workspace-main">
+                    <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
+                    <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
+                  </div>
+                  <PreparePanel revision={projectRevision} onTrainingActiveChange={setTrainingActive} />
+                </div>
+                <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} disabled={trainingActive} />
+              </>
+            ) : (
+              <TrainingMonitorPanel onOpenSetup={() => openView("setup")} />
+            )}
+          </main>
+        </div>
       </div>
 
       {walkthroughStep !== null && (

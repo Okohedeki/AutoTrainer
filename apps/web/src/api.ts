@@ -112,6 +112,11 @@ export type TrainingJob = {
   } | null;
 };
 
+export type BackendHealth = {
+  status: "ok";
+  config: string;
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -136,6 +141,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiClientError(payload.error?.message || `Local backend returned ${response.status}.`, response.status);
   }
   return payload;
+}
+
+export async function getBackendHealth(signal?: AbortSignal): Promise<BackendHealth> {
+  return request("/api/v1/health", { signal });
 }
 
 export async function getModelWorkspace(signal?: AbortSignal): Promise<ModelWorkspace> {
