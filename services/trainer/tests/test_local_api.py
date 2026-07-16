@@ -70,6 +70,42 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result, completed)
 
+    def test_source_endpoints_share_the_persisted_source_contract(self) -> None:
+        demonstrations = self.root / "accepted.jsonl"
+        demonstrations.write_text(
+            '{"messages":[{"role":"assistant","content":"accepted"}]}\n',
+            encoding="utf-8",
+        )
+
+        status, initial = self.request("GET", "/api/v1/sources")
+        self.assertEqual(status, 200)
+        self.assertEqual(initial, {"sources": []})
+
+        status, added = self.request(
+            "POST", "/api/v1/sources", {"value": str(demonstrations)}
+        )
+        self.assertEqual(status, 200)
+        source = added["source"]
+        self.assertEqual(
+            set(source),
+            {"id", "kind", "label", "value", "origin", "purpose", "status"},
+        )
+        self.assertEqual(source["purpose"], "examples")
+        self.assertEqual(source["status"], "ready")
+        self.assertEqual(len(load_config(self.config_path).sources), 1)
+
+        status, removed = self.request("DELETE", f"/api/v1/sources/{source['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(removed["removed"], source)
+        self.assertEqual(removed["sources"], [])
+        self.assertEqual(load_config(self.config_path).sources, [])
+
+    def test_source_endpoint_rejects_missing_value(self) -> None:
+        status, result = self.request("POST", "/api/v1/sources", {})
+
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_server_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(ConfigError, "loopback"):
             create_local_api_server(self.config_path, "0.0.0.0", 8765)

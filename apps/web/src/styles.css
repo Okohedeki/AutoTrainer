@@ -131,6 +131,35 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .model-form input:disabled, .model-form select:disabled { color: #6b7580; background: #f0f2f4; cursor: not-allowed; }
 .model-form small { color: #707b86; font-size: 10px; line-height: 1.45; }
 .model-form-actions { margin-top: 2px; display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Source setup stays intentionally compact: one input, the inferred result,
+   and no exposed provenance or training-algorithm switches. */
+.source-setup { margin-bottom: 14px; padding: 19px; }
+.source-setup-header { align-items: flex-start; margin-bottom: 15px; }
+.source-setup-header h2 { margin-bottom: 6px; }
+.source-setup-header p:last-child { max-width: 650px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.source-entry { display: grid; gap: 7px; }
+.source-entry > label { color: #66717d; font-size: 10px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.source-entry > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.source-entry input { min-width: 0; min-height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: #fff; font-size: 12px; outline: none; }
+.source-entry input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(108,114,255,.13); }
+.source-entry input:disabled { color: #6b7580; background: #f0f2f4; }
+.source-error { margin-top: 10px; padding: 10px 12px; border: 1px solid #f2caca; border-radius: 8px; color: #a83232; background: var(--danger-soft); font-size: 11px; }
+.source-cards { margin: 14px 0 0; padding: 0; display: grid; gap: 7px; list-style: none; }
+.source-cards li { min-width: 0; padding: 10px 11px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 11px; align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.source-origin { min-width: 37px; min-height: 28px; padding: 0 6px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 6px; color: #59636e; background: #fff; font: 800 8px/1 "SFMono-Regular", Consolas, monospace; }
+.source-cards li > div { min-width: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 9px; align-items: baseline; }
+.source-cards strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.source-cards li > div > span { color: var(--muted); font-size: 10px; }
+.source-cards code { grid-column: 1 / -1; overflow: hidden; color: #68727d; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.source-ready { color: var(--good); font-size: 10px; font-weight: 800; }
+.source-cards button { padding: 5px 2px; border: 0; color: #68727d; background: transparent; cursor: pointer; font-size: 10px; font-weight: 700; }
+.source-cards button:hover { color: var(--danger); }
+.source-cards button:disabled { opacity: .5; cursor: not-allowed; }
+.source-empty { margin-top: 14px; padding: 18px; border: 1px dashed var(--line-strong); border-radius: 8px; text-align: center; }
+.source-empty strong { font-size: 12px; }
+.source-empty p { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+.source-truth { margin: 12px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .model-facts { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .model-facts > div { min-height: 92px; padding: 14px; display: grid; align-content: center; gap: 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #fff; }
 .model-facts strong { font-size: 12px; overflow-wrap: anywhere; }

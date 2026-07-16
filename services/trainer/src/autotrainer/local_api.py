@@ -11,6 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -23,6 +24,7 @@ from .model_service import (
     model_status,
     select_model,
 )
+from .source_service import add_source, list_sources, remove_source
 
 
 API_PREFIX = "/api/v1"
@@ -114,7 +116,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", self._cors_origin() or "")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
@@ -133,6 +135,11 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 )
             elif path == f"{API_PREFIX}/model/status":
                 self._send_json(HTTPStatus.OK, model_status(self.server.config_path))
+            elif path == f"{API_PREFIX}/sources":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"sources": list_sources(self.server.config_path)},
+                )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
 
@@ -155,8 +162,38 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {**result, "cache": model_status(self.server.config_path)})
             elif path == f"{API_PREFIX}/model/download":
                 self._send_json(HTTPStatus.OK, download_model(self.server.config_path))
+            elif path == f"{API_PREFIX}/sources":
+                value = str(payload.get("value", "")).strip()
+                if not value:
+                    raise ConfigError("source value is required")
+                self._send_json(
+                    HTTPStatus.OK,
+                    add_source(self.server.config_path, value),
+                )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
+
+        self._handle(operation)
+
+    def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
+        def operation() -> None:
+            path = urlsplit(self.path).path
+            prefix = f"{API_PREFIX}/sources/"
+            if not path.startswith(prefix) or not path[len(prefix) :]:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": {"code": "not_found", "message": "endpoint not found"}},
+                )
+                return
+            source_id = path[len(prefix) :]
+            # IDs are single slugs; rejecting separators keeps routing and
+            # filesystem cleanup independent from user-controlled paths.
+            if "/" in source_id or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", source_id):
+                raise ConfigError("source id is invalid")
+            self._send_json(
+                HTTPStatus.OK,
+                remove_source(self.server.config_path, source_id),
+            )
 
         self._handle(operation)
 

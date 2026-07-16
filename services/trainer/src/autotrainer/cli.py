@@ -83,15 +83,22 @@ def build_parser() -> argparse.ArgumentParser:
     source_sub = source.add_subparsers(dest="source_command", required=True)
     source_list = source_sub.add_parser("list")
     _config_argument(source_list)
-    source_add = source_sub.add_parser("add")
+    source_add = source_sub.add_parser(
+        "add", help="add a GitHub repository or supported local path"
+    )
     source_add.add_argument("uri")
-    source_add.add_argument("--name", required=True)
-    source_add.add_argument("--kind", required=True, choices=["repository", "sft_jsonl", "task_pack"])
-    source_add.add_argument("--partition", choices=["train", "evaluation"], default="train")
-    source_add.add_argument("--roles", default="", help="comma-separated repository roles")
+    # The normal path needs only a value. These flags retain the explicit
+    # declaration escape hatch for agents and existing automation.
+    source_add.add_argument("--name", default=None)
+    source_add.add_argument("--kind", default=None, choices=["repository", "sft_jsonl", "task_pack"])
+    source_add.add_argument("--partition", choices=["train", "evaluation"], default=None)
+    source_add.add_argument("--roles", default=None, help="comma-separated repository roles")
     source_add.add_argument("--revision", default=None)
-    source_add.add_argument("--license", dest="source_license", default="UNDECLARED")
+    source_add.add_argument("--license", dest="source_license", default=None)
     _config_argument(source_add)
+    source_remove = source_sub.add_parser("remove", help="remove one declared source")
+    source_remove.add_argument("source_id")
+    _config_argument(source_remove)
     source_scan = source_sub.add_parser("scan")
     source_scan.add_argument("--write", action="store_true", help="write lock and raw reference artifacts")
     _config_argument(source_scan)
@@ -247,32 +254,38 @@ def _run_model(arguments: argparse.Namespace) -> int:
 
 
 def _run_source(arguments: argparse.Namespace) -> int:
-    config = load_config(arguments.config)
     if arguments.source_command == "list":
-        _emit(config.sources, as_json=arguments.json)
+        from .source_service import list_sources
+
+        _emit({"sources": list_sources(arguments.config)}, as_json=arguments.json)
         return 0
     if arguments.source_command == "add":
-        if any(source.get("id") == arguments.name for source in config.sources):
-            raise ConfigError(f"source id already exists: {arguments.name}")
-        declared: dict[str, Any] = {
-            "id": arguments.name,
-            "kind": arguments.kind,
-            "uri": arguments.uri,
-            "partition": arguments.partition,
-        }
-        if arguments.kind == "repository":
-            declared["roles"] = [role.strip() for role in arguments.roles.split(",") if role.strip()] or ["style"]
-            declared["revision"] = arguments.revision or "HEAD"
-            declared["license"] = {"spdx": arguments.source_license}
-        elif arguments.kind == "sft_jsonl":
-            declared["roles"] = ["demonstrations"]
-        else:
-            declared["roles"] = ["evaluation" if arguments.partition == "evaluation" else "rl_tasks"]
-        config.data["sources"].append(declared)
-        _save_loaded(config)
-        _emit(declared, as_json=arguments.json)
+        from .source_service import add_source
+
+        roles = (
+            [role.strip() for role in arguments.roles.split(",") if role.strip()]
+            if arguments.roles is not None
+            else None
+        )
+        result = add_source(
+            arguments.config,
+            arguments.uri,
+            name=arguments.name,
+            kind=arguments.kind,
+            partition=arguments.partition,
+            roles=roles,
+            revision=arguments.revision,
+            license_spdx=arguments.source_license,
+        )
+        _emit(result, as_json=arguments.json)
+        return 0
+    if arguments.source_command == "remove":
+        from .source_service import remove_source
+
+        _emit(remove_source(arguments.config, arguments.source_id), as_json=arguments.json)
         return 0
 
+    config = load_config(arguments.config)
     if arguments.source_command == "materialize":
         from .sources import materialize_repository
 

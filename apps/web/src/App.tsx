@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import ModelSetupPanel from "./ModelSetupPanel";
+import SourceSetupPanel from "./SourceSetupPanel";
 import {
   commands,
   environment,
@@ -10,7 +11,6 @@ import {
   projectSnapshot,
   rewardSignals,
   runtimeSnapshot,
-  sources,
   type CommandDefinition,
   type StatusTone,
   type ViewId,
@@ -282,6 +282,7 @@ function OverviewView({ onOpenCommands }: { onOpenCommands: () => void }) {
         <article><span>Release proof</span><strong>Blocked</strong><small>Holdout + runner pins</small></article>
       </section>
       <ModelSetupPanel />
+      <SourceSetupPanel />
       <div className="overview-grid">
         <PipelinePanel />
         <RuntimePanel onOpenCommands={onOpenCommands} />
@@ -349,26 +350,7 @@ function RunsView({ onPrepare }: { onPrepare: () => void }) {
 // Source partitions stay visible together because training/evaluation identity
 // overlap is a release blocker, not a warning to hide in a generated report.
 function DataView() {
-  return (
-    <>
-      <section className="summary-grid compact-summary" aria-label="Source summary">
-        <article><span>Declared sources</span><strong>5</strong><small>All statically readable</small></article>
-        <article><span>Repository files</span><strong>21</strong><small>Content-hashed</small></article>
-        <article><span>SFT records</span><strong>1</strong><small>Messages format</small></article>
-        <article><span>Executable tasks</span><strong>2</strong><small>Train + evaluation</small></article>
-      </section>
-      <section className="panel table-panel" aria-labelledby="sources-heading" data-tour="sources">
-        <div className="panel-header"><div><p className="panel-kicker">Source inventory</p><h2 id="sources-heading">Declared inputs</h2></div><StatusChip tone="warning">Compiled with warnings</StatusChip></div>
-        <div className="table-scroll">
-          <table>
-            <thead><tr><th>Source</th><th>Kind</th><th>Partition</th><th>Role</th><th>Location</th><th>Locked identity</th><th>Contents</th><th>State</th></tr></thead>
-            <tbody>{sources.map((source) => <tr key={source.id}><td><strong>{source.id}</strong></td><td>{source.kind}</td><td>{source.partition}</td><td>{source.role}</td><td><code>{source.location}</code></td><td><code>{source.identity}</code></td><td>{source.records}</td><td><StatusChip tone={source.tone}>{source.state}</StatusChip></td></tr>)}</tbody>
-          </table>
-        </div>
-      </section>
-      <div className="info-callout danger wide-callout"><strong>Repository holdout is not established</strong><p>The training and evaluation fixtures are different folders in the same Git repository. They are useful for authoring, but final evaluation correctly refuses them.</p></div>
-    </>
-  );
+  return <SourceSetupPanel />;
 }
 
 function EnvironmentsView() {

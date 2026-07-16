@@ -49,6 +49,20 @@ test("the GUI and CLI share the real model lifecycle", async () => {
   assert.match(snapshot, /autotrainer model download --config/);
 });
 
+test("sources are added through one inferred GitHub or local-path workflow", async () => {
+  const panel = await readFile(new URL("src/SourceSetupPanel.tsx", root), "utf8");
+  const api = await readFile(new URL("src/api.ts", root), "utf8");
+  const app = await readFile(new URL("src/App.tsx", root), "utf8");
+  assert.match(panel, /Add a GitHub repo or local path/);
+  assert.match(panel, /GitHub URL or local path/);
+  assert.match(panel, /await addProjectSource/);
+  assert.match(panel, /await removeProjectSource/);
+  assert.match(panel, /Accepted examples and executable tasks provide the learning signal/);
+  assert.match(api, /GET|ProjectSource/);
+  assert.match(api, /\/api\/v1\/sources/);
+  assert.match(app, /<SourceSetupPanel \/>/);
+});
+
 test("the example snapshot cannot imply a downloaded or active model", async () => {
   const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
   assert.match(snapshot, /cache: "Not downloaded"/);

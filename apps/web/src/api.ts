@@ -41,6 +41,20 @@ export type ModelWorkspace = {
   cache: ModelCacheState;
 };
 
+// The normal source picker deals in product concepts, not YAML source kinds.
+// The backend keeps revisions and provenance while the GUI only needs enough
+// information to show what will teach the model.
+export type ProjectSource = {
+  id: string;
+  kind: "repository" | "sft_jsonl" | "task_pack";
+  label: string;
+  value: string;
+  origin: "github" | "local";
+  purpose: "work" | "examples" | "tasks";
+  revision?: string;
+  status: "ready";
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -85,4 +99,24 @@ export async function selectProjectModel(input: {
 
 export async function downloadProjectModel(): Promise<ModelCacheState> {
   return request("/api/v1/model/download", { method: "POST", body: "{}" });
+}
+
+export async function getProjectSources(signal?: AbortSignal): Promise<ProjectSource[]> {
+  const result = await request<{ sources: ProjectSource[] }>("/api/v1/sources", { signal });
+  return result.sources;
+}
+
+export async function addProjectSource(value: string): Promise<ProjectSource[]> {
+  const result = await request<{ sources: ProjectSource[] }>("/api/v1/sources", {
+    method: "POST",
+    body: JSON.stringify({ value }),
+  });
+  return result.sources;
+}
+
+export async function removeProjectSource(id: string): Promise<ProjectSource[]> {
+  const result = await request<{ sources: ProjectSource[] }>(`/api/v1/sources/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  return result.sources;
 }
