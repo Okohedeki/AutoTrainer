@@ -19,8 +19,12 @@ import yaml
 from .compiler import compile_data, invalidate_compile_provenance
 from .config import ConfigError, ProjectConfig, validate_mapping
 from .doctor import run_doctor
+from .model_cache import ModelCacheError, require_materialized_model
 from .planner import build_plan
 from .sources import scan_sources
+from .training import resolve_grpo_recipe, resolve_sft_recipe
+from .training.common import import_factory
+from .training.selection import select_stage_config
 
 
 STEP_LABELS = {
@@ -154,6 +158,117 @@ def _doctor_ready(doctor: Mapping[str, Any], recipe: str) -> bool:
     return False
 
 
+def _doctor_blocker(doctor: Mapping[str, Any], recipe: str) -> str:
+    """Return Doctor's first concrete fix in the order training encounters it."""
+
+    python = doctor.get("python", {})
+    if isinstance(python, Mapping) and python.get("status") not in {None, "ready"}:
+        return (
+            f"Python {python.get('version', 'is unsupported')}; "
+            f"AutoTrainer requires {python.get('expected', '3.11.x')}."
+        )
+    gpu = doctor.get("gpu", {})
+    if isinstance(gpu, Mapping) and gpu.get("status") not in {None, "ready"}:
+        return str(gpu.get("detail") or "One visible 20 GiB+ NVIDIA GPU with bfloat16 is required.")
+    packages = doctor.get("packages", [])
+    if isinstance(packages, list):
+        for package in packages:
+            if not isinstance(package, Mapping) or package.get("status") == "ready":
+                continue
+            name = str(package.get("name", "training package"))
+            expected = str(package.get("expected", "the pinned version"))
+            detail = package.get("detail")
+            if detail:
+                return f"{name} cannot be imported: {detail}"
+            installed = package.get("installed")
+            suffix = f"; found {installed}" if installed else ""
+            return f"Install {name}=={expected}{suffix}."
+    if recipe in {"practice", "both"}:
+        for key, label in (
+            ("sandbox", "The container runtime is unavailable"),
+            ("environment_image", "The rollout image is unavailable"),
+        ):
+            check = doctor.get(key, {})
+            if isinstance(check, Mapping) and check.get("status") != "ready":
+                return f"{label}: {check.get('detail') or check.get('status', 'not ready')}."
+    errors = doctor.get("errors", [])
+    if isinstance(errors, list) and errors:
+        return str(errors[0])
+    return "Resolve the first GPU, Python package, or sandbox blocker reported by Doctor."
+
+
+def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str, Any]:
+    """Resolve the exact runnable stages and verify their offline model.
+
+    Recipe resolvers inspect datasets, output paths, adapter compatibility, and
+    guarded hyperparameters without importing the ML stack. The model guard
+    then asks Hugging Face for the immutable snapshot with
+    ``local_files_only=True``; no weights are loaded and no network is used.
+    """
+
+    report: dict[str, Any] = {
+        "status": "blocked",
+        "recipes": {},
+        "model": {"status": "waiting"},
+        "errors": [],
+    }
+    try:
+        selected = select_stage_config(config.data, recipe)
+        recipes: dict[str, Any] = {}
+        if recipe in {"teach", "both"}:
+            recipes["sft"] = resolve_sft_recipe(
+                selected,
+                project_root=config.root,
+                output_dir=config.resolve_path(str(selected["sft"]["output_dir"])),
+            )
+        if recipe in {"practice", "both"}:
+            grpo_config = selected
+            if recipe == "both":
+                # The real GRPO resolver normally verifies an existing input
+                # adapter. During Prepare that adapter is intentionally absent:
+                # SFT creates it in stage one. A base-policy projection exercises
+                # every other GRPO recipe guard now; Start still resolves the
+                # real SFT adapter again before stage two executes.
+                grpo_config = deepcopy(selected)
+                grpo_config["sft"]["enabled"] = False
+                grpo_config["grpo"]["start_from"] = "base"
+            resolved_grpo = resolve_grpo_recipe(
+                grpo_config,
+                project_root=config.root,
+                output_dir=config.resolve_path(str(selected["grpo"]["output_dir"])),
+            )
+            if recipe == "both":
+                resolved_grpo["preflight_start_from"] = {
+                    "type": "sft_output_created_during_run",
+                    "path": str(config.resolve_path(str(selected["sft"]["output_dir"]))),
+                }
+            # Importing only the declared factory catches a misspelled module or
+            # callable before model loading. The factory is not instantiated.
+            import_factory(str(resolved_grpo["environment"]["factory"]))
+            recipes["grpo"] = resolved_grpo
+
+        model_recipe = next(iter(recipes.values()))["model"]
+        require_materialized_model(model_recipe)
+        report.update(
+            status="ready",
+            recipes=recipes,
+            model={
+                "status": "materialized",
+                "id": model_recipe["id"],
+                "revision": model_recipe["revision"],
+                "cache_dir": model_recipe["cache_dir"],
+            },
+        )
+    except ModelCacheError as error:
+        report["errors"] = [str(error)]
+        report["model"] = {"status": "blocked", "error": str(error)}
+    except Exception as error:
+        # This is a product boundary: Prepare reports the first static/local
+        # blocker instead of allowing Start to fail after it has claimed ready.
+        report["errors"] = [str(error)]
+    return report
+
+
 def _step(step_id: str, status: str) -> dict[str, str]:
     return {"id": step_id, "label": STEP_LABELS[step_id], "status": status}
 
@@ -231,14 +346,40 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
         plan = {"status": "blocked", "errors": [str(error)], "blockers": [str(error)]}
     plan_blockers = _training_plan_blockers(plan, recipe)
 
+    compile_errors = [str(value) for value in compile_result.get("errors", [])]
+    preflight: dict[str, Any] = {
+        "status": "skipped",
+        "recipes": {},
+        "model": {"status": "waiting"},
+        "errors": [],
+    }
+    static_ready = (
+        not blocking_validation
+        and not blocking_scan
+        and not training_scan.get("errors")
+        and recipe != "needs_training_data"
+        and not compile_errors
+        and not plan_blockers
+    )
+    if static_ready:
+        preflight = _resolve_training_preflight(config, recipe)
+
     environment = config.data.get("environment", {})
     backend = str(environment.get("backend", "docker")) if isinstance(environment, Mapping) else "docker"
-    try:
-        doctor = run_doctor(environment_backend=backend)
-    except Exception as error:
-        doctor = {"sft_ready": False, "rl_ready": False, "errors": [str(error)]}
+    image = str(environment.get("image", "")) if isinstance(environment, Mapping) else ""
+    doctor: dict[str, Any] = {
+        "status": "skipped",
+        "sft_ready": False,
+        "rl_ready": False,
+        "errors": [],
+    }
+    if preflight.get("status") == "ready":
+        try:
+            doctor = run_doctor(environment_backend=backend, environment_image=image)
+        except Exception as error:
+            doctor = {"sft_ready": False, "rl_ready": False, "errors": [str(error)]}
 
-    compile_errors = [str(value) for value in compile_result.get("errors", [])]
+    preflight_errors = [str(value) for value in preflight.get("errors", [])]
     steps: list[dict[str, str]] = []
     next_action: dict[str, str] | None = None
     if blocking_validation:
@@ -263,9 +404,19 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
     elif plan_blockers:
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "blocked"), _step("runtime", "waiting")]
         next_action = {"title": "Complete the training plan", "detail": plan_blockers[0]}
+    elif preflight_errors:
+        steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "complete"), _step("runtime", "blocked")]
+        model_blocked = preflight.get("model", {}).get("status") == "blocked"
+        next_action = {
+            "title": "Download the base model" if model_blocked else "Fix the training recipe",
+            "detail": preflight_errors[0],
+        }
     elif not _doctor_ready(doctor, recipe):
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "complete"), _step("runtime", "blocked")]
-        next_action = {"title": "Prepare the local runtime", "detail": "Resolve the first GPU, Python package, or sandbox blocker reported by Doctor."}
+        next_action = {
+            "title": "Prepare the local runtime",
+            "detail": _doctor_blocker(doctor, recipe),
+        }
     else:
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "complete"), _step("runtime", "complete")]
 
@@ -286,6 +437,7 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
             "scan": scan_detail,
             "compile": compile_result,
             "plan": plan,
+            "preflight": preflight,
             "doctor": doctor,
         },
     }

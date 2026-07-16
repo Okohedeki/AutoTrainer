@@ -14,6 +14,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.cli import main  # noqa: E402
 from autotrainer.config import default_config, write_config  # noqa: E402
+from autotrainer.model_cache import ModelCacheError  # noqa: E402
 from autotrainer.project_service import prepare_project  # noqa: E402
 
 
@@ -72,6 +73,8 @@ class ProjectServiceTests(unittest.TestCase):
         *,
         approved_history: int = 0,
         pending_history: int = 0,
+        recipe_error: Exception | None = None,
+        model_error: Exception | None = None,
     ) -> dict:
         full = scan_result(
             examples,
@@ -85,6 +88,11 @@ class ProjectServiceTests(unittest.TestCase):
             approved_history=approved_history,
             pending_history=pending_history,
         )
+        model = {
+            "id": "Qwen/Qwen3.5-9B",
+            "revision": "a" * 40,
+            "cache_dir": str((self.root / ".autotrainer" / "model-cache").resolve()),
+        }
         with (
             patch("autotrainer.project_service.scan_sources", side_effect=[full, training]),
             patch(
@@ -93,6 +101,27 @@ class ProjectServiceTests(unittest.TestCase):
             ),
             patch("autotrainer.project_service.build_plan", return_value=plan_result()),
             patch("autotrainer.project_service.run_doctor", return_value=doctor or READY_DOCTOR),
+            patch(
+                "autotrainer.project_service.resolve_sft_recipe",
+                side_effect=recipe_error,
+                return_value={"stage": "sft", "model": model},
+            ),
+            patch(
+                "autotrainer.project_service.resolve_grpo_recipe",
+                side_effect=recipe_error,
+                return_value={
+                    "stage": "grpo",
+                    "model": model,
+                    "environment": {
+                        "factory": "autotrainer.environments.frontend:FrontendEnvironment"
+                    },
+                },
+            ),
+            patch("autotrainer.project_service.import_factory"),
+            patch(
+                "autotrainer.project_service.require_materialized_model",
+                side_effect=model_error,
+            ),
         ):
             return prepare_project(self.config_path)
 
@@ -114,8 +143,40 @@ class ProjectServiceTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     set(result["details"]),
-                    {"validation", "scan", "compile", "plan", "doctor"},
+                    {"validation", "scan", "compile", "plan", "preflight", "doctor"},
                 )
+
+    def test_prepare_resolves_selected_recipe_and_exact_local_model(self) -> None:
+        result = self.prepare_with(1, 0)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["details"]["preflight"]["status"], "ready")
+        self.assertEqual(
+            result["details"]["preflight"]["model"]["status"],
+            "materialized",
+        )
+
+    def test_missing_model_snapshot_blocks_before_doctor_claims_ready(self) -> None:
+        result = self.prepare_with(
+            1,
+            0,
+            model_error=ModelCacheError("exact model snapshot is not complete"),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["next_action"]["title"], "Download the base model")
+        self.assertEqual(result["details"]["doctor"]["status"], "skipped")
+
+    def test_unresolvable_selected_recipe_blocks_start(self) -> None:
+        result = self.prepare_with(
+            0,
+            1,
+            recipe_error=ValueError("grpo generation batch is invalid"),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["next_action"]["title"], "Fix the training recipe")
+        self.assertIn("generation batch", result["next_action"]["detail"])
 
     def test_evaluation_only_validation_and_plan_work_are_deferred(self) -> None:
         payload = default_config()
@@ -188,6 +249,19 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["steps"][-1]["status"], "blocked")
         self.assertEqual(result["next_action"]["title"], "Prepare the local runtime")
+
+    def test_runtime_action_surfaces_doctors_first_concrete_blocker(self) -> None:
+        doctor = {
+            "sft_ready": False,
+            "rl_ready": False,
+            "python": {"status": "ready"},
+            "gpu": {"status": "blocked", "detail": "CUDA is not available."},
+            "packages": [],
+        }
+
+        result = self.prepare_with(1, 0, doctor)
+
+        self.assertEqual(result["next_action"]["detail"], "CUDA is not available.")
 
     def test_cli_calls_the_shared_prepare_service(self) -> None:
         prepared = {

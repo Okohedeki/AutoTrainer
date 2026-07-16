@@ -454,9 +454,18 @@ def _run_plan(arguments: argparse.Namespace) -> int:
 
 def _run_doctor(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
-    result = run_doctor(environment_backend=str(config.data["environment"]["backend"]))
+    result = run_doctor(
+        environment_backend=str(config.data["environment"]["backend"]),
+        environment_image=str(config.data["environment"].get("image", "")),
+    )
     _emit(result, as_json=arguments.json)
-    return 0 if result["sft_ready"] else 3
+    grpo = config.data.get("grpo", {})
+    # Standalone Doctor is conservative about the stages explicitly enabled in
+    # YAML. Data-driven Prepare may later choose fewer stages, but an agent must
+    # not receive exit 0 for an enabled RL stage whose sandbox is unavailable.
+    requires_rl = isinstance(grpo, dict) and grpo.get("enabled", True) is not False
+    ready = result["rl_ready"] if requires_rl else result["sft_ready"]
+    return 0 if ready else 3
 
 
 def _run_train(arguments: argparse.Namespace) -> int:
