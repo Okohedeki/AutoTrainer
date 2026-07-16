@@ -16,7 +16,7 @@ const purposeLabels: Record<ProjectSource["purpose"], string> = {
 // One field is deliberate: the backend infers whether the user supplied a
 // GitHub repository, local Git checkout, demonstration file, or task pack.
 // Those distinctions remain available in YAML without becoming setup chores.
-export default function SourceSetupPanel() {
+export default function SourceSetupPanel({ onSourcesChanged }: { onSourcesChanged?: () => void }) {
   const [sources, setSources] = useState<ProjectSource[]>([]);
   const [value, setValue] = useState("");
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -48,6 +48,7 @@ export default function SourceSetupPanel() {
       setSources(await addProjectSource(nextValue));
       setValue("");
       setConnected(true);
+      onSourcesChanged?.();
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not add that source.");
     } finally {
@@ -60,6 +61,7 @@ export default function SourceSetupPanel() {
     setError(null);
     try {
       setSources(await removeProjectSource(source.id));
+      onSourcesChanged?.();
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not remove that source.");
     } finally {

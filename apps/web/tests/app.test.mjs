@@ -24,11 +24,11 @@ test("the page is one clear three-step setup flow", async () => {
   const app = await source("src/App.tsx");
   assert.match(app, /Make a small model excellent at your work/);
   assert.match(app, /<ModelSetupPanel \/>/);
-  assert.match(app, /<SourceSetupPanel \/>/);
-  assert.match(app, /<HistoryReviewPanel \/>/);
+  assert.match(app, /<SourceSetupPanel onSourcesChanged=\{sourcesChanged\} \/>/);
+  assert.match(app, /<HistoryReviewPanel refreshKey=\{sourceRevision\} \/>/);
   assert.match(app, /<PreparePanel \/>/);
-  assert.ok(app.indexOf("<SourceSetupPanel />") < app.indexOf("<HistoryReviewPanel />"));
-  assert.ok(app.indexOf("<HistoryReviewPanel />") < app.indexOf("<PreparePanel />"));
+  assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<HistoryReviewPanel"));
+  assert.ok(app.indexOf("<HistoryReviewPanel") < app.indexOf("<PreparePanel />"));
   assert.match(app, /aria-label="Training setup"/);
   assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
   await assert.rejects(access(new URL("src/data.ts", root)));
@@ -61,12 +61,14 @@ test("work is added and removed through the real source contract", async () => {
   assert.match(api, /GET|ProjectSource/);
   assert.match(api, /\/api\/v1\/sources/);
   assert.match(api, /method: "DELETE"/);
+  assert.match(panel, /onSourcesChanged\?\.\(\)/);
 });
 
 test("reviewed history approves one real change at a time", async () => {
   const panel = await source("src/HistoryReviewPanel.tsx");
   const api = await source("src/api.ts");
   assert.match(panel, /workspace\?\.candidates\[0\]/);
+  assert.match(panel, /\[refreshKey\]/);
   assert.doesNotMatch(panel, /workspace\?\.candidates\.map|workspace\.candidates\.map/);
   assert.match(panel, /<textarea/);
   assert.match(panel, /<pre className="history-diff"/);

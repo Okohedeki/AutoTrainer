@@ -92,6 +92,7 @@ function Walkthrough({
 
 export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
+  const [sourceRevision, setSourceRevision] = useState(0);
   const [walkthroughStep, setWalkthroughStep] = useState<number | null>(() => {
     try {
       return window.localStorage.getItem(WALKTHROUGH_STORAGE_KEY) ? null : 0;
@@ -125,6 +126,12 @@ export default function App() {
     });
   }, [rememberWalkthrough]);
 
+  const sourcesChanged = useCallback(() => {
+    // Repository history is discovered after a source is pinned, so refresh
+    // the optional review queue without making the user reload the page.
+    setSourceRevision((value) => value + 1);
+  }, []);
+
   return (
     <>
       <div className="app-shell" inert={walkthroughOpen ? true : undefined}>
@@ -152,8 +159,8 @@ export default function App() {
 
           <div className="setup-flow" aria-label="Training setup">
             <ModelSetupPanel />
-            <SourceSetupPanel />
-            <HistoryReviewPanel />
+            <SourceSetupPanel onSourcesChanged={sourcesChanged} />
+            <HistoryReviewPanel refreshKey={sourceRevision} />
             <PreparePanel />
           </div>
 

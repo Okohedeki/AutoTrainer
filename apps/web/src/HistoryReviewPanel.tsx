@@ -9,7 +9,7 @@ import {
 // History is optional input, so an empty or unavailable history endpoint does
 // not add another setup card. The panel appears only when there is real work to
 // review or an approved example worth acknowledging.
-export default function HistoryReviewPanel() {
+export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: number }) {
   const [workspace, setWorkspace] = useState<HistoryWorkspace | null>(null);
   const [instruction, setInstruction] = useState("");
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
@@ -32,7 +32,7 @@ export default function HistoryReviewPanel() {
         setError(reason instanceof Error ? reason.message : "History could not be loaded.");
       });
     return () => controller.abort();
-  }, []);
+  }, [refreshKey]);
 
   useEffect(() => {
     setInstruction(candidate?.proposed_instruction || "");
