@@ -106,6 +106,43 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_history_endpoints_share_the_review_service_contract(self) -> None:
+        workspace = {
+            "summary": {"reviewable_count": 1, "approved_count": 0},
+            "candidates": [{"candidate_id": "sha256:" + "a" * 64}],
+        }
+        with patch("autotrainer.local_api.get_history_workspace", return_value=workspace):
+            status, result = self.request("GET", "/api/v1/history")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+
+        refreshed = {
+            "summary": {"reviewable_count": 0, "approved_count": 1},
+            "candidates": [],
+        }
+        with patch(
+            "autotrainer.local_api.review_history_candidate", return_value=refreshed
+        ) as review:
+            status, result = self.request(
+                "POST",
+                "/api/v1/history/review",
+                {
+                    "candidate_id": "sha256:" + "a" * 64,
+                    "decision": "approved",
+                    "instruction": "Keep the narrow layout usable.",
+                    "rights_confirmed": True,
+                },
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, refreshed)
+        review.assert_called_once_with(
+            self.config_path.resolve(),
+            candidate_id="sha256:" + "a" * 64,
+            decision="approved",
+            instruction="Keep the narrow layout usable.",
+            rights_confirmed=True,
+        )
+
     def test_prepare_endpoint_returns_the_shared_project_result_directly(self) -> None:
         prepared = {
             "status": "blocked",

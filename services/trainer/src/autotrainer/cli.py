@@ -114,6 +114,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(source_materialize)
 
+    history = subparsers.add_parser(
+        "history", help="review small accepted Git changes as supervised examples"
+    )
+    history_sub = history.add_subparsers(dest="history_command", required=True)
+    history_list = history_sub.add_parser("list", help="show the current review queue")
+    _config_argument(history_list)
+    history_review = history_sub.add_parser("review", help="approve or reject one change")
+    history_review.add_argument("candidate_id")
+    history_decision = history_review.add_mutually_exclusive_group(required=True)
+    history_decision.add_argument("--approve", action="store_true")
+    history_decision.add_argument("--reject", action="store_true")
+    history_review.add_argument("--instruction", default=None)
+    history_review.add_argument("--rights-confirmed", action="store_true")
+    _config_argument(history_review)
+
     validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
     _config_argument(validate)
 
@@ -349,6 +364,23 @@ def _run_validate(arguments: argparse.Namespace) -> int:
     return 0 if payload["valid"] else 2
 
 
+def _run_history(arguments: argparse.Namespace) -> int:
+    from .history_service import get_history_workspace, review_history_candidate
+
+    if arguments.history_command == "list":
+        result = get_history_workspace(arguments.config)
+    else:
+        result = review_history_candidate(
+            arguments.config,
+            candidate_id=arguments.candidate_id,
+            decision="approved" if arguments.approve else "rejected",
+            instruction=arguments.instruction,
+            rights_confirmed=arguments.rights_confirmed,
+        )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
     from .planner import build_plan
     from .sources import scan_sources
@@ -538,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_model(arguments)
         if arguments.command == "source":
             return _run_source(arguments)
+        if arguments.command == "history":
+            return _run_history(arguments)
         if arguments.command == "validate":
             return _run_validate(arguments)
         if arguments.command == "prepare":

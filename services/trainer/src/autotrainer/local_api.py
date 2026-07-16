@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .config import ConfigError
+from .history_service import get_history_workspace, review_history_candidate
 from .model_cache import ModelCacheError
 from .model_service import (
     download_model,
@@ -143,6 +144,11 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"sources": list_sources(self.server.config_path)},
                 )
+            elif path == f"{API_PREFIX}/history":
+                self._send_json(
+                    HTTPStatus.OK,
+                    get_history_workspace(self.server.config_path),
+                )
             elif path == f"{API_PREFIX}/training":
                 self._send_json(HTTPStatus.OK, self.server.training.snapshot())
             else:
@@ -174,6 +180,24 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     add_source(self.server.config_path, value),
+                )
+            elif path == f"{API_PREFIX}/history/review":
+                candidate_id = str(payload.get("candidate_id", "")).strip()
+                decision = str(payload.get("decision", "")).strip()
+                if not candidate_id or not decision:
+                    raise ConfigError("candidate_id and decision are required")
+                instruction_value = payload.get("instruction")
+                if instruction_value is not None and not isinstance(instruction_value, str):
+                    raise ConfigError("instruction must be text")
+                self._send_json(
+                    HTTPStatus.OK,
+                    review_history_candidate(
+                        self.server.config_path,
+                        candidate_id=candidate_id,
+                        decision=decision,
+                        instruction=instruction_value,
+                        rights_confirmed=payload.get("rights_confirmed") is True,
+                    ),
                 )
             elif path == f"{API_PREFIX}/prepare":
                 # Preparation calls shared Python operations directly; the API
