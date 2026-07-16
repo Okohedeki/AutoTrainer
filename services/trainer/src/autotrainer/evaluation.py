@@ -1148,10 +1148,9 @@ def _normalized_episode(value: Any) -> tuple[bool, str | None, float, dict[str, 
 
 
 def _default_patch_scorer(task_row: Mapping[str, Any], patch: str) -> Any:
-    from .environments.frontend import FrontendEnvironment
+    from .environments.frontend import evaluate_patch
 
-    environment = FrontendEnvironment()
-    return environment.evaluate_patch(task_row, patch)
+    return evaluate_patch(task_row, patch)
 
 
 def _zero_scored_result(

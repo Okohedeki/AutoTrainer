@@ -193,9 +193,9 @@ class FrontendEnvironment:
     def get_reward(self) -> float:
         """Delegate the TRL reward hook to the structured finalization path."""
 
-        return self.finalize().reward
+        return self._finalize().reward
 
-    def finalize(self) -> EpisodeResult:
+    def _finalize(self) -> EpisodeResult:
         """Evaluate the current patch, capture evidence, and clean the workspace."""
 
         if self._manifest is None:
@@ -332,7 +332,7 @@ class FrontendEnvironment:
         finally:
             self._cleanup()
 
-    def evaluate_patch(self, task_row: Mapping[str, Any], patch: str) -> EpisodeResult:
+    def _evaluate_patch(self, task_row: Mapping[str, Any], patch: str) -> EpisodeResult:
         """Replay a supplied diff into a fresh locked snapshot and evaluate it.
 
         Applying this externally supplied patch is evaluation setup, not a
@@ -362,7 +362,7 @@ class FrontendEnvironment:
                 self._cleanup()
                 return result
             self._latest_diff = self._capture_unified_diff()
-            return self.finalize()
+            return self._finalize()
         except Exception:
             self._cleanup()
             raise
@@ -1269,7 +1269,7 @@ class FrontendEnvironment:
 def evaluate_patch(task_row: Mapping[str, Any], patch: str) -> EpisodeResult:
     """Evaluate a supplied patch in a fresh isolated environment instance."""
 
-    return FrontendEnvironment().evaluate_patch(task_row, patch)
+    return FrontendEnvironment()._evaluate_patch(task_row, patch)
 
 
 __all__ = [

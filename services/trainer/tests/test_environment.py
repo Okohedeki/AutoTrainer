@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 import sys
@@ -24,6 +25,29 @@ from autotrainer.environments.frontend import (  # noqa: E402
     EpisodeTimeoutError,
     FrontendEnvironment,
 )
+
+
+class PolicyToolSurfaceTests(unittest.TestCase):
+    def test_only_declared_policy_tools_are_public_callables(self) -> None:
+        # TRL reserves reset/get_reward and exposes the remaining public
+        # callables as tools. Evaluation helpers must therefore stay private.
+        public = {
+            name
+            for name, value in inspect.getmembers(FrontendEnvironment, callable)
+            if not name.startswith("_")
+        }
+        self.assertEqual(
+            public,
+            {
+                "reset",
+                "get_reward",
+                "list_files",
+                "read_file",
+                "search_code",
+                "apply_patch",
+                "run_check",
+            },
+        )
 
 
 def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[str, Any]:
@@ -578,7 +602,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
             environment = self.prepare_environment(temporary_directory)
             environment._tool_calls = 3
 
-            result = environment.finalize()
+            result = environment._finalize()
 
             self.assertIsInstance(result, EpisodeResult)
             self.assertFalse(result.gated)
@@ -592,7 +616,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
             self.assertTrue(result.checks["verifier"].passed)
             self.assertIsNone(environment._workspace)
             self.assertIs(environment.last_result, result)
-            self.assertEqual(environment.finalize(), result)
+            self.assertEqual(environment._finalize(), result)
 
     def test_browser_tests_are_a_hard_gate_when_declared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -601,7 +625,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
                 failures={"npm run test:browser": 1},
             )
 
-            result = environment.finalize()
+            result = environment._finalize()
 
             self.assertTrue(result.gated)
             self.assertEqual(result.hard_gate_reason, "browser_tests_failed")
@@ -617,7 +641,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
                 browser_tests="",
             )
 
-            result = environment.finalize()
+            result = environment._finalize()
 
             self.assertFalse(result.gated)
             self.assertEqual(result.checks["browserTests"].status, "not_configured")
@@ -630,7 +654,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
                 timeouts={"npm run build"},
             )
 
-            result = environment.finalize()
+            result = environment._finalize()
 
             self.assertEqual(result.hard_gate_reason, "build_timeout")
             self.assertTrue(result.checks["build"].timed_out)
@@ -644,7 +668,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
                 failures={"hidden verify": 1},
             )
 
-            result = environment.finalize()
+            result = environment._finalize()
 
             self.assertEqual(result.hard_gate_reason, "verifier_failed")
             self.assertEqual(result.raw_verifier_rates, {})
@@ -684,7 +708,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
         )
 
         class DelegatingEnvironment(FrontendEnvironment):
-            def finalize(self) -> EpisodeResult:
+            def _finalize(self) -> EpisodeResult:
                 return expected
 
         self.assertEqual(DelegatingEnvironment().get_reward(), 0.75)
@@ -735,7 +759,7 @@ class EvaluatePatchTests(unittest.TestCase):
             environment = ReplayEnvironment()
             patch = "diff --git a/site.css b/site.css\n--- a/site.css\n+++ b/site.css\n"
 
-            result = environment.evaluate_patch({}, patch)
+            result = environment._evaluate_patch({}, patch)
 
             self.assertEqual(result.tool_call_count, 0)
             self.assertEqual(result.unified_diff, patch)
