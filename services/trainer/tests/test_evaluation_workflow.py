@@ -28,6 +28,7 @@ from autotrainer.evaluation import (  # noqa: E402
     import_blind_reviews,
     ingest_evaluation_results,
     load_current_plan,
+    run_command_suite,
     write_evaluation_plan,
 )
 from autotrainer.cli import main as cli_main  # noqa: E402
@@ -570,6 +571,59 @@ class EvaluationPlanTests(unittest.TestCase):
 
 
 class EvaluationWorkflowTests(unittest.TestCase):
+    def test_command_suite_reports_only_observed_trial_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
+                "type": "command",
+                "producer": "local-agent",
+                "version": "1.0.0",
+                "orchestration_sha256": ORCHESTRATION,
+                "argv": ["model-agent", "{request}", "{result}"],
+            }
+            plan = write_evaluation_plan(config, root)
+            events: list[dict] = []
+
+            def command(argv: list[str], **_: object) -> SimpleNamespace:
+                request = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+                trial = next(
+                    item for item in plan["trials"] if item["trial_id"] == request["trial_id"]
+                )
+                result_path = Path(argv[2])
+                producer_dir = result_path.parent / "producer"
+                produced = _result(plan, trial, producer_dir)
+                for artifact in producer_dir.iterdir():
+                    artifact.replace(result_path.parent / artifact.name)
+                producer_dir.rmdir()
+                self.assertEqual(produced.name, "result.json")
+                return SimpleNamespace(stdout="runner output", stderr="", returncode=0)
+
+            with patch("autotrainer.evaluation.subprocess.run", side_effect=command):
+                outcome = run_command_suite(
+                    config,
+                    root,
+                    "model_benchmark",
+                    scorer=_scorer,
+                    on_progress=events.append,
+                )
+
+            self.assertEqual(outcome["total"], 8)
+            self.assertEqual(outcome["completed"], 8)
+            self.assertEqual(events[0]["phase"], "queued")
+            self.assertEqual(events[-1]["phase"], "completed")
+            self.assertEqual(events[-1]["completed"], 8)
+            self.assertEqual(
+                [event["phase"] for event in events].count("generating"), 8
+            )
+            self.assertEqual(
+                [event["phase"] for event in events].count("verifying"), 8
+            )
+            # Opaque generation exposes no fabricated fractional percentage;
+            # progress advances only after a trusted scored artifact exists.
+            completed = [event["completed"] for event in events]
+            self.assertEqual(completed, sorted(completed))
+
     def test_evidence_copy_hashes_the_private_bounded_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

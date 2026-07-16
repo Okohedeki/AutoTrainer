@@ -1,8 +1,8 @@
 """Loopback-only JSON API used by the AutoTrainer human interface.
 
-The API is intentionally thin: every operation delegates to model_service,
-which is also used by the CLI. This keeps the browser from becoming a second
-source of model policy or hidden project state.
+The API is intentionally thin: every operation delegates to the same Python
+services used by the CLI. This keeps the browser from becoming a second source
+of model, training, or evaluation policy and avoids hidden GUI-only state.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .config import ConfigError
+from .evaluation_service import EvaluationJobManager
 from .history_service import (
     get_history_workspace,
     retire_stale_reviews,
@@ -51,6 +52,7 @@ class LocalApiServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.config_path = config_path
         self.training = TrainingJobManager(config_path)
+        self.evaluation = EvaluationJobManager(config_path)
 
     def server_close(self) -> None:
         """Close the socket, then let an active non-daemon training write finish."""
@@ -58,6 +60,9 @@ class LocalApiServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            # At most one long project job can own the shared lease.  Joining
+            # both managers keeps shutdown honest whichever lifecycle owns it.
+            self.evaluation.close()
             self.training.close()
 
 
@@ -169,6 +174,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 )
             elif path == f"{API_PREFIX}/training":
                 self._send_json(HTTPStatus.OK, self.server.training.snapshot())
+            elif path == f"{API_PREFIX}/evaluation":
+                self._send_json(HTTPStatus.OK, self.server.evaluation.workspace())
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
 
@@ -241,6 +248,23 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.ACCEPTED,
                     self.server.training.start(),
+                )
+            elif path == f"{API_PREFIX}/evaluation/plan":
+                if payload:
+                    raise ConfigError(
+                        "evaluation plan accepts no settings; AutoTrainer freezes the configured proof"
+                    )
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.evaluation.plan(),
+                )
+            elif path == f"{API_PREFIX}/evaluation/start":
+                if set(payload) != {"suite"}:
+                    raise ConfigError("evaluation start requires exactly one suite")
+                suite = str(payload.get("suite", "")).strip()
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self.server.evaluation.start(suite),
                 )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})

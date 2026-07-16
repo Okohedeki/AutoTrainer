@@ -41,6 +41,36 @@ class EvaluationError(ValueError):
     """Raised when an evaluation plan or result is incomplete or inconsistent."""
 
 
+EvaluationProgressCallback = Callable[[Mapping[str, Any]], None]
+
+
+def _notify_progress(
+    callback: EvaluationProgressCallback | None,
+    *,
+    phase: str,
+    trial: Mapping[str, Any] | None,
+    completed: int,
+    total: int,
+) -> None:
+    """Publish only progress the evaluator has directly observed.
+
+    A command runner is opaque while it generates a patch, so AutoTrainer does
+    not invent token percentages or time estimates.  Consumers receive the
+    current immutable trial plus completed/total boundaries instead.
+    """
+
+    if callback is None:
+        return
+    callback(
+        {
+            "phase": phase,
+            "trial": dict(trial) if trial is not None else None,
+            "completed": completed,
+            "total": total,
+        }
+    )
+
+
 def _canonical(value: Any) -> bytes:
     # Every identity in the evaluation tree is content-addressed. Compact,
     # sorted JSON keeps hashes stable when mappings arrive in a different order.
@@ -1756,6 +1786,7 @@ def run_command_suite(
     *,
     resume: bool = False,
     scorer: Callable[[Mapping[str, Any], str], Any] | None = None,
+    on_progress: EvaluationProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run an explicitly declared argv adapter without invoking a shell."""
 
@@ -1768,14 +1799,36 @@ def run_command_suite(
         raise EvaluationError(
             f"suite {suite_id!r} is external; use evaluate export and evaluate ingest"
         )
+    suite_trials = [
+        trial for trial in plan["trials"] if trial["suite_id"] == suite_id
+    ]
+    total = len(suite_trials)
+    preexisting = {
+        trial["trial_id"]
+        for trial in suite_trials
+        if (run_dir / "scored-trials" / f"{trial['trial_id']}.json").exists()
+    }
+    existing_count = len(preexisting) if resume else 0
     completed = 0
     skipped = 0
-    for trial in plan["trials"]:
-        if trial["suite_id"] != suite_id:
-            continue
+    _notify_progress(
+        on_progress,
+        phase="queued",
+        trial=None,
+        completed=existing_count,
+        total=total,
+    )
+    for trial in suite_trials:
         scored_path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
         if scored_path.exists() and resume:
             skipped += 1
+            _notify_progress(
+                on_progress,
+                phase="resuming",
+                trial=trial,
+                completed=existing_count + completed,
+                total=total,
+            )
             continue
         if scored_path.exists():
             raise EvaluationError(
@@ -1797,6 +1850,13 @@ def run_command_suite(
         except KeyError as error:
             raise EvaluationError(f"unknown command runner placeholder: {error}") from error
         timeout = int(plan["environment"].get("episode_timeout_seconds") or 900)
+        _notify_progress(
+            on_progress,
+            phase="generating",
+            trial=trial,
+            completed=existing_count + completed,
+            total=total,
+        )
         # argv execution is explicit and shell-free. This prevents values in a
         # task or artifact path from being interpreted as shell syntax.
         completed_process = subprocess.run(
@@ -1814,6 +1874,13 @@ def run_command_suite(
             raise EvaluationError(
                 f"command runner did not write {result_path} (exit {completed_process.returncode})"
             )
+        _notify_progress(
+            on_progress,
+            phase="verifying",
+            trial=trial,
+            completed=existing_count + completed,
+            total=total,
+        )
         ingest_evaluation_results(
             config,
             project_root,
@@ -1822,16 +1889,32 @@ def run_command_suite(
             scorer=scorer,
         )
         completed += 1
+        _notify_progress(
+            on_progress,
+            phase="trial_completed",
+            trial=trial,
+            completed=existing_count + completed,
+            total=total,
+        )
+    _notify_progress(
+        on_progress,
+        phase="completed",
+        trial=None,
+        completed=existing_count + completed,
+        total=total,
+    )
     return {
         "plan_id": plan["plan_id"],
         "suite_id": suite_id,
         "completed": completed,
         "skipped": skipped,
+        "total": total,
     }
 
 
 __all__ = [
     "EvaluationError",
+    "EvaluationProgressCallback",
     "RESULT_COMPONENTS",
     "build_evaluation_plan",
     "build_evaluation_reports",

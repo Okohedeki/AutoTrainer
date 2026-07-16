@@ -540,20 +540,18 @@ def _run_evaluate(arguments: argparse.Namespace) -> int:
         export_evaluation_suite,
         import_blind_reviews,
         ingest_evaluation_results,
-        run_command_suite,
-        write_evaluation_plan,
     )
+    from .evaluation_service import plan_project_evaluation, run_project_evaluation
 
     if arguments.evaluate_command == "plan":
         result = (
-            write_evaluation_plan(config.data, config.root)
+            plan_project_evaluation(config.path)
             if arguments.write
             else build_evaluation_plan(config.data, config.root)
         )
     elif arguments.evaluate_command == "run":
-        result = run_command_suite(
-            config.data,
-            config.root,
+        result = run_project_evaluation(
+            config.path,
             arguments.suite,
             resume=arguments.resume,
         )

@@ -212,6 +212,54 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(rejected["error"]["code"], "invalid_request")
 
+    def test_evaluation_endpoints_use_the_server_owned_job_manager(self) -> None:
+        workspace = {
+            "readiness": {"status": "ready", "blockers": []},
+            "plan": {"plan_id": "sha256:" + "a" * 64},
+            "job": {"status": "idle", "phase": "idle"},
+            "suites": [
+                {
+                    "id": "fable_ab",
+                    "runner_type": "external",
+                    "phase": "awaiting_external_results",
+                }
+            ],
+        }
+        with patch.object(self.server.evaluation, "workspace", return_value=workspace):
+            status, result = self.request("GET", "/api/v1/evaluation")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+
+        with patch.object(self.server.evaluation, "plan", return_value=workspace) as plan:
+            status, result = self.request("POST", "/api/v1/evaluation/plan", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        plan.assert_called_once_with()
+
+        queued = {
+            "id": "a" * 32,
+            "status": "queued",
+            "suite": "model_benchmark",
+            "phase": "queued",
+        }
+        with patch.object(self.server.evaluation, "start", return_value=queued) as start:
+            status, result = self.request(
+                "POST",
+                "/api/v1/evaluation/start",
+                {"suite": "model_benchmark"},
+            )
+        self.assertEqual(status, 202)
+        self.assertEqual(result, queued)
+        start.assert_called_once_with("model_benchmark")
+
+        status, rejected = self.request(
+            "POST",
+            "/api/v1/evaluation/start",
+            {"suite": "model_benchmark", "percent": 50},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
+
     def test_server_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(ConfigError, "loopback"):
             create_local_api_server(self.config_path, "0.0.0.0", 8765)
