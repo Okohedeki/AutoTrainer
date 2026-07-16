@@ -20,6 +20,7 @@ from .common import (
     inspect_sft_dataset,
     int_value,
     resolve_input_file,
+    validate_sft_token_lengths,
     validate_reference_dependencies,
     validate_single_gpu,
 )
@@ -179,6 +180,15 @@ def run_sft(
             tokenizer.chat_template = patched_template
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
+
+        # Validate every complete prompt/answer before allocating the 9B model.
+        # Static character limits are only a prefilter; tokenizer length is the
+        # boundary that prevents SFT from silently dropping part of an answer.
+        validate_sft_token_lengths(
+            tokenizer,
+            Path(stage["dataset"]["path"]),
+            stage["max_length"],
+        )
 
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,

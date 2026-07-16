@@ -427,6 +427,87 @@ def inspect_sft_dataset(path: Path) -> dict[str, Any]:
     }
 
 
+def _json_records(path: Path) -> list[tuple[int, Mapping[str, Any]]]:
+    """Read deterministic training records with useful source positions."""
+
+    records: list[tuple[int, Mapping[str, Any]]] = []
+    try:
+        if path.suffix.lower() == ".jsonl":
+            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, Mapping):
+                    raise TrainingConfigurationError(
+                        f"{path}:{line_number} must contain a JSON object"
+                    )
+                records.append((line_number, value))
+        else:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            values = value if isinstance(value, list) else [value]
+            for index, record in enumerate(values, 1):
+                if not isinstance(record, Mapping):
+                    raise TrainingConfigurationError(
+                        f"{path}: record {index} must be a JSON object"
+                    )
+                records.append((index, record))
+    except json.JSONDecodeError as error:
+        raise TrainingConfigurationError(
+            f"dataset contains invalid JSON at {path}:{error.lineno}:{error.colno}: {error.msg}"
+        ) from error
+    if not records:
+        raise TrainingConfigurationError(f"dataset is empty: {path}")
+    return records
+
+
+def validate_sft_token_lengths(
+    tokenizer: Any,
+    path: Path,
+    max_length: int,
+) -> dict[str, int]:
+    """Reject any full conversation that the real tokenizer would truncate."""
+
+    longest = 0
+    records = _json_records(path)
+    for position, record in records:
+        _reject_multimodal(record)
+        if "messages" in record:
+            messages = record["messages"]
+            _validate_messages(messages, "sft.dataset.messages", require_assistant=True)
+        elif "prompt" in record and "completion" in record:
+            prompt = record["prompt"]
+            completion = record["completion"]
+            _validate_messages(prompt, "sft.dataset.prompt", require_assistant=False)
+            _validate_messages(completion, "sft.dataset.completion", require_assistant=True)
+            messages = [*prompt, *completion]
+        else:
+            raise TrainingConfigurationError(
+                f"sft.dataset record {position} must contain messages or prompt and completion"
+            )
+
+        token_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+        )
+        if isinstance(token_ids, Mapping):
+            token_ids = token_ids.get("input_ids")
+        if not isinstance(token_ids, list):
+            raise TrainingConfigurationError(
+                "the selected tokenizer did not return inspectable input_ids"
+            )
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        length = len(token_ids)
+        longest = max(longest, length)
+        if length > max_length:
+            raise TrainingConfigurationError(
+                f"sft.dataset record {position} uses {length} tokens; "
+                f"sft.max_length is {max_length}. Shorten or split the example."
+            )
+    return {"record_count": len(records), "longest_token_count": longest}
+
+
 def inspect_grpo_dataset(path: Path) -> dict[str, Any]:
     record = _first_json_record(path)
     _reject_multimodal(record)

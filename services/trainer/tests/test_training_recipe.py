@@ -15,6 +15,7 @@ from autotrainer.training import (  # noqa: E402
     run_grpo,
     run_sft,
 )
+from autotrainer.training.common import validate_sft_token_lengths  # noqa: E402
 
 
 class TrainingRecipeTests(unittest.TestCase):
@@ -112,6 +113,30 @@ class TrainingRecipeTests(unittest.TestCase):
             result["recipe"]["model"]["cache_dir"],
             str((self.project_root / ".autotrainer" / "model-cache").resolve()),
         )
+
+    def test_sft_checks_every_full_conversation_with_the_real_tokenizer_boundary(self) -> None:
+        second = {
+            "prompt": [{"role": "user", "content": "short task"}],
+            "completion": [{"role": "assistant", "content": "x" * 80}],
+        }
+        self.sft_dataset.write_text(
+            self.sft_dataset.read_text(encoding="utf-8") + json.dumps(second) + "\n",
+            encoding="utf-8",
+        )
+
+        class LengthTokenizer:
+            def apply_chat_template(self, messages: list[dict], **_: object) -> list[int]:
+                length = sum(len(message["content"]) for message in messages)
+                return list(range(length))
+
+        with self.assertRaisesRegex(TrainingConfigurationError, "record 2 uses"):
+            validate_sft_token_lengths(LengthTokenizer(), self.sft_dataset, max_length=60)
+
+        report = validate_sft_token_lengths(
+            LengthTokenizer(), self.sft_dataset, max_length=200
+        )
+        self.assertEqual(report["record_count"], 2)
+        self.assertGreater(report["longest_token_count"], 60)
 
     def test_real_sft_rejects_mutable_model_before_dependency_imports(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "immutable downloaded"):
