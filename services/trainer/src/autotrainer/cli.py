@@ -12,7 +12,7 @@ import yaml
 
 from .config import ConfigError, default_config, load_config, validate_mapping, write_config
 from .doctor import run_doctor
-from .models import MODEL_CATALOG, resolve_model
+from .models import resolve_model
 
 
 def _emit(payload: Any, *, as_json: bool = False) -> None:
@@ -188,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(package)
 
+    serve = subparsers.add_parser("serve", help="run the loopback backend used by the human GUI")
+    serve.add_argument("--config", type=Path, default=Path("autotrainer.yaml"))
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+
     return parser
 
 
@@ -205,8 +210,10 @@ def _run_init(arguments: argparse.Namespace) -> int:
 
 
 def _run_models(arguments: argparse.Namespace) -> int:
+    from .model_service import list_models
+
     if arguments.models_command == "list":
-        payload = {alias: dict(details) for alias, details in MODEL_CATALOG.items()}
+        payload = list_models()
     else:
         payload = resolve_model(arguments.model)
     _emit(payload, as_json=arguments.json)
@@ -214,29 +221,24 @@ def _run_models(arguments: argparse.Namespace) -> int:
 
 
 def _run_model(arguments: argparse.Namespace) -> int:
-    config = load_config(arguments.config)
+    from .model_service import download_model, get_model, model_status, select_model
+
     if arguments.model_command == "show":
-        _emit(dict(config.model), as_json=arguments.json)
+        _emit(get_model(arguments.config), as_json=arguments.json)
         return 0
     if arguments.model_command == "status":
-        from .model_cache import inspect_model_cache
-
-        _emit(inspect_model_cache(config.path), as_json=arguments.json)
+        _emit(model_status(arguments.config), as_json=arguments.json)
         return 0
     if arguments.model_command == "download":
-        from .model_cache import materialize_model
-
-        _emit(materialize_model(config.path), as_json=arguments.json)
+        _emit(download_model(arguments.config), as_json=arguments.json)
         return 0
-    resolved = resolve_model(arguments.model)
-    model = config.data["model"]
-    model["id"] = resolved["id"]
-    model["revision"] = arguments.revision
-    model["loader"] = resolved["loader"]
-    if arguments.cache_dir is not None:
-        model["cache_dir"] = arguments.cache_dir
-    _save_loaded(config)
-    _emit({"model": model["id"], "revision": model["revision"], "loader": model["loader"]}, as_json=arguments.json)
+    result = select_model(
+        arguments.config,
+        arguments.model,
+        revision=arguments.revision,
+        cache_dir=arguments.cache_dir,
+    )
+    _emit(result, as_json=arguments.json)
     return 0
 
 
@@ -512,6 +514,11 @@ def main(argv: list[str] | None = None) -> int:
             return _run_evaluate(arguments)
         if arguments.command == "package":
             return _run_package(arguments)
+        if arguments.command == "serve":
+            from .local_api import serve_local_api
+
+            serve_local_api(arguments.config, host=arguments.host, port=arguments.port)
+            return 0
     except (ConfigError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
