@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   commands,
   environment,
@@ -53,6 +53,69 @@ const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: 
   },
 };
 
+const WALKTHROUGH_STORAGE_KEY = "autotrainer.walkthrough.v1";
+
+type WalkthroughStep = {
+  view: ViewId;
+  target?: string;
+  label: string;
+  title: string;
+  body: string;
+};
+
+// The tour follows the real product dependency order. Every step points to an
+// existing control or truthful snapshot; nothing in onboarding simulates work.
+const walkthroughSteps: WalkthroughStep[] = [
+  {
+    view: "overview",
+    label: "The promise",
+    title: "Train one small model. Prove it got better.",
+    body: "AutoTrainer turns a model, your code, and executable tasks into one reproducible path from QLoRA to GRPO to evidence.",
+  },
+  {
+    view: "overview",
+    target: '[data-tour="model-contract"]',
+    label: "01 · Lock the experiment",
+    title: "Know exactly what you are training",
+    body: "The model revision, loader, quantization, LoRA recipe, and context are the experiment contract—not loose form fields.",
+  },
+  {
+    view: "data",
+    target: '[data-tour="sources"]',
+    label: "02 · Point it at real work",
+    title: "Repos and data become locked inputs",
+    body: "Training and evaluation sources keep their identity, partition, and provenance so results remain reproducible.",
+  },
+  {
+    view: "environments",
+    target: '[data-tour="environment"]',
+    label: "03 · Make quality executable",
+    title: "RL happens inside a real environment",
+    body: "Tools, limits, tests, regression gates, and reward weights define what better behavior actually means.",
+  },
+  {
+    view: "overview",
+    target: '[data-tour="pipeline"]',
+    label: "04 · Follow one path",
+    title: "Clear the next blocker, not every screen",
+    body: "Validation, source locking, QLoRA, GRPO, and proof stay in dependency order. The first blocked stage is the next job.",
+  },
+  {
+    view: "evaluations",
+    target: '[data-tour="evaluations"]',
+    label: "05 · Earn the release",
+    title: "The adapter wins only when the evidence does",
+    body: "Held-out model tasks and the Fable A/B answer the only question that matters: did the trained model become better?",
+  },
+  {
+    view: "overview",
+    target: '[data-tour="prepare"]',
+    label: "Your first move",
+    title: "Prepare the run",
+    body: "Open the checklist, validate inputs, run Doctor, and resolve local blockers. AutoTrainer will not fake a launch while the backend is disconnected.",
+  },
+];
+
 // Status is always passed explicitly so color never becomes the only signal
 // and a static snapshot cannot silently imply progress it did not observe.
 function StatusChip({ tone, children }: { tone: StatusTone; children: ReactNode }) {
@@ -71,7 +134,7 @@ function PageHeading({ view, onPrepare }: { view: ViewId; onPrepare: () => void 
         </div>
         <p className="page-description">{content.description}</p>
       </div>
-      <div className="heading-actions">
+      <div className="heading-actions" data-tour="prepare">
         <button className="secondary-button" type="button" onClick={onPrepare}>
           CLI actions
         </button>
@@ -88,7 +151,7 @@ function PageHeading({ view, onPrepare }: { view: ViewId; onPrepare: () => void 
 function PipelinePanel() {
   const completeCount = pipelineStages.filter((stage) => stage.status === "complete").length;
   return (
-    <section className="panel pipeline-panel" aria-labelledby="pipeline-heading">
+    <section className="panel pipeline-panel" aria-labelledby="pipeline-heading" data-tour="pipeline">
       <div className="panel-header">
         <div>
           <p className="panel-kicker">Execution path</p>
@@ -212,7 +275,7 @@ function ActivityPanel() {
 // revision, loader, and adapter recipe define what a future run actually means.
 function ModelContractPanel() {
   return (
-    <section className="panel model-contract" aria-labelledby="model-contract-heading">
+    <section className="panel model-contract" aria-labelledby="model-contract-heading" data-tour="model-contract">
       <div className="panel-header">
         <div><p className="panel-kicker">Declared configuration</p><h2 id="model-contract-heading">Model contract</h2></div>
         <StatusChip tone="warning">{projectSnapshot.model.cache}</StatusChip>
@@ -314,7 +377,7 @@ function DataView() {
         <article><span>SFT records</span><strong>1</strong><small>Messages format</small></article>
         <article><span>Executable tasks</span><strong>2</strong><small>Train + evaluation</small></article>
       </section>
-      <section className="panel table-panel" aria-labelledby="sources-heading">
+      <section className="panel table-panel" aria-labelledby="sources-heading" data-tour="sources">
         <div className="panel-header"><div><p className="panel-kicker">Source inventory</p><h2 id="sources-heading">Declared inputs</h2></div><StatusChip tone="warning">Compiled with warnings</StatusChip></div>
         <div className="table-scroll">
           <table>
@@ -331,7 +394,7 @@ function DataView() {
 function EnvironmentsView() {
   return (
     <div className="environment-layout">
-      <section className="panel environment-card">
+      <section className="panel environment-card" data-tour="environment">
         <div className="panel-header"><div><p className="panel-kicker">Task environment</p><h2>{environment.id}</h2></div><StatusChip tone="warning">Docker missing</StatusChip></div>
         <dl className="definition-list environment-definition">
           <div><dt>Factory</dt><dd>{environment.factory}</dd></div>
@@ -357,7 +420,7 @@ function EnvironmentsView() {
 function EvaluationsView() {
   return (
     <>
-      <div className="evaluation-grid">
+      <div className="evaluation-grid" data-tour="evaluations">
         {evaluationSuites.map((suite, index) => (
           <section className="panel evaluation-card" key={suite.label}>
             <div className="panel-header"><div><p className="panel-kicker">Suite {String(index + 1).padStart(2, "0")}</p><h2>{suite.label}</h2></div><StatusChip tone="danger">{suite.status}</StatusChip></div>
@@ -502,14 +565,166 @@ function CommandDrawer({
   );
 }
 
+function Walkthrough({
+  stepIndex,
+  onStepChange,
+  onDismiss,
+  onFinish,
+}: {
+  stepIndex: number;
+  onStepChange: (step: number) => void;
+  onDismiss: () => void;
+  onFinish: () => void;
+}) {
+  const step = walkthroughSteps[stepIndex];
+  const dialogRef = useRef<HTMLElement>(null);
+  const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
+
+  // Views change between steps, so measure after React paints the requested
+  // screen. Resize and scroll listeners keep the cutout attached to its target.
+  useEffect(() => {
+    let frame = 0;
+    let secondFrame = 0;
+    const updateTarget = () => {
+      if (!step.target) {
+        setTargetRect(null);
+        return;
+      }
+      const target = document.querySelector<HTMLElement>(step.target);
+      if (!target) {
+        setTargetRect(null);
+        return;
+      }
+      target.scrollIntoView({ block: "center", behavior: "auto" });
+      setTargetRect(target.getBoundingClientRect());
+    };
+    frame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(updateTarget);
+    });
+    window.addEventListener("resize", updateTarget);
+    window.addEventListener("scroll", updateTarget, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(secondFrame);
+      window.removeEventListener("resize", updateTarget);
+      window.removeEventListener("scroll", updateTarget, true);
+    };
+  }, [step]);
+
+  useEffect(() => {
+    dialogRef.current?.querySelector<HTMLElement>("button")?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onDismiss();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [stepIndex, onDismiss]);
+
+  const focusStyle: CSSProperties | undefined = targetRect
+    ? {
+        top: Math.max(8, targetRect.top - 7),
+        left: Math.max(8, targetRect.left - 7),
+        width: Math.max(24, targetRect.width + 14),
+        height: Math.max(24, targetRect.height + 14),
+      }
+    : undefined;
+  const cardStyle: CSSProperties | undefined = targetRect
+    ? {
+        left: Math.min(
+          Math.max(16, targetRect.left + targetRect.width / 2 - 190),
+          Math.max(16, window.innerWidth - 396),
+        ),
+        top: targetRect.bottom + 284 < window.innerHeight
+          ? targetRect.bottom + 14
+          : Math.max(16, targetRect.top - 270),
+      }
+    : undefined;
+  const finalStep = stepIndex === walkthroughSteps.length - 1;
+
+  return (
+    <div className={`walkthrough-layer ${targetRect ? "anchored" : "centered"}`}>
+      <div className="walkthrough-shade" aria-hidden="true" />
+      {targetRect && <div className="walkthrough-focus" style={focusStyle} aria-hidden="true" />}
+      <aside
+        ref={dialogRef}
+        className="walkthrough-card"
+        style={cardStyle}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="walkthrough-title"
+        aria-describedby="walkthrough-body"
+      >
+        <div className="walkthrough-progress">
+          <span>{step.label}</span>
+          <b>{stepIndex + 1} / {walkthroughSteps.length}</b>
+        </div>
+        <h2 id="walkthrough-title">{step.title}</h2>
+        <p id="walkthrough-body">{step.body}</p>
+        <div className="walkthrough-actions">
+          <button className="walkthrough-skip" type="button" onClick={onDismiss}>Skip</button>
+          <div>
+            {stepIndex > 0 && <button className="secondary-button" type="button" onClick={() => onStepChange(stepIndex - 1)}>Back</button>}
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => finalStep ? onFinish() : onStepChange(stepIndex + 1)}
+            >
+              {finalStep ? "Prepare my run" : "Next"}
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 export default function App() {
   // Navigation and the CLI drawer are local presentation state. Project,
   // runtime, and run state remain read-only until the backend contract exists.
   const [activeView, setActiveView] = useState<ViewId>("overview");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [walkthroughStep, setWalkthroughStep] = useState<number | null>(() => {
+    // A failed storage read should never prevent a first-time user from getting
+    // the tour (private browsing and locked-down browsers can reject access).
+    try {
+      return window.localStorage.getItem(WALKTHROUGH_STORAGE_KEY) ? null : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const walkthroughOpen = walkthroughStep !== null;
   const openDrawer = useCallback(() => setDrawerOpen(true), []);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
+  const rememberWalkthrough = useCallback(() => {
+    try {
+      window.localStorage.setItem(WALKTHROUGH_STORAGE_KEY, "complete");
+    } catch {
+      // The walkthrough still closes when storage is unavailable; it may simply
+      // appear again on the next visit.
+    }
+  }, []);
+  const dismissWalkthrough = useCallback(() => {
+    rememberWalkthrough();
+    setWalkthroughStep(null);
+  }, [rememberWalkthrough]);
+  const finishWalkthrough = useCallback(() => {
+    rememberWalkthrough();
+    setWalkthroughStep(null);
+    setDrawerOpen(true);
+  }, [rememberWalkthrough]);
+  const restartWalkthrough = useCallback(() => {
+    setDrawerOpen(false);
+    setWalkthroughStep(0);
+  }, []);
+
+  // The walkthrough navigates the actual console instead of rendering a second,
+  // simplified product that could drift away from the real workflow.
+  useEffect(() => {
+    if (walkthroughStep === null) return;
+    setActiveView(walkthroughSteps[walkthroughStep].view);
+  }, [walkthroughStep]);
 
   // Until the shared local backend exists, browser actions hand operators the
   // exact reproducible command instead of fabricating a queued/running state.
@@ -537,7 +752,7 @@ export default function App() {
 
   return (
     <>
-    <div className="console-shell" inert={drawerOpen ? true : undefined}>
+    <div className="console-shell" inert={drawerOpen || walkthroughOpen ? true : undefined}>
       <aside className="sidebar">
         <div className="brand-row"><span className="brand-mark" aria-hidden="true">A</span><div><strong>AutoTrainer</strong><small>Local control plane</small></div></div>
         <div className="project-switcher"><span className="project-avatar" aria-hidden="true">PF</span><div><strong>{projectSnapshot.name}</strong><small>{projectSnapshot.slug}</small></div><span className="project-state">Snapshot</span></div>
@@ -559,7 +774,7 @@ export default function App() {
       <main className="console-main">
         <header className="topbar">
           <div className="breadcrumbs"><span>Projects</span><b>/</b><strong>{projectSnapshot.slug}</strong><StatusChip tone="info">{projectSnapshot.mode}</StatusChip></div>
-          <div className="topbar-actions"><span className="config-source">{projectSnapshot.configPath}</span><button className="icon-button" type="button" aria-label="Open command checklist" onClick={openDrawer}>⌘</button></div>
+          <div className="topbar-actions"><span className="config-source">{projectSnapshot.configPath}</span><button className="walkthrough-restart" type="button" onClick={restartWalkthrough}>Walkthrough</button><button className="icon-button" type="button" aria-label="Open command checklist" onClick={openDrawer}>⌘</button></div>
         </header>
         <div className="page-content">
           <PageHeading view={activeView} onPrepare={openDrawer} />
@@ -570,6 +785,14 @@ export default function App() {
 
     </div>
     <CommandDrawer open={drawerOpen} copiedId={copiedId} onClose={closeDrawer} onCopy={copyCommand} />
+    {walkthroughStep !== null && (
+      <Walkthrough
+        stepIndex={walkthroughStep}
+        onStepChange={setWalkthroughStep}
+        onDismiss={dismissWalkthrough}
+        onFinish={finishWalkthrough}
+      />
+    )}
     </>
   );
 }

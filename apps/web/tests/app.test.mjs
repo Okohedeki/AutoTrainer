@@ -44,7 +44,21 @@ test("the example snapshot cannot imply a downloaded or active model", async () 
 test("navigation and the command drawer keep their accessible contracts", async () => {
   const source = await readFile(new URL("src/App.tsx", root), "utf8");
   assert.match(source, /aria-label=\{item\.label\}/);
-  assert.match(source, /inert=\{drawerOpen \? true : undefined\}/);
+  assert.match(source, /inert=\{drawerOpen \|\| walkthroughOpen \? true : undefined\}/);
   assert.match(source, /event\.key === "Escape"/);
   assert.match(source, /previouslyFocused\?\.focus\(\)/);
+});
+
+test("the first-run walkthrough follows the truthful training journey", async () => {
+  const source = await readFile(new URL("src/App.tsx", root), "utf8");
+  assert.match(source, /autotrainer\.walkthrough\.v1/);
+  assert.match(source, /Train one small model\. Prove it got better\./);
+  assert.match(source, /data-tour="model-contract"/);
+  assert.match(source, /data-tour="sources"/);
+  assert.match(source, /data-tour="environment"/);
+  assert.match(source, /data-tour="pipeline"/);
+  assert.match(source, /data-tour="evaluations"/);
+  assert.match(source, /Prepare my run/);
+  assert.match(source, /role="dialog"/);
+  assert.match(source, /window\.localStorage\.setItem/);
 });
