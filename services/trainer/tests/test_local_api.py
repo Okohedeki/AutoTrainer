@@ -106,6 +106,21 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_prepare_endpoint_returns_the_shared_project_result_directly(self) -> None:
+        prepared = {
+            "status": "blocked",
+            "recipe": "needs_training_data",
+            "summary": "Add training data.",
+            "next_action": {"title": "Add training data", "detail": "Add examples or tasks."},
+            "steps": [],
+            "details": {},
+        }
+        with patch("autotrainer.local_api.prepare_project", return_value=prepared):
+            status, result = self.request("POST", "/api/v1/prepare", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result, prepared)
+
     def test_server_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(ConfigError, "loopback"):
             create_local_api_server(self.config_path, "0.0.0.0", 8765)

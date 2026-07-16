@@ -117,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
     _config_argument(validate)
 
+    prepare = subparsers.add_parser(
+        "prepare", help="validate, compile training inputs, plan, and check the local runtime"
+    )
+    _config_argument(prepare)
+
     compile_command = subparsers.add_parser(
         "compile", help="materialize deterministic source inventories and data readiness"
     )
@@ -354,6 +359,14 @@ def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
     return plan
 
 
+def _run_prepare(arguments: argparse.Namespace) -> int:
+    from .project_service import prepare_project
+
+    result = prepare_project(arguments.config)
+    _emit(result, as_json=arguments.json)
+    return 0 if result["status"] == "ready" else 3
+
+
 def _run_compile(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     from .compiler import compile_data, invalidate_compile_provenance
@@ -517,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source(arguments)
         if arguments.command == "validate":
             return _run_validate(arguments)
+        if arguments.command == "prepare":
+            return _run_prepare(arguments)
         if arguments.command == "compile":
             return _run_compile(arguments)
         if arguments.command == "lock":

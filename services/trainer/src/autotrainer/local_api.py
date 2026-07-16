@@ -24,6 +24,7 @@ from .model_service import (
     model_status,
     select_model,
 )
+from .project_service import prepare_project
 from .source_service import add_source, list_sources, remove_source
 
 
@@ -169,6 +170,13 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     add_source(self.server.config_path, value),
+                )
+            elif path == f"{API_PREFIX}/prepare":
+                # Preparation calls shared Python operations directly; the API
+                # never turns a browser payload into a shell command.
+                self._send_json(
+                    HTTPStatus.OK,
+                    prepare_project(self.server.config_path),
                 )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
