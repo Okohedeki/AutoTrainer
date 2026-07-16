@@ -238,7 +238,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .source-cards,
 .source-empty,
 .source-truth,
-.prepare-result { margin-left: 48px; }
+.prepare-result,
+.training-control { margin-left: 48px; }
 
 .model-form { margin-top: 22px; }
 
@@ -552,6 +553,61 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .next-action strong { font-size: 12px; }
 .next-action p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 
+.training-control {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.training-start,
+.training-state {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 15px;
+  align-items: center;
+}
+
+.training-start strong,
+.training-state strong { font-size: 12px; }
+
+.training-start p,
+.training-state p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.training-state {
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  padding: 12px;
+  border-left: 3px solid var(--accent);
+  background: #f4f3fb;
+}
+
+.training-state > span {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.training-marker {
+  width: 8px;
+  height: 8px;
+  justify-self: center;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.training-state.complete { border-color: var(--good); background: var(--good-soft); }
+.training-state.complete > span,
+.training-state.complete strong { color: var(--good); }
+.training-state.failed { border-color: var(--danger); background: var(--danger-soft); }
+.training-state.failed > span,
+.training-state.failed strong { color: var(--danger); }
+.training-error { margin: 12px 0 0; }
+
 .proof-note {
   margin: 52px 0 70px;
   padding: 0 4px;
@@ -642,6 +698,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .source-empty,
   .source-truth,
   .prepare-result,
+  .training-control,
   .inline-message,
   .source-error,
   .prepare-error,
@@ -653,6 +710,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .history-files > div { grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
   .history-lines { grid-column: 1 / -1; }
   .history-actions { justify-content: space-between; }
+  .training-start,
+  .training-state { grid-template-columns: 1fr; align-items: start; }
+  .training-state > span,
+  .training-marker { justify-self: start; }
+  .training-start .primary-button,
+  .training-state .secondary-button { width: 100%; }
   .site-footer { align-items: flex-start; flex-direction: column; gap: 5px; }
   .walkthrough-card { padding: 20px; }
 }

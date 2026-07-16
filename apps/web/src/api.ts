@@ -92,6 +92,14 @@ export type HistoryWorkspace = {
   candidates: HistoryCandidate[];
 };
 
+export type TrainingJob = {
+  id: string | null;
+  status: "idle" | "queued" | "running" | "completed" | "failed";
+  recipe: "teach" | "practice" | "both" | null;
+  stage: "prepare" | "sft" | "grpo" | null;
+  message: string;
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -173,4 +181,12 @@ export async function reviewHistoryCandidate(input: {
   rights_confirmed?: boolean;
 }): Promise<HistoryWorkspace> {
   return request("/api/v1/history/review", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function getTrainingJob(signal?: AbortSignal): Promise<TrainingJob> {
+  return request("/api/v1/training", { signal });
+}
+
+export async function startTraining(): Promise<TrainingJob> {
+  return request("/api/v1/training/start", { method: "POST", body: "{}" });
 }

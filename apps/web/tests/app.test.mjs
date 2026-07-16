@@ -95,6 +95,26 @@ test("one preparation action returns an honest next step", async () => {
   assert.match(api, /\/api\/v1\/prepare/);
 });
 
+test("training starts only after readiness and follows the real job record", async () => {
+  const panel = await source("src/PreparePanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(api, /export type TrainingJob/);
+  assert.match(api, /status: "idle" \| "queued" \| "running" \| "completed" \| "failed"/);
+  assert.match(api, /request\("\/api\/v1\/training", \{ signal \}\)/);
+  assert.match(api, /request\("\/api\/v1\/training\/start", \{ method: "POST", body: "\{\}" \}\)/);
+  assert.match(panel, /result\.status === "ready"/);
+  assert.match(panel, /await startTraining\(\)/);
+  assert.match(panel, /window\.setInterval/);
+  assert.match(panel, /2_000/);
+  assert.match(panel, /\)\}\s*\{showTrainingControl && \(/);
+  assert.match(panel, /Teaching from examples/);
+  assert.match(panel, /Practicing against tests/);
+  assert.match(panel, /trainingJob\.message/);
+  assert.match(panel, /Training output ready/);
+  assert.match(panel, /Retry training/);
+  assert.doesNotMatch(panel, /type="range"|percentage|progress bar|view logs|learning rate|rank|alpha/i);
+});
+
 test("the first run has exactly three accessible walkthrough steps", async () => {
   const app = await source("src/App.tsx");
   assert.equal(app.match(/title: "/g)?.length, 3);
@@ -120,7 +140,7 @@ test("normal UI stays plain, truthful, and free of research jargon", async () =>
     source("index.html"),
   ]).then((files) => files.join("\n"));
 
-  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab|dashboard/i);
+  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab|dashboard/);
   assert.doesNotMatch(visibleUi, /status:\s*["']running["']|training started|job queued/i);
   assert.match(visibleUi, /Training never starts by accident/);
 });

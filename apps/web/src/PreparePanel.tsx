@@ -1,5 +1,12 @@
-import { useState } from "react";
-import { ApiClientError, prepareProject, type PreparationResult } from "./api";
+import { useEffect, useState } from "react";
+import {
+  ApiClientError,
+  getTrainingJob,
+  prepareProject,
+  startTraining,
+  type PreparationResult,
+  type TrainingJob,
+} from "./api";
 
 const recipeLabels: Record<PreparationResult["recipe"], { title: string; detail: string }> = {
   teach: {
@@ -20,6 +27,12 @@ const recipeLabels: Record<PreparationResult["recipe"], { title: string; detail:
   },
 };
 
+const trainingStageLabels: Record<NonNullable<TrainingJob["stage"]>, string> = {
+  prepare: "Preparing files",
+  sft: "Teaching from examples",
+  grpo: "Practicing against tests",
+};
+
 // Preparation folds the old validate, scan, compile, plan, and Doctor sequence
 // into one human action. Detailed evidence remains in the API response for the
 // agent CLI, while this panel shows only the next decision.
@@ -27,6 +40,44 @@ export default function PreparePanel() {
   const [result, setResult] = useState<PreparationResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
+  const [trainingBusy, setTrainingBusy] = useState(false);
+  const [trainingError, setTrainingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getTrainingJob(controller.signal)
+      .then(setTrainingJob)
+      .catch(() => {
+        // Preparation remains usable if there is no prior training job to show.
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (trainingJob?.status !== "queued" && trainingJob?.status !== "running") return;
+
+    let stopped = false;
+    // Jobs run outside the page. Polling the shared record keeps this small
+    // control truthful without inventing progress or keeping a browser request open.
+    const interval = window.setInterval(() => {
+      getTrainingJob()
+        .then((next) => {
+          if (stopped) return;
+          setTrainingJob(next);
+          setTrainingError(null);
+        })
+        .catch((reason: unknown) => {
+          if (stopped) return;
+          setTrainingError(reason instanceof Error ? reason.message : "Training status could not be refreshed.");
+        });
+    }, 2_000);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [trainingJob?.status]);
 
   const prepare = async () => {
     setBusy(true);
@@ -40,7 +91,21 @@ export default function PreparePanel() {
     }
   };
 
+  const start = async () => {
+    setTrainingBusy(true);
+    setTrainingError(null);
+    try {
+      setTrainingJob(await startTraining());
+    } catch (reason) {
+      setTrainingError(reason instanceof ApiClientError ? reason.message : "Training could not start.");
+    } finally {
+      setTrainingBusy(false);
+    }
+  };
+
   const recipe = result ? recipeLabels[result.recipe] : null;
+  const trainingActive = trainingJob?.status === "queued" || trainingJob?.status === "running";
+  const showTrainingControl = result?.status === "ready" || Boolean(trainingJob && trainingJob.status !== "idle");
 
   return (
     <section className="panel setup-step prepare-panel" aria-labelledby="prepare-heading" data-tour="prepare">
@@ -80,6 +145,51 @@ export default function PreparePanel() {
               <p>{result.next_action.detail}</p>
             </div>
           )}
+
+        </div>
+      )}
+
+      {showTrainingControl && (
+        <div className="training-control" aria-live="polite">
+          {(!trainingJob || trainingJob.status === "idle") && result?.status === "ready" && (
+            <div className="training-start">
+              <div><strong>Ready to train</strong><p>Training uses the path shown above and runs as one local job.</p></div>
+              <button className="primary-button" type="button" onClick={() => void start()} disabled={trainingBusy}>
+                {trainingBusy ? "Starting..." : "Start training"}
+              </button>
+            </div>
+          )}
+
+          {trainingActive && trainingJob && (
+            <div className="training-state active" role="status">
+              <span className="training-marker" aria-hidden="true" />
+              <div>
+                <strong>{trainingJob.stage ? trainingStageLabels[trainingJob.stage] : "Waiting to start"}</strong>
+                <p>{trainingJob.message}</p>
+              </div>
+            </div>
+          )}
+
+          {trainingJob?.status === "completed" && (
+            <div className="training-state complete" role="status">
+              <span aria-hidden="true">OK</span>
+              <div><strong>Training output ready</strong><p>{trainingJob.message || "Your trained model output is ready."}</p></div>
+            </div>
+          )}
+
+          {trainingJob?.status === "failed" && (
+            <div className="training-state failed" role="alert">
+              <span aria-hidden="true">!</span>
+              <div><strong>Training stopped</strong><p>{trainingJob.message}</p></div>
+              {result?.status === "ready" && (
+                <button className="secondary-button" type="button" onClick={() => void start()} disabled={trainingBusy}>
+                  {trainingBusy ? "Retrying..." : "Retry training"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {trainingError && <div className="source-error training-error" role="alert">{trainingError}</div>}
         </div>
       )}
     </section>
