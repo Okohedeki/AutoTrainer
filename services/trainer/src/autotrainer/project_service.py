@@ -46,6 +46,12 @@ def _read_project(config_path: str | Path) -> ProjectConfig:
     return ProjectConfig(path=path, data=dict(payload))
 
 
+def read_project_config(config_path: str | Path) -> ProjectConfig:
+    """Read project YAML without making later proof setup a training blocker."""
+
+    return _read_project(config_path)
+
+
 def _evaluation_source_indexes(data: Mapping[str, Any]) -> set[int]:
     sources = data.get("sources", [])
     if not isinstance(sources, list):
@@ -259,4 +265,4 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
     }
 
 
-__all__ = ["prepare_project"]
+__all__ = ["prepare_project", "read_project_config"]

@@ -121,6 +121,31 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result, prepared)
 
+    def test_training_endpoints_use_the_server_owned_single_job_manager(self) -> None:
+        status, idle = self.request("GET", "/api/v1/training")
+        self.assertEqual(status, 200)
+        self.assertEqual(idle["status"], "idle")
+
+        queued = {
+            "id": "job-1",
+            "status": "queued",
+            "recipe": None,
+            "stage": "prepare",
+            "message": "Training is queued.",
+        }
+        with patch.object(self.server.training, "start", return_value=queued) as start:
+            status, result = self.request("POST", "/api/v1/training/start", {})
+
+        self.assertEqual(status, 202)
+        self.assertEqual(result, queued)
+        start.assert_called_once_with(self.config_path.resolve())
+
+        status, rejected = self.request(
+            "POST", "/api/v1/training/start", {"learning_rate": 1}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
+
     def test_server_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(ConfigError, "loopback"):
             create_local_api_server(self.config_path, "0.0.0.0", 8765)

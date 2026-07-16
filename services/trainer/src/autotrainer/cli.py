@@ -36,7 +36,7 @@ def _config_argument(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autotrainer",
-        description="Configure, inspect, and run a single-GPU QLoRA -> GRPO experiment.",
+        description="Prepare and train a local coding model on one GPU.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -144,10 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = subparsers.add_parser("train", help="run a declared training stage")
     train_sub = train.add_subparsers(dest="train_command", required=True)
+    train_auto = train_sub.add_parser(
+        "auto", help="run the teach, practice, or combined path selected by prepared data"
+    )
+    _config_argument(train_auto)
     train_sft = train_sub.add_parser("sft", help="train the 4-bit LoRA adapter on demonstrations")
     train_sft.add_argument("--dry-run", action="store_true")
     _config_argument(train_sft)
-    train_rl = train_sub.add_parser("rl", help="continue the SFT adapter with GRPO environments")
+    train_rl = train_sub.add_parser("rl", help="practice with verified GRPO environments")
     train_rl.add_argument("--dry-run", action="store_true")
     _config_argument(train_rl)
 
@@ -414,6 +418,12 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
 
 
 def _run_train(arguments: argparse.Namespace) -> int:
+    if arguments.train_command == "auto":
+        from .training_service import run_project_training
+
+        _emit(run_project_training(arguments.config), as_json=arguments.json)
+        return 0
+
     config = load_config(arguments.config, check_paths=True)
     if arguments.train_command == "sft":
         from .training import run_sft

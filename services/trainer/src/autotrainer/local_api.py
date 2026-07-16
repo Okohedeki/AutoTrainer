@@ -26,6 +26,7 @@ from .model_service import (
 )
 from .project_service import prepare_project
 from .source_service import add_source, list_sources, remove_source
+from .training_service import TrainingJobManager
 
 
 API_PREFIX = "/api/v1"
@@ -43,6 +44,7 @@ class LocalApiServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], config_path: Path):
         super().__init__(address, handler)
         self.config_path = config_path
+        self.training = TrainingJobManager()
 
 
 class LocalApiHandler(BaseHTTPRequestHandler):
@@ -141,6 +143,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"sources": list_sources(self.server.config_path)},
                 )
+            elif path == f"{API_PREFIX}/training":
+                self._send_json(HTTPStatus.OK, self.server.training.snapshot())
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
 
@@ -177,6 +181,17 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     prepare_project(self.server.config_path),
+                )
+            elif path == f"{API_PREFIX}/training/start":
+                # The manager serializes local jobs and invokes Python stage
+                # runners directly; request data never becomes a command line.
+                if payload:
+                    raise ConfigError(
+                        "training start accepts no settings; AutoTrainer uses the prepared project"
+                    )
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self.server.training.start(self.server.config_path),
                 )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found", "message": "endpoint not found"}})
