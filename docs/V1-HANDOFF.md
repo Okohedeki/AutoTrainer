@@ -1,97 +1,130 @@
-# AutoTrainer V1 handoff plan
+# AutoTrainer V1 handoff
 
-This document is the continuation plan after the first usable training and evaluation implementation. It separates what the repository can do now from what still needs real data, a Linux/CUDA machine, and pinned external runners. Do not describe an adapter as a verified V1 winner until both decisions in the evaluation summary are true.
+This is the remaining path from the implemented local workflow to an honestly
+verified V1 result. Do not call an adapter a V1 winner until both held-out
+comparisons report `verified_better: true`.
 
-## Current implementation
+## What works now
 
-The repository now provides:
+- A three-step GUI for people: choose and download the model, add work and
+  optionally review accepted Git changes, then prepare and start training.
+- Agent commands that call the same Python services and update the same
+  `autotrainer.yaml` project record.
+- Automatic source inference for GitHub repositories and supported local
+  repository, JSONL, and task-pack paths.
+- Immutable model and source pins, offline-only training loads, deterministic
+  compilation, and train/evaluation leakage checks.
+- Conditional one-GPU QLoRA training:
+  - **teach:** SFT from accepted examples;
+  - **practice:** GRPO from verifier-backed tasks, starting from the base QLoRA
+    policy or an explicitly selected compatible adapter;
+  - **both:** SFT followed by GRPO on the produced adapter.
+- One local training job started and polled through the GUI, with
+  `autotrainer train auto` as the agent equivalent.
+- Network-isolated frontend episodes, reproducible evaluation plans, local
+  result verification, blind-review import/export, and gated packaging.
 
-- Declarative model, source, QLoRA, SFT, GRPO, environment, evaluation, and package contracts.
-- Safe local or remote Git source materialization and immutable source/model locking.
-- Deterministic SFT and RL dataset compilation with train/evaluation leakage checks.
-- Guarded single-GPU QLoRA SFT and GRPO continuation of the same adapter.
-- Network-isolated frontend episodes with bounded tools, deadlines, browser-test gates, and hidden verification.
-- Two reproducible pairwise evaluation suites:
-  - Declared 9B reference versus the AutoTrainer adapter under one model-agent runner.
-  - Fable plus the base 9B versus Fable plus the same AutoTrainer adapter.
-- Immutable result ingestion, local patch re-verification, separate suite reports, blind-review import/export, and auditable adapter packaging.
+The normal agent path is:
 
-The CLI surface is:
+```bash
+autotrainer models list
+autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
+autotrainer model download --config autotrainer.yaml
 
-```text
-autotrainer source materialize
-autotrainer compile
-autotrainer train sft
-autotrainer train rl
-autotrainer evaluate plan
-autotrainer evaluate run
-autotrainer evaluate export
-autotrainer evaluate ingest
-autotrainer evaluate review export
-autotrainer evaluate review import
-autotrainer evaluate report
-autotrainer package
+autotrainer source add SOURCE --config autotrainer.yaml
+autotrainer source list --config autotrainer.yaml
+
+# Optional for an added Git repository.
+autotrainer history list --config autotrainer.yaml
+autotrainer history review CANDIDATE_ID --approve \
+  --instruction "Describe the accepted change" --rights-confirmed \
+  --config autotrainer.yaml
+
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
 ```
+
+The GUI performs those same operations without requiring users to copy the old
+`validate`, `scan`, `compile`, `plan`, and `doctor` sequence. Those commands and
+the stage-specific `train sft` / `train rl` commands remain available for
+diagnosis and controlled experiments.
 
 ## What is not yet proven
 
-- No full Qwen3.5-9B SFT/GRPO job has been completed on this checkout. Recipe dry-runs and code-level tests are green, but that is not a GPU training result.
-- The configured local model-agent command and Fable version/orchestration digest are placeholders until the operator supplies and pins real runners.
-- The repository includes one newsletter evaluation task with deterministic regressions, browser requirements, and a hidden verifier. It is an authoring fixture, not an independent repository holdout or a statistically useful benchmark; a release benchmark needs multiple external held-out project families and at least the decision's configured minimum task count.
-- No real Fable outputs or blind human reviews have been ingested.
-- This Windows host does not currently provide the validated WSL/CUDA, pinned Hugging Face stack, and Docker runtime required for the full run.
+- No full 9B GPU training path has completed on this checkout. Code-level tests
+  and recipe dry runs are not a training result.
+- No candidate has beaten the declared 9B reference on a production-sized,
+  independent held-out benchmark.
+- No Fable base-versus-candidate outputs and blind human reviews have been
+  completed and ingested.
+- The bundled evaluation task is an authoring fixture in this repository, not
+  an independent holdout. The model-agent command, Fable version, and
+  orchestration digest are still placeholders.
+- This Windows host has not yet supplied the validated WSL2/Linux CUDA,
+  dependency, and container runtime needed for the real run.
+- The local job record is durable across page and backend restarts. A forced
+  backend stop marks an active job interrupted; optimizer checkpoint resume is
+  not yet automatic, so retry starts the selected path again.
 
 ## Ordered continuation work
 
-### 1. Author and compile the final held-out tasks
+### 1. Supply the real learning data and held-out tasks
 
-Add evaluation tasks from repositories and project families that contributed no code, demonstrations, mutation seeds, or RL rollouts to training. The included newsletter task demonstrates the authoring format, but its starting project is stored in the AutoTrainer repository and therefore does not satisfy repository holdout. Every production task must include a locked starting revision, browser-accessibility behavior, responsive behavior, regressions, and a hidden verifier.
+Use only sources the operator has the right to train on. Add one or both
+learning signals:
 
-Declare the compiled final proof path as `evaluation.dataset`. Do not point `grpo.eval_dataset` at it: that optional field is training-loop validation and must remain a different file so benchmark tasks cannot influence optimization or checkpoint selection.
+- accepted prompt/response examples, including reviewed accepted Git changes,
+  for **teach**;
+- resettable executable tasks with hidden verifiers for **practice**.
 
-```bash
-autotrainer validate --config autotrainer.yaml
-autotrainer source scan --config autotrainer.yaml
-autotrainer compile --config autotrainer.yaml
-```
-
-Acceptance:
-
-- `compile` emits the configured `evaluation.dataset` with locked evaluation task rows.
-- Each held-out starting state fails its target behavior and its accepted/reference patch passes the regression, browser, accessibility, responsive, and hidden checks.
-- Train and evaluation repository identities, exact commits, project families, and `groupId` values do not overlap. Different source IDs or paths into the same repository do not establish holdout.
-- Any `grpo.eval_dataset` is training-only, exists independently, and resolves to a different path.
-
-Do not require `evaluate plan` to pass yet. It fingerprints real adapter bytes and runner pins, which do not exist until the next two steps.
-
-### 2. Run the real single-GPU training sequence
-
-Use Linux or WSL2 with exactly one visible NVIDIA GPU and the pinned training dependencies.
-
-```bash
-autotrainer doctor --config autotrainer.yaml
-autotrainer lock --config autotrainer.yaml
-autotrainer compile --config autotrainer.yaml
-autotrainer train sft --dry-run --config autotrainer.yaml
-autotrainer train sft --config autotrainer.yaml
-autotrainer train rl --dry-run --config autotrainer.yaml
-autotrainer train rl --config autotrainer.yaml
-```
+Add multiple evaluation tasks from repositories and project families that
+contributed no training code, examples, mutation seeds, or rollouts. Keep
+`evaluation.dataset` separate from the optional training-time
+`grpo.eval_dataset`.
 
 Acceptance:
 
-- The project model is exactly the supported V1 training model, `Qwen/Qwen3.5-9B`, at an immutable revision.
-- `doctor` reports one BF16-capable GPU, the exact dependency matrix, and a usable Docker or Podman runtime.
-- SFT writes a valid PEFT adapter tied to the locked base revision.
-- GRPO reloads that adapter as trainable and writes a different output directory.
-- Resolved recipes, dependency versions, metrics, and adapter hashes are retained.
+- Preparation compiles inspectable SFT rows, GRPO rows, or both under
+  `.autotrainer/compiled` and selects the expected recipe.
+- Raw repository code contributes no training rows without an approved example
+  or executable task contract.
+- Train and evaluation repository identities, commits, project families, and
+  `groupId` values do not overlap.
+- Each held-out accepted/reference patch passes its regression, browser,
+  accessibility, responsive, and hidden-verifier checks.
 
-### 3. Pin both execution runners and freeze the plan
+### 2. Run the selected path on one GPU
 
-Point `evaluation.arms.autotrainer.adapter.path` at the completed GRPO adapter, then replace every `REPLACE_WITH_*` value in `evaluation.arms` and `evaluation.suites`.
+Use the GUI by selecting and downloading the model, adding the final sources,
+reviewing any history examples, selecting **Prepare training**, and then
+**Start training**. Agents run the equivalent commands shown above.
 
-- The model benchmark command must consume `{request}`, write `{result}`, force the selected model/adapter, honor the seed, disable fallback models, and run arms sequentially on one GPU.
-- The Fable runner must record its exact version and an orchestration SHA-256 covering prompts, tool policy, budgets, fallback policy, and model routing.
+Model download is mandatory. Preparation must reject a missing, mutable, or
+mismatched local snapshot before enabling training.
+
+Acceptance:
+
+- The project uses the supported text-only `Qwen/Qwen3.5-9B` profile at an
+  immutable revision and the recorded snapshot exists locally.
+- Preparation reports one BF16-capable GPU, the pinned dependency matrix, and a
+  usable Docker or Podman runtime for any practice stage.
+- **teach** writes a valid PEFT adapter tied to the locked base revision.
+- **practice** writes a GRPO-trained QLoRA adapter from the selected base or a
+  verified compatible input adapter.
+- **both** writes an SFT adapter and makes GRPO continue that exact adapter into
+  a different output directory.
+- Resolved recipes, dependency versions, metrics, and adapter hashes are kept.
+
+### 3. Pin the two proof runners and freeze the plan
+
+Point the AutoTrainer evaluation arm at the final adapter produced by the
+selected path. Replace every `REPLACE_WITH_*` runner and digest value.
+
+- The model benchmark runner must force the chosen model/adapter, consume
+  `{request}`, write `{result}`, honor the seed, disable fallback models, and
+  run arms sequentially on one GPU.
+- The Fable runner identity must include its exact version and an orchestration
+  SHA-256 covering prompts, tools, budgets, fallback policy, and model routing.
 
 ```bash
 autotrainer evaluate plan --write --config autotrainer.yaml
@@ -99,36 +132,35 @@ autotrainer evaluate plan --write --config autotrainer.yaml
 
 Acceptance:
 
-- Planning succeeds only after the held-out dataset, adapter bytes, immutable model revisions, and both runner identities are available.
-- Repeating it with unchanged inputs produces the same plan ID.
-- Changing a task, model revision, adapter bytes, environment image, seed, or runner digest changes the plan ID.
+- Planning includes immutable model revisions, adapter bytes, held-out tasks,
+  environment image, seeds, and runner identities.
+- Unchanged inputs produce the same plan ID; changing any of those inputs
+  changes it.
 
-### 4. Execute both proof suites
+### 4. Run both held-out comparisons
 
 ```bash
-autotrainer evaluate plan --write --config autotrainer.yaml
 autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
 autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
-# Run the exported requests through the pinned Fable setup. Name directory-mode
-# envelopes result.json or *.result.json.
+# Run the exported requests through the pinned Fable setup.
 autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
 autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
-# Collect reviewer JSONL choices.
+# Collect independent reviewer choices.
 autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
 autotrainer evaluate report --config autotrainer.yaml
 ```
 
 Acceptance:
 
-- Every producer result conforms to [`schemas/evaluation-result.schema.json`](../schemas/evaluation-result.schema.json); planned identities and producer fingerprints match exactly.
-- Every imported review line conforms to [`schemas/blind-review-row.schema.json`](../schemas/blind-review-row.schema.json) and uses only `left`, `right`, `tie`, or `both_fail`.
-- Every blind pair has exactly the configured number of distinct reviewers. Extra or missing votes fail completeness, and `both_fail` remains in the preference denominator with zero candidate credit.
-- Missing or failed trials remain in denominators as zeroes.
-- Producer scores are ignored; submitted patches pass local build, regression, browser, and hidden-verifier checks.
-- Model and Fable suites remain separate in reports.
-- Both decisions expose `observed_better` and `verified_better`; only the latter satisfies V1.
+- Producer fingerprints match the frozen plan and submitted patches pass local
+  build, regression, browser, and hidden-verifier checks.
+- Missing and failed trials remain in denominators as zeroes.
+- Blind pairs have the configured number of distinct reviewers; model and
+  Fable results remain separate.
+- Both suites report `verified_better: true`. `observed_better` alone is not V1
+  proof.
 
-### 5. Package and release from a clean clone
+### 5. Package from a clean clone
 
 ```bash
 autotrainer package --config autotrainer.yaml
@@ -139,35 +171,41 @@ npm test
 
 Acceptance:
 
-- A clean clone can install the core CLI and reproduce compilation and evaluation-plan fingerprints.
-- Packaging refuses an unverified winner unless explicitly creating an `unverified_development_artifact`.
-- The package manifest identifies the base model revision, adapter hash, evaluation plan, reports, source licenses, and every payload-file digest.
-- Documentation and the dashboard no longer describe implemented commands as future work.
+- A clean clone reproduces compilation and evaluation-plan fingerprints.
+- Packaging rejects an unverified winner unless the operator explicitly asks
+  for an `unverified_development_artifact`.
+- The manifest records the base revision, adapter hash, evaluation plan,
+  reports, source licenses, recipes, and payload digests.
 
-## Recorded later inputs
+## Deferred inputs
 
-These inputs are deliberately deferred and do not reorder the five steps above:
-
-- Use `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` at immutable revision `14a29bae5143091aeaf87ad37120de4cd57d592c` as the declared `reference_9b` benchmark arm. Do not change the trainable project `model.id`; V1 training remains on `Qwen/Qwen3.5-9B`.
-- Before pinning that reference runner, prove a text-only loading and generation path. Its published config names `Qwen3_5ForConditionalGeneration` and includes vision configuration, so the runner must avoid image processors and vision inputs, remain within the single-GPU budget, and block the arm rather than silently enabling multimodal behavior.
-- Research a permissively licensed open-source CRM as a later fine-tuning target. Record its code/data licenses, privacy constraints, project-family boundaries, and suitability for demonstrations and resettable verifier-backed tasks before adding it to `sources`; do not mix it into the current held-out proof suite.
+- Use `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` at immutable revision
+  `14a29bae5143091aeaf87ad37120de4cd57d592c` as the declared `reference_9b`
+  benchmark arm, not as the V1 trainable project model. Its runner must prove a
+  text-only loading path and fail closed rather than enable vision inputs.
+- Research a permissively licensed open-source CRM later. Check code and data
+  licenses, privacy constraints, project-family boundaries, and suitability for
+  demonstrations or resettable verifier-backed tasks before adding it.
 
 ## Follow-up engineering debt
 
-These are important but should not block collecting the first honest V1 evidence:
-
-- Load the published JSON Schema in the installed CLI as well as maintaining semantic Python validation.
-- Add a pinned Hugging Face/TRL trainer-construction smoke job; current CI does not install the multi-gigabyte CUDA training stack.
-- Add a persistent/batched local model runner so a 9B model is loaded once per arm instead of once per trial.
-- Turn the read-only web preview into an artifact viewer for plans, trial completeness, reports, and packages.
-- Evolve that viewer into the primary local control surface for editing the same declarative configuration and starting, monitoring, or resuming jobs through the shared backend. Keep every operation reproducible from the CLI and never introduce GUI-only experiment state.
+- Add stage/checkpoint resume so an interrupted combined path can continue
+  without repeating a completed SFT stage.
+- Load the published JSON Schema in the installed CLI as well as performing the
+  current semantic Python validation.
+- Add a pinned Hugging Face/TRL construction smoke job; normal CI does not
+  install the multi-gigabyte CUDA stack.
+- Add a persistent local model runner so a 9B model is loaded once per
+  evaluation arm instead of once per trial.
+- Show prepared artifacts, job logs, plans, reports, and packages in the GUI
+  without introducing GUI-only state.
 
 ## Checkpoint discipline
 
-Continue with small commits and push after each green checkpoint:
+Keep commits small and push each green checkpoint:
 
-1. Held-out tasks and verifier tests.
-2. Real SFT smoke result.
-3. Real GRPO smoke result.
-4. Pinned model-agent/Fable runner integration and frozen plan.
-5. Evaluation evidence and package release.
+1. Final learning data and held-out verifier tests.
+2. Real training output for the selected teach, practice, or combined path.
+3. Pinned model-agent and Fable runners with a frozen plan.
+4. Evaluation evidence.
+5. Verified package release.

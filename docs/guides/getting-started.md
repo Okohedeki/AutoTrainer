@@ -1,26 +1,22 @@
 # Getting started
 
-AutoTrainer is configured from one file: `autotrainer.yaml`. That file declares the base model, the evidence and executable tasks that define the specialization, the QLoRA and GRPO recipes, and the evaluation and package contract. The command line and dashboard must both read the same file; the dashboard is not a second source of truth.
+AutoTrainer uses one project record: `autotrainer.yaml`. The GUI is the primary
+path for people; the CLI exposes the same local services for agents. Neither
+surface keeps hidden training state.
 
-The intended local flow is:
+The GUI has three setup steps:
 
-```text
-configure model and sources
-        ↓
-scan and lock inputs
-        ↓
-compile demonstrations and task packs
-        ↓
-plan and run machine checks
-        ↓
-QLoRA supervised warm start
-        ↓
-GRPO in executable frontend environments
-        ↓
-Declared 9B reference vs trained candidate benchmark
-        ↓
-Fable + base 9B vs Fable + the same trained candidate
-```
+1. Choose the supported 9B base and download its exact Hugging Face snapshot.
+2. Add GitHub repositories or local paths. Optionally review accepted Git
+   changes as examples, or add demonstration JSONL and executable task packs.
+3. Select **Prepare training**. AutoTrainer validates and compiles the inputs,
+   selects the useful training path, checks the machine, and enables **Start
+   training** only when that exact project is ready.
+
+QLoRA is the one-GPU parameter and memory strategy. It does not require every
+project to run both learning stages. Accepted examples select **teach** (SFT),
+verifier-backed tasks select **practice** (GRPO), and projects with both select
+**both** (SFT followed by GRPO on the same adapter).
 
 The repository includes an authoring example in [`examples/frontend-expert`](../../examples/frontend-expert). It contains miniature training and evaluation fixtures in separate directories for exercising the contracts, but both starting projects belong to this same Git repository and therefore do not establish repository holdout. Use multiple genuinely independent held-out project families and pin the real runners before collecting evidence.
 
@@ -30,11 +26,14 @@ The repository includes an authoring example in [`examples/frontend-expert`](../
 - Python 3.11.
 - One NVIDIA GPU. The initial recipe targets a 24 GB card, but memory use depends on model architecture and sequence length.
 - A CUDA-capable PyTorch installation.
-- Docker or Podman for isolated frontend episodes.
-- Node.js 22 or newer for the included frontend fixtures.
+- Docker or Podman when the selected path includes verifier-backed practice or
+  local evaluation.
+- Node.js 22 or newer for the included frontend task fixtures.
 - Enough local storage for the base model, Hugging Face cache, source snapshots, rollouts, and adapters.
 
-Native Windows is suitable for editing and the web UI, but the CUDA training process and container sandbox should run in Linux. See [Windows and WSL2](#windows-and-wsl2).
+Native Windows is suitable for editing and the web UI, but CUDA training and
+any selected container sandbox should run in Linux. See [Windows and
+WSL2](#windows-and-wsl2).
 
 ## Install from a clone
 
@@ -81,101 +80,96 @@ The project dependency declaration remains the authority for supported ranges. R
 
 ## Run the bundled example
 
-Run the example from inside the AutoTrainer checkout:
-
-```bash
-cd examples/frontend-expert
-autotrainer validate --config autotrainer.yaml
-autotrainer source scan --config autotrainer.yaml
-```
-
-Do not copy only `examples/frontend-expert` elsewhere. Its miniature repository sources deliberately point to the enclosing AutoTrainer checkout, so a copy would leave `uri: ../..` and each repository-relative `working_directory` pointing at the wrong tree. Generated example state remains below its ignored `.autotrainer` directory.
-
-Open `autotrainer.yaml` and make these changes before running training:
-
-1. Review the example's pinned `Qwen/Qwen3.5-9B` revision and update it intentionally with `autotrainer lock` when needed.
-2. Replace or add repository sources whose frontend work you have the right to use.
-3. Replace the `sft_jsonl` source with your accepted, text-only demonstrations. `compile` writes the canonical file named by `sft.dataset`.
-4. Replace or extend the training task-pack source. `compile` writes the canonical prompt file named by `grpo.dataset`.
-5. Replace the evaluation repository source with a genuinely independent repository, then replace or extend its task pack. `compile` writes those final proof tasks to `evaluation.dataset`, never to the optional training-time `grpo.eval_dataset`.
-6. Review every source license declaration.
-
-`model.id` is explicit rather than a hidden default, but the V1 SFT/GRPO execution backend supports only the text backbone `Qwen/Qwen3.5-9B`. Selecting another ID may produce an authoring configuration, but `plan` and the guarded trainers block it until that architecture receives deliberate runtime support. A separately declared 9B evaluation reference is executed by its pinned external runner; it does not expand trainer compatibility.
-
-## Configure and inspect
-
-The CLI discovers `autotrainer.yaml` in the current directory. An explicit path is useful in scripts:
-
-```bash
-autotrainer validate --config autotrainer.yaml
-autotrainer models list
-autotrainer model show --config autotrainer.yaml
-autotrainer source list --config autotrainer.yaml
-autotrainer source scan --config autotrainer.yaml
-```
-
-## Choose and download the model
-
-For the human workflow, start the loopback backend from the repository root and run the web app in a second terminal:
+Start the loopback backend from the repository root, then start the web app in a
+second terminal:
 
 ```bash
 autotrainer serve --config examples/frontend-expert/autotrainer.yaml
 npm run dev
 ```
 
-Use **Choose the training base** in the Overview. The GUI saves the selected model, immutable revision, and cache path to `autotrainer.yaml` before downloading. Public models do not require a key. For gated models, authenticate with the normal Hugging Face login or provide `HF_TOKEN` to the backend process; AutoTrainer never writes that token to project files.
+Follow the walkthrough: choose and download the model, add work, then prepare.
+The example contains small authoring fixtures, not a completed 9B result. Do not
+copy only `examples/frontend-expert`; its local source paths point into this
+checkout. Generated state remains under its ignored `.autotrainer` directory.
 
-Agents use the equivalent commands:
+Before a real run:
+
+1. Use work you have the right to train on and review each source license.
+2. Add accepted examples, executable tasks, or both. Raw repository code is
+   reference material; it is not silently treated as training data.
+3. Replace the evaluation fixture with multiple genuinely independent held-out
+   project families before making an improvement claim.
+
+V1 training supports the text-only `Qwen/Qwen3.5-9B` profile. A separately
+declared evaluation reference runs through its own pinned external runner; it
+does not expand trainer compatibility.
+
+## The equivalent agent path
+
+The CLI discovers `autotrainer.yaml` in the current directory. These commands
+perform the same model, source, optional history, prepare, and start actions as
+the GUI:
 
 ```bash
-autotrainer model use qwen3.5-9b-text --config examples/frontend-expert/autotrainer.yaml
-autotrainer model status --config examples/frontend-expert/autotrainer.yaml
-autotrainer model download --config examples/frontend-expert/autotrainer.yaml
+autotrainer models list
+autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
+autotrainer model download --config autotrainer.yaml
+
+autotrainer source add https://github.com/OWNER/REPOSITORY --config autotrainer.yaml
+# Local repositories, accepted-example JSONL, and task-pack paths use the same command.
+autotrainer source list --config autotrainer.yaml
+
+# Optional: approve a small accepted Git change as a supervised example.
+autotrainer history list --config autotrainer.yaml
+autotrainer history review CANDIDATE_ID --approve \
+  --instruction "Describe the accepted change" --rights-confirmed \
+  --config autotrainer.yaml
+
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
 ```
 
-Successful download resolves the revision, writes it back to YAML, and records `.autotrainer/models/current.json`. Real SFT and GRPO runs then require that exact snapshot locally and load it with network access disabled.
+`model download` is required before real training. It resolves the immutable
+revision, writes it to YAML, downloads the snapshot, and records
+`.autotrainer/models/current.json`. Training refuses a missing or mismatched
+snapshot and loads the recorded model offline. Public models need no key. For a
+gated model, authenticate with Hugging Face or pass `HF_TOKEN` to the backend;
+AutoTrainer does not store the token in project files.
 
-To create a standalone project, initialize it and then add your own repository, demonstration, and task-pack source declarations. Copy authored data or task files only when you also update every `uri`, `sourceId`, and repository-relative `workingDirectory`:
+To create a standalone project:
 
 ```bash
 autotrainer init ./my-frontend-expert
 cd ./my-frontend-expert
-autotrainer model use Qwen/Qwen3.5-9B \
-  --revision REPLACE_WITH_IMMUTABLE_HUGGING_FACE_COMMIT_SHA \
-  --config autotrainer.yaml
+autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
+autotrainer model download --config autotrainer.yaml
 ```
 
-`source scan` is read-only with respect to source repositories. It resolves paths and revisions, applies include/exclude rules, checks file eligibility, and reports what each source can contribute. A repository containing attractive final code can be useful as style evidence without being usable as supervised or reinforcement-learning data.
+GitHub sources are cloned into AutoTrainer-managed storage and pinned when they
+are added. Local sources remain in place. `source scan` is read-only with
+respect to both kinds of source.
 
-## Compile and plan
+## Prepare and train
 
 ```bash
-autotrainer compile --config autotrainer.yaml
-autotrainer plan --config autotrainer.yaml
-autotrainer doctor --config autotrainer.yaml
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
 ```
 
-Compilation locks local source revisions, validates supplied datasets and task packs, and writes canonical trainer inputs under `.autotrainer/compiled`. Run `autotrainer lock --config autotrainer.yaml` separately to resolve the Hugging Face revision. Generated state belongs under `project.artifact_dir`, which is `./.autotrainer` in the example.
+`prepare` performs validation, source scanning, compilation, recipe resolution,
+model-snapshot checks, and local runtime checks without loading model weights.
+It returns one conditional path:
 
-`plan` checks declared sources, task links, and held-out separation. In the bundled authoring example its evaluation stage is blocked by the shared repository identity, the not-yet-produced GRPO adapter, and placeholder runner pins; model, source, SFT, GRPO, and environment blockers must be resolved. `doctor` checks Python, CUDA/GPU visibility, the pinned package matrix, and the container runtime. The stage dry runs perform the final dataset and adapter checks.
+- **teach:** accepted examples run QLoRA SFT only;
+- **practice:** executable tasks run GRPO from a fresh QLoRA policy, or from an
+  explicitly selected compatible adapter;
+- **both:** SFT runs first, then GRPO continues that produced adapter.
 
-## Train
-
-Always warm-start the adapter with supervised tuning before GRPO:
-
-```bash
-autotrainer train sft --config autotrainer.yaml
-```
-
-After SFT completes, set `grpo.sft_adapter` to the directory containing the chosen SFT adapter. It must contain PEFT adapter configuration and weights. GRPO continues training that adapter; it must not silently create a fresh adapter.
-
-```bash
-autotrainer validate --config autotrainer.yaml
-autotrainer doctor --config autotrainer.yaml
-autotrainer train rl --config autotrainer.yaml
-```
-
-The RL command uses the `grpo` section even though the public command is named `train rl`. AutoTrainer generates rollouts, runs them in network-isolated task environments, calculates rewards, and updates the adapter sequentially so only one training GPU is required.
+`train auto` repeats preparation and runs only the selected stages. The
+stage-specific `train sft` and `train rl` commands remain diagnostics and
+controlled-experiment tools; they are not the normal human workflow. GRPO runs
+rollouts through the declared network-isolated verifier environment.
 
 See [Training](training.md) for the data formats, reward gates, and memory controls.
 
@@ -233,4 +227,6 @@ Keep user repositories wherever convenient, then reference them with Linux paths
 - Dependencies must be fetched before a network-disabled episode can run.
 - Hidden verifier isolation depends on Docker or Podman and must not be replaced by running untrusted repository commands directly on the host.
 - Evaluation orchestration and local package assembly are implemented, but AutoTrainer does not provide or host the model-agent/Fable runtimes and does not serve the packaged adapter.
-- This checkout has no completed 9B SFT/GRPO evidence, production-sized held-out benchmark, Fable outputs, or blind reviews; both report decisions must be verified before calling an adapter a V1 winner.
+- This checkout has no completed real 9B training result on any conditional
+  path, production-sized held-out benchmark, Fable outputs, or blind reviews;
+  both report decisions must be verified before calling an adapter a V1 winner.
