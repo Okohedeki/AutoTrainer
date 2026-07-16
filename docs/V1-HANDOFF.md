@@ -6,8 +6,8 @@ comparisons report `verified_better: true`.
 
 ## What works now
 
-- A three-step GUI for people: choose and download the model, add work and
-  optionally review accepted Git changes, then prepare and start training.
+- An operational GUI for people: three-step project setup, a durable training
+  monitor, and a held-out evaluation workspace.
 - Agent commands that call the same Python services and update the same
   `autotrainer.yaml` project record.
 - Automatic source inference for GitHub repositories and supported local
@@ -21,6 +21,9 @@ comparisons report `verified_better: true`.
   - **both:** SFT followed by GRPO on the produced adapter.
 - One local training job started and polled through the GUI, with
   `autotrainer train auto` as the agent equivalent.
+- One local evaluation job started and polled through the GUI, with immutable
+  trial identity, trusted completion counts, scored rewards, and
+  `autotrainer evaluate run` as the agent equivalent.
 - Network-isolated frontend episodes, reproducible evaluation plans, local
   result verification, blind-review import/export, and gated packaging.
 
@@ -197,8 +200,10 @@ Acceptance:
   install the multi-gigabyte CUDA stack.
 - Add a persistent local model runner so a 9B model is loaded once per
   evaluation arm instead of once per trial.
-- Show prepared artifacts, job logs, plans, reports, and packages in the GUI
-  without introducing GUI-only state.
+- Add contextual GUI actions for external Fable request/result exchange, blind
+  review import/export, reports, and packages without introducing GUI-only
+  state. The current GUI already shows the real external-suite phase and
+  withholds arm identities during blind review.
 
 ## Checkpoint discipline
 

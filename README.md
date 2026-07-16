@@ -23,8 +23,8 @@ compare the base model with the trained specialist on held-out work
 ## What is usable now
 
 - A project CLI for model and source declaration, validation, scanning, compilation, locking, planning, and runtime checks.
-- A loopback-only local API and three-step GUI for model download, source setup,
-  reviewed examples, preparation, and one local training job.
+- A loopback-only local API and operational GUI with three-step setup, one
+  durable local training monitor, and observable evaluation jobs.
 - Immutable Hugging Face model download receipts and offline-only training loads.
 - Deterministic repository inventories and direct SFT JSONL compilation.
 - Versioned executable frontend task packs with a Docker/Podman security boundary.
@@ -37,8 +37,10 @@ compare the base model with the trained specialist on held-out work
 The evaluation and packaging workflow is implemented, but this checkout does
 not claim a verified winner yet. That claim requires a completed 9B run and the
 two held-out comparisons described below. The GUI and CLI can prepare and start
-the same conditional training path today; neither treats a successful optimizer
-run as proof that the specialist is better.
+the same conditional training path. The GUI can also freeze the proof matrix,
+start or resume the command-backed local benchmark, and watch trusted trial
+results; neither interface treats a successful optimizer run as proof that the
+specialist is better.
 
 ## Quickstart
 
@@ -194,7 +196,10 @@ npm run dev
 
 The GUI calls `/api/v1`; Vite forwards it to the loopback backend at
 `127.0.0.1:8765`. Agents use `autotrainer model ...`, `source ...`, `history
-...`, `prepare`, and `train auto` against the same YAML and service code.
+...`, `prepare`, `train auto`, and `evaluate ...` against the same YAML and
+service code. Fable remains an external producer: the GUI reports its verified
+handoff state while the CLI provides request export, result ingestion, blind
+review exchange, and report generation.
 
 ## License
 

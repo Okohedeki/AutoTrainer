@@ -11,12 +11,12 @@ Each experiment must answer two questions:
 
 ## Source of truth
 
-`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app performs model selection, source setup, reviewed-history approval, preparation, and training launch through a loopback-only local API; that API and the CLI call the same Python service functions. The GUI is not a second orchestration system and does not create hidden GUI-only training state.
+`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app performs model selection, source setup, reviewed-history approval, preparation, training launch, evaluation planning, and command-backed benchmark launch through a loopback-only local API; that API and the CLI call the same Python service functions. The GUI is not a second orchestration system and does not create hidden GUI-only training or evaluation state.
 
 ## Human and agent interfaces
 
-- Humans use the GUI to choose the base, add work, review accepted changes, prepare the project, and start the selected training path.
-- Agents use `autotrainer model`, `source`, `history`, `prepare`, and `train auto` for the equivalent operations.
+- Humans use the GUI to choose the base, add work, review accepted changes, prepare and run training, then freeze and watch held-out evaluation.
+- Agents use `autotrainer model`, `source`, `history`, `prepare`, `train auto`, and `evaluate` for the equivalent shared-service operations.
 - Both paths mutate the same YAML, call `model_service`, and receive the same cache states.
 - `autotrainer serve` binds only to loopback and exposes a versioned `/api/v1` contract; it does not accept arbitrary shell commands.
 - Hugging Face credentials remain process environment input. They are never returned by the API or written to YAML and receipts.
@@ -50,6 +50,7 @@ The environment owns repository reset, bounded tools, hidden verification, rewar
 - Guarded Hugging Face QLoRA and same-adapter TRL GRPO launchers.
 - Immutable paired evaluation plans, shell-free command execution, external result exchange, and local patch re-verification.
 - Separate model-benchmark and Fable A/B reports, deterministic blind-review pairs, and decision thresholds.
+- Durable training and evaluation job records that the console polls without inventing progress between observed stage or trial boundaries.
 - Winner-gated LoRA adapter packages containing provenance, reports, licenses, recipes, and payload hashes.
 
 The CLI does not install WSL, Docker, CUDA, accept model licenses, or supply the external model-agent and Fable runtimes. Those runners must be pinned by the operator, and this checkout has not completed a full 9B training run, a statistically useful held-out benchmark, or blind Fable review. Until both evaluation decisions report `verified_better`, a trained checkpoint remains an experiment artifact rather than a verified winner. See the [V1 handoff plan](V1-HANDOFF.md) for the remaining proof work.

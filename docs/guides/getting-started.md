@@ -93,6 +93,13 @@ The example contains small authoring fixtures, not a completed 9B result. Do not
 copy only `examples/frontend-expert`; its local source paths point into this
 checkout. Generated state remains under its ignored `.autotrainer` directory.
 
+The console keeps execution separate from setup. **Training** shows only the
+durable stage, returned metrics, and adapter paths. **Evaluation** shows
+readiness blockers, freezes the configured paired matrix, starts or resumes the
+local command-backed benchmark, and advances at observed generation,
+verification, and trusted-score boundaries. It never simulates the external
+Fable producer as a local job.
+
 Before a real run:
 
 1. Use work you have the right to train on and review each source license.
