@@ -1,44 +1,51 @@
 # Training
 
-AutoTrainer’s V1 training recipe is intentionally narrow:
+AutoTrainer's V1 training surface is intentionally narrow, but its learning
+path is conditional:
 
 ```text
-Qwen/Qwen3.5-9B text causal LM
-        ↓
-4-bit QLoRA supervised warm start
-        ↓
-same trainable adapter
-        ↓
-GRPO against executable frontend rewards
-        ↓
+supported 9B text causal LM + 4-bit QLoRA
+        |
+        +-- accepted examples only --> SFT
+        +-- executable tasks only --> GRPO practice
+        +-- both signals -----------> SFT, then GRPO on the same adapter
+        |
 declared 9B reference vs trained candidate comparison
 ```
 
-The frozen base weights are not rewritten. SFT creates a PEFT adapter; GRPO must reload and continue training that adapter. This keeps the trainable surface small enough for a single consumer GPU and makes the final expert distributable as an adapter package.
+The frozen base weights are not rewritten. QLoRA creates or updates a PEFT
+adapter in every path. SFT teaches from accepted responses. GRPO practices
+against executable rewards; after SFT it continues the same adapter, while a
+practice-only project starts a fresh QLoRA adapter from the selected base.
 
 ## Before using the GPU
 
-Run every preparation stage first:
+Run the shared preparation stage first:
 
 ```bash
-autotrainer validate --config autotrainer.yaml
-autotrainer source scan --config autotrainer.yaml
-autotrainer compile --config autotrainer.yaml
-autotrainer plan --config autotrainer.yaml
-autotrainer doctor --config autotrainer.yaml
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
 ```
 
-Before training, do not bypass blockers in the model, source, SFT, GRPO, or environment stages. The evaluation stage remains blocked until training has produced the candidate adapter, the operator has pinned both runners, and every held-out repository is independent of all declared training repository exposure; resolve those evaluation-only blockers before `evaluate plan --write`. At minimum, the preparation report should show:
+`prepare` performs validation, source scanning, compilation, recipe resolution,
+and local runtime checks without loading model weights. `train auto` repeats
+preparation before starting, so the GUI and CLI cannot launch from a stale Ready
+result. Evaluation-only blockers do not prevent a useful training run. Resolve
+them before `evaluate plan --write`.
+
+At minimum, the preparation report should show:
 
 - The exact model ID and immutable revision.
 - A CUDA-capable GPU and compatible package matrix.
-- A valid text-only SFT dataset at `sft.dataset`.
-- Valid training task manifests represented at `grpo.dataset`.
-- A final held-out task set at `evaluation.dataset`, distinct from any optional `grpo.eval_dataset` used during training.
-- A Docker or Podman runtime capable of network isolation.
+- At least one learning signal: a valid text-only SFT dataset, valid training
+  task manifests, or both.
+- For a practice path, a Docker or Podman runtime capable of network isolation.
 - Resolvable repository locks and working directories.
-- Verifier bundles outside editable workspaces.
-- No detected train/evaluation group collision.
+- For a practice path, verifier bundles outside editable workspaces.
+
+Final evaluation additionally requires a held-out task set at
+`evaluation.dataset`, distinct from `grpo.eval_dataset`, and no detected
+train/evaluation group collision.
 
 The included example has a small evaluation fixture in a separate directory for exercising the contract. Its starting project is still part of the same AutoTrainer Git repository as the training fixture, so the planner correctly rejects it as a repository holdout. Add multiple genuinely independent held-out repository families and pin the real evaluation runners before claiming an improvement.
 
@@ -207,7 +214,8 @@ Resume only when all locked inputs match. If the model revision, source revision
 A successful optimizer run is not the product success criterion. The required model benchmark compares:
 
 - The immutable 9B reference declared for the benchmark.
-- The project model with the adapter produced by the configured QLoRA SFT and GRPO sequence.
+- The project model with the adapter produced by the prepared teach, practice,
+  or combined QLoRA path.
 
 Use the same held-out tasks, model prompt template, tools, starting revisions, completion limit, tool-call limit, generation settings, and verifier. The primary metric is verified task success; also retain build rate, task-test pass rate, regressions, accessibility, responsive checks, tokens per success, and wall time per success.
 

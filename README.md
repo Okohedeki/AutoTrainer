@@ -2,28 +2,29 @@
 
 AutoTrainer is an Apache-2.0, local-first foundry for turning a 9B base model into a verified frontend expert on one consumer GPU.
 
-The source of truth is `autotrainer.yaml`, not the dashboard:
+The GUI is the main path for people. The CLI is the same path for agents. Both
+call the same local Python services and use `autotrainer.yaml` as the project
+record:
 
 ```text
-declare model + sources
-        ↓
-scan and lock evidence
-        ↓
-compile demonstrations + executable tasks
-        ↓
-4-bit QLoRA SFT
-        ↓
-GRPO continues the same adapter
-        ↓
-Declared 9B reference vs trained candidate benchmark
-        ↓
-Fable + base 9B vs Fable + the same trained candidate
+choose and download one supported 9B model
+        |
+add GitHub repositories or local files
+        |
+review accepted Git changes and/or add executable tasks
+        |
+Prepare: validate, compile, resolve the recipe, and check this machine
+        |
+train the useful path: teach (SFT), practice (GRPO), or both
+        |
+compare the base model with the trained specialist on held-out work
 ```
 
 ## What is usable now
 
 - A project CLI for model and source declaration, validation, scanning, compilation, locking, planning, and runtime checks.
-- A loopback-only local API and GUI model setup that use the same service operations as the CLI.
+- A loopback-only local API and three-step GUI for model download, source setup,
+  reviewed examples, preparation, and one local training job.
 - Immutable Hugging Face model download receipts and offline-only training loads.
 - Deterministic repository inventories and direct SFT JSONL compilation.
 - Versioned executable frontend task packs with a Docker/Podman security boundary.
@@ -33,7 +34,11 @@ Fable + base 9B vs Fable + the same trained candidate
 - Immutable, paired evaluation plans with local result verification, separate model/Fable reports, and blind-review import/export.
 - Winner-gated LoRA adapter packaging with auditable file hashes and an explicitly labeled unverified-development escape hatch.
 
-The evaluation and packaging workflow is implemented, but this checkout does not contain the evidence for a verified V1 winner. A real run still needs enough independent held-out project families, pinned model-agent and Fable runners, a completed 9B SFT/GRPO run, and blind Fable reviews. The GUI now performs model selection and download through the shared local backend; training launch and telemetry remain guarded until their backend job contract is connected. See the [V1 handoff plan](docs/V1-HANDOFF.md) for the ordered continuation work.
+The evaluation and packaging workflow is implemented, but this checkout does
+not claim a verified winner yet. That claim requires a completed 9B run and the
+two held-out comparisons described below. The GUI and CLI can prepare and start
+the same conditional training path today; neither treats a successful optimizer
+run as proof that the specialist is better.
 
 ## Quickstart
 
@@ -48,14 +53,11 @@ autotrainer init my-frontend-expert
 cd my-frontend-expert
 ```
 
-Or start from the complete example:
+Or inspect the complete example with the same preparation action the GUI uses:
 
 ```bash
 python -m pip install -e ./services/trainer
-autotrainer validate --config examples/frontend-expert/autotrainer.yaml
-autotrainer source scan --config examples/frontend-expert/autotrainer.yaml
-autotrainer compile --config examples/frontend-expert/autotrainer.yaml
-autotrainer plan --config examples/frontend-expert/autotrainer.yaml
+autotrainer prepare --config examples/frontend-expert/autotrainer.yaml
 ```
 
 The example includes a small evaluation authoring fixture, not an independent repository holdout or a statistically useful benchmark. Evaluation planning remains blocked until that source is replaced with a genuinely separate repository, the placeholder runner identities are pinned, and the candidate adapter exists; add multiple independent held-out project families before making an improvement claim.
@@ -139,21 +141,25 @@ autotrainer doctor --config autotrainer.yaml
 
 The reference matrix is Python 3.11, PyTorch 2.13.0, Transformers 5.13.1, TRL 1.8.0, PEFT 0.19.1, Accelerate 1.14.0, Datasets 5.0.0, bitsandbytes 0.49.2, and jmespath 1.1.0. The rollout image pins Playwright 1.61.1; task repositories should use the matching Playwright package.
 
-## Train
+## Prepare and train
 
-Validate the resolved recipes before spending GPU time:
+For agents, one command performs the same validation, scan, compile, recipe
+selection, and runtime check as the GUI's **Prepare training** button:
 
 ```bash
-autotrainer compile --config autotrainer.yaml
-autotrainer train sft --dry-run --config autotrainer.yaml
-autotrainer train sft --config autotrainer.yaml
-
-# This dry run succeeds only after the SFT adapter exists.
-autotrainer train rl --dry-run --config autotrainer.yaml
-autotrainer train rl --config autotrainer.yaml
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
 ```
 
-The smoke profile uses 4-bit NF4, LoRA rank 32, SFT batch 1 with gradient accumulation 8, and GRPO with two generations at a 2K completion limit. `beta: 0` avoids loading a second reference model. Increase group size or context only after measuring VRAM.
+`train auto` follows the learning signal that preparation found:
+
+- accepted prompt/response examples: QLoRA SFT;
+- executable tasks and verifiers: QLoRA GRPO practice;
+- both: SFT, then continue the same adapter with GRPO.
+
+QLoRA is how trainable parameters fit on one GPU; SFT and GRPO are conditional
+learning stages. The stage-specific `train sft` and `train rl` commands remain
+available for debugging and controlled experiments.
 
 ## Data and environment contracts
 
@@ -186,7 +192,9 @@ autotrainer serve --config examples/frontend-expert/autotrainer.yaml
 npm run dev
 ```
 
-The GUI calls `/api/v1`; Vite forwards it to the loopback backend at `127.0.0.1:8765`. Agents use the equivalent `autotrainer model ...` commands against the same YAML and model-service code.
+The GUI calls `/api/v1`; Vite forwards it to the loopback backend at
+`127.0.0.1:8765`. Agents use `autotrainer model ...`, `source ...`, `history
+...`, `prepare`, and `train auto` against the same YAML and service code.
 
 ## License
 

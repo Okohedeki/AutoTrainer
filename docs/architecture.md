@@ -6,17 +6,17 @@ AutoTrainer is a local-first foundry for producing a verified frontend expert fr
 
 Each experiment must answer two questions:
 
-1. Does the SFT-plus-GRPO candidate beat the declared 9B reference on held-out frontend environments?
+1. Does the trained candidate beat the declared 9B reference on held-out frontend environments?
 2. Does Fable using that same trained candidate produce better websites than Fable using the base 9B under identical orchestration?
 
 ## Source of truth
 
-`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app performs model selection and download through a loopback-only local API; that API and the CLI call the same Python service functions. The GUI is not a second orchestration system and must not create hidden GUI-only state. Training launch and telemetry will follow this same boundary as their job contract is implemented.
+`autotrainer.yaml` declares the model, immutable revision, evidence, demonstrations, executable task packs, one-GPU recipes, sandbox, evaluation split, and package contract. The CLI resolves it into source locks, compiled JSONL, run recipes, checkpoints, reports, and adapter packages. The web app performs model selection, source setup, reviewed-history approval, preparation, and training launch through a loopback-only local API; that API and the CLI call the same Python service functions. The GUI is not a second orchestration system and does not create hidden GUI-only training state.
 
 ## Human and agent interfaces
 
-- Humans use the GUI to select a validated training base, review its immutable revision and cache, and download it.
-- Agents use `autotrainer model use`, `model status`, and `model download` for the equivalent operations.
+- Humans use the GUI to choose the base, add work, review accepted changes, prepare the project, and start the selected training path.
+- Agents use `autotrainer model`, `source`, `history`, `prepare`, and `train auto` for the equivalent operations.
 - Both paths mutate the same YAML, call `model_service`, and receive the same cache states.
 - `autotrainer serve` binds only to loopback and exposes a versioned `/api/v1` contract; it does not accept arbitrary shell commands.
 - Hugging Face credentials remain process environment input. They are never returned by the API or written to YAML and receipts.
@@ -29,8 +29,8 @@ Repository code, SFT demonstrations, and RL task packs are deliberately differen
 2. Scan and lock repository evidence, explicit SFT JSONL, and executable task packs.
 3. Compile direct demonstrations and task manifests into inspectable trainer JSONL.
 4. Declare the immutable 9B reference used as the benchmark quality bar.
-5. Train a QLoRA adapter from supervised examples.
-6. Reload that same adapter as trainable and continue it with GRPO in isolated environments.
+5. Choose the path supported by the compiled learning signal: supervised teaching, verified practice, or both.
+6. Train a QLoRA adapter with SFT, GRPO in isolated environments, or SFT followed by GRPO on the same adapter.
 7. Compare the declared 9B reference with the trained candidate on held-out project families.
 8. Compare Fable plus the base 9B with Fable plus that same trained candidate.
 
