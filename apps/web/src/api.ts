@@ -117,6 +117,72 @@ export type BackendHealth = {
   config: string;
 };
 
+export type EvaluationTrial = {
+  trial_id: string;
+  task_id: string;
+  arm_id: string;
+  repetition: number;
+  seed: number;
+};
+
+export type EvaluationResult = EvaluationTrial & {
+  status: string;
+  hard_gate_passed: boolean;
+  gate_reason: string | null;
+  reward: number;
+  components: Record<string, number>;
+};
+
+export type EvaluationJob = {
+  id: string | null;
+  status: "idle" | "queued" | "running" | "completed" | "failed" | "interrupted";
+  plan_id: string | null;
+  suite: string | null;
+  phase: string;
+  message: string;
+  completed: number;
+  total: number;
+  current_trial: EvaluationTrial | null;
+  results: EvaluationResult[];
+  results_truncated: boolean;
+};
+
+export type EvaluationSuite = {
+  id: string;
+  kind: string;
+  runner_type: "command" | "external";
+  phase: string;
+  message: string;
+  completed: number;
+  total: number;
+  results: EvaluationResult[];
+  results_truncated: boolean;
+  results_withheld_for_blind_review: boolean;
+  review: {
+    pairs_exported: boolean;
+    review_count: number;
+    required_reviews: number;
+    complete: boolean;
+  } | null;
+};
+
+export type EvaluationWorkspace = {
+  readiness: {
+    status: string;
+    ready_task_count: number;
+    blockers: string[];
+    warnings: string[];
+  };
+  plan: {
+    plan_id: string;
+    task_count: number;
+    repetitions: number;
+    seeds: number[];
+  } | null;
+  job: EvaluationJob;
+  suites: EvaluationSuite[];
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -214,4 +280,19 @@ export async function getTrainingJob(signal?: AbortSignal): Promise<TrainingJob>
 
 export async function startTraining(): Promise<TrainingJob> {
   return request("/api/v1/training/start", { method: "POST", body: "{}" });
+}
+
+export async function getEvaluationWorkspace(signal?: AbortSignal): Promise<EvaluationWorkspace> {
+  return request("/api/v1/evaluation", { signal });
+}
+
+export async function planEvaluation(): Promise<EvaluationWorkspace> {
+  return request("/api/v1/evaluation/plan", { method: "POST", body: "{}" });
+}
+
+export async function startEvaluation(suite: string): Promise<EvaluationJob> {
+  return request("/api/v1/evaluation/start", {
+    method: "POST",
+    body: JSON.stringify({ suite }),
+  });
 }

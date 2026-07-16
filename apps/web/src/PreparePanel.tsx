@@ -71,24 +71,29 @@ export default function PreparePanel({
     if (trainingJob?.status !== "queued" && trainingJob?.status !== "running") return;
 
     let stopped = false;
+    const controller = new AbortController();
+    let timer = 0;
     // Jobs run outside the page. Polling the shared record keeps this small
     // control truthful without inventing progress or keeping a browser request open.
-    const interval = window.setInterval(() => {
-      getTrainingJob()
-        .then((next) => {
-          if (stopped) return;
-          setTrainingJob(next);
-          setTrainingError(null);
-        })
-        .catch((reason: unknown) => {
-          if (stopped) return;
-          setTrainingError(reason instanceof Error ? reason.message : "Training status could not be refreshed.");
-        });
-    }, 2_000);
+    const refresh = async () => {
+      try {
+        const next = await getTrainingJob(controller.signal);
+        if (stopped) return;
+        setTrainingJob(next);
+        setTrainingError(null);
+      } catch (reason) {
+        if (stopped || controller.signal.aborted) return;
+        setTrainingError(reason instanceof Error ? reason.message : "Training status could not be refreshed.");
+      } finally {
+        if (!stopped) timer = window.setTimeout(() => void refresh(), 2_000);
+      }
+    };
+    timer = window.setTimeout(() => void refresh(), 2_000);
 
     return () => {
       stopped = true;
-      window.clearInterval(interval);
+      controller.abort();
+      window.clearTimeout(timer);
     };
   }, [trainingJob?.status]);
 
@@ -127,8 +132,9 @@ export default function PreparePanel({
   useEffect(() => {
     // The API remains the enforcement boundary; this callback also makes the
     // page visibly immutable while one training job owns the project snapshot.
+    if (trainingJob === null) return;
     onTrainingActiveChange?.(trainingActive);
-  }, [onTrainingActiveChange, trainingActive]);
+  }, [onTrainingActiveChange, trainingActive, trainingJob]);
 
   return (
     <section className="panel setup-step prepare-panel" aria-labelledby="prepare-heading" data-tour="prepare">

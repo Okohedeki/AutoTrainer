@@ -9,7 +9,21 @@ const stageNames: Record<NonNullable<TrainingJob["stage"]>, string> = {
   grpo: "Practice against tests",
 };
 
-function stageState(job: TrainingJob, stage: "prepare" | "sft" | "grpo") {
+type TrainingStage = "prepare" | "sft" | "grpo";
+
+function observedStages(job: TrainingJob): TrainingStage[] {
+  if (job.status === "idle") return [];
+  const stages: TrainingStage[] = ["prepare"];
+  // While a run is live the durable record exposes only the stage it has
+  // actually reached. Completion adds exactly the stages the trainer returned.
+  const reached = job.result?.stages.map((stage) => stage.stage) ?? (job.stage && job.stage !== "prepare" ? [job.stage] : []);
+  for (const stage of reached) {
+    if (!stages.includes(stage)) stages.push(stage);
+  }
+  return stages;
+}
+
+function stageState(job: TrainingJob, stage: TrainingStage) {
   const completedStages = new Set(job.result?.stages.map((item) => item.stage) ?? []);
   if (stage === "prepare" && (job.stage === "sft" || job.stage === "grpo" || job.status === "completed")) {
     return "complete";
@@ -17,7 +31,6 @@ function stageState(job: TrainingJob, stage: "prepare" | "sft" | "grpo") {
   if (completedStages.has(stage as "sft" | "grpo")) return "complete";
   if (liveStatuses.has(job.status) && job.stage === stage) return "active";
   if (job.status === "failed" && job.stage === stage) return "failed";
-  if (job.status === "completed") return "skipped";
   return "waiting";
 }
 
@@ -34,26 +47,29 @@ export default function TrainingMonitorPanel({ onOpenSetup }: { onOpenSetup: () 
   useEffect(() => {
     let stopped = false;
     const controller = new AbortController();
+    let timer = 0;
 
-    const refresh = () => {
-      getTrainingJob(controller.signal)
-        .then((next) => {
-          if (stopped) return;
-          setJob(next);
-          setError(null);
-        })
-        .catch((reason: unknown) => {
-          if (stopped || controller.signal.aborted) return;
-          setError(reason instanceof Error ? reason.message : "Training status could not be refreshed.");
-        });
+    const refresh = async () => {
+      try {
+        const next = await getTrainingJob(controller.signal);
+        if (stopped) return;
+        setJob(next);
+        setError(null);
+      } catch (reason) {
+        if (stopped || controller.signal.aborted) return;
+        setError(reason instanceof Error ? reason.message : "Training status could not be refreshed.");
+      } finally {
+        // Schedule after completion so a slow request cannot be overtaken by a
+        // newer poll and regress a terminal job back to an older live state.
+        if (!stopped) timer = window.setTimeout(() => void refresh(), 2_000);
+      }
     };
 
-    refresh();
-    const interval = window.setInterval(refresh, 2_000);
+    void refresh();
     return () => {
       stopped = true;
       controller.abort();
-      window.clearInterval(interval);
+      window.clearTimeout(timer);
     };
   }, []);
 
@@ -86,7 +102,7 @@ export default function TrainingMonitorPanel({ onOpenSetup }: { onOpenSetup: () 
 
         {job && (
           <>
-            <div className="run-message" role={liveStatuses.has(job.status) ? "status" : undefined}>
+            <div className="run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"} aria-live="polite">
               <span className={`health-dot ${statusTone}`} aria-hidden="true" />
               <div>
                 <strong>{job.stage ? stageNames[job.stage] : "No training job"}</strong>
@@ -95,8 +111,8 @@ export default function TrainingMonitorPanel({ onOpenSetup }: { onOpenSetup: () 
               {job.id && <code>{job.id.slice(0, 12)}</code>}
             </div>
 
-            <ol className="stage-list" aria-label="Training stages">
-              {(["prepare", "sft", "grpo"] as const).map((stage, index) => {
+            <ol className="stage-list" aria-label="Observed training stages">
+              {observedStages(job).map((stage, index) => {
                 const state = stageState(job, stage);
                 return (
                   <li className={`stage-row ${state}`} key={stage}>

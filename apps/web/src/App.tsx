@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBackendHealth, getTrainingJob, type BackendHealth } from "./api";
+import EvaluationMonitorPanel from "./EvaluationMonitorPanel";
 import HistoryReviewPanel from "./HistoryReviewPanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import PreparePanel from "./PreparePanel";
@@ -8,7 +9,7 @@ import TrainingMonitorPanel from "./TrainingMonitorPanel";
 
 const WALKTHROUGH_STORAGE_KEY = "autotrainer.walkthrough.v2";
 
-type ViewId = "setup" | "training";
+type ViewId = "setup" | "training" | "evaluation";
 type WalkthroughStep = { target: string; label: string; title: string; body: string };
 
 // The walkthrough points at real controls in the operating console. It does
@@ -80,6 +81,7 @@ function Walkthrough({
 
 export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
+  const pageTitleRef = useRef<HTMLHeadingElement>(null);
   const [activeView, setActiveView] = useState<ViewId>("setup");
   const [health, setHealth] = useState<BackendHealth | null>(null);
   const [backendConnected, setBackendConnected] = useState(false);
@@ -97,22 +99,30 @@ export default function App() {
 
   useEffect(() => {
     let stopped = false;
+    let timer = 0;
     const refresh = async () => {
       try {
-        const [nextHealth, job] = await Promise.all([getBackendHealth(), getTrainingJob()]);
+        const nextHealth = await getBackendHealth();
         if (stopped) return;
         setHealth(nextHealth);
         setBackendConnected(true);
-        setTrainingActive(job.status === "queued" || job.status === "running");
       } catch {
         if (!stopped) setBackendConnected(false);
       }
+      try {
+        const job = await getTrainingJob();
+        if (!stopped) setTrainingActive(job.status === "queued" || job.status === "running");
+      } catch {
+        // A job-record error does not mean the health endpoint is offline.
+        // The dedicated training monitor surfaces its own retrieval failures.
+      } finally {
+        if (!stopped) timer = window.setTimeout(() => void refresh(), 2_000);
+      }
     };
     void refresh();
-    const interval = window.setInterval(refresh, 2_000);
     return () => {
       stopped = true;
-      window.clearInterval(interval);
+      window.clearTimeout(timer);
     };
   }, []);
 
@@ -136,14 +146,13 @@ export default function App() {
   }, [rememberWalkthrough]);
 
   const nextWalkthroughStep = useCallback(() => {
-    setWalkthroughStep((current) => {
-      if (current === null || current === walkthroughSteps.length - 1) {
-        rememberWalkthrough();
-        return null;
-      }
-      return current + 1;
-    });
-  }, [rememberWalkthrough]);
+    if (walkthroughStep === null) return;
+    if (walkthroughStep === walkthroughSteps.length - 1) {
+      closeWalkthrough();
+      return;
+    }
+    setWalkthroughStep(walkthroughStep + 1);
+  }, [closeWalkthrough, walkthroughStep]);
 
   const sourcesChanged = useCallback(() => {
     setSourceRevision((value) => value + 1);
@@ -154,9 +163,28 @@ export default function App() {
     setProjectRevision((value) => value + 1);
   }, []);
 
-  const openView = (view: ViewId) => {
+  const openView = (view: ViewId, focusTitle = false) => {
     setActiveView(view);
     window.scrollTo({ top: 0, behavior: "auto" });
+    if (focusTitle) window.requestAnimationFrame(() => pageTitleRef.current?.focus());
+  };
+
+  const viewCopy: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
+    setup: {
+      eyebrow: "Project setup",
+      title: "Build the training run",
+      description: "Choose the exact model, add your work, review useful examples, and prove this machine is ready.",
+    },
+    training: {
+      eyebrow: "Local execution",
+      title: "Training run",
+      description: "Watch the durable local job record, completed stages, real trainer metrics, and output paths.",
+    },
+    evaluation: {
+      eyebrow: "Held-out proof",
+      title: "Evaluation",
+      description: "Watch frozen trials move through model generation, trusted local verification, and scored results.",
+    },
   };
 
   return (
@@ -181,6 +209,9 @@ export default function App() {
             <button className={activeView === "training" ? "active" : ""} type="button" onClick={() => openView("training")} aria-current={activeView === "training" ? "page" : undefined}>
               <span className="nav-icon" aria-hidden="true">02</span><span className="nav-label">Training</span>{trainingActive && <small>live</small>}
             </button>
+            <button className={activeView === "evaluation" ? "active" : ""} type="button" onClick={() => openView("evaluation")} aria-current={activeView === "evaluation" ? "page" : undefined}>
+              <span className="nav-icon" aria-hidden="true">03</span><span className="nav-label">Evaluation</span>
+            </button>
           </nav>
 
           <div className="sidebar-runtime">
@@ -191,7 +222,7 @@ export default function App() {
 
         <div className="console-main">
           <header className="topbar">
-            <div className="breadcrumbs"><span>Projects</span><b>/</b><strong>{projectName}</strong><span className={`status-chip ${backendConnected ? "good" : "danger"}`}>{backendConnected ? "connected" : "offline"}</span></div>
+            <div className="breadcrumbs"><span>Current project</span><b>/</b><strong>{projectName}</strong><span className={`status-chip ${backendConnected ? "good" : "danger"}`}>{backendConnected ? "connected" : "offline"}</span></div>
             <div className="topbar-actions">
               {health?.config && <code className="config-source">{health.config}</code>}
               <button ref={restartButtonRef} className="walkthrough-restart" type="button" onClick={() => { setActiveView("setup"); setWalkthroughStep(0); }}>Walkthrough</button>
@@ -201,11 +232,9 @@ export default function App() {
           <main className="page-content">
             <header className="page-heading">
               <div>
-                <p className="eyebrow">{activeView === "setup" ? "Project setup" : "Local execution"}</p>
-                <div className="title-row"><h1>{activeView === "setup" ? "Build the training run" : "Training run"}</h1>{trainingActive && <span className="status-chip info">running</span>}</div>
-                <p className="page-description">{activeView === "setup"
-                  ? "Choose the exact model, add your work, review useful examples, and prove this machine is ready."
-                  : "Watch the durable local job record, completed stages, real trainer metrics, and output paths."}</p>
+                <p className="eyebrow">{viewCopy[activeView].eyebrow}</p>
+                <div className="title-row"><h1 ref={pageTitleRef} tabIndex={-1}>{viewCopy[activeView].title}</h1>{activeView === "training" && trainingActive && <span className="status-chip info">running</span>}</div>
+                <p className="page-description">{viewCopy[activeView].description}</p>
               </div>
             </header>
 
@@ -220,8 +249,10 @@ export default function App() {
                 </div>
                 <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} disabled={trainingActive} />
               </>
+            ) : activeView === "training" ? (
+              <TrainingMonitorPanel onOpenSetup={() => openView("setup", true)} />
             ) : (
-              <TrainingMonitorPanel onOpenSetup={() => openView("setup")} />
+              <EvaluationMonitorPanel onOpenSetup={() => openView("setup", true)} />
             )}
           </main>
         </div>
