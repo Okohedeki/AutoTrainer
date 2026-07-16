@@ -147,7 +147,6 @@ A task pack is a directory of version `1.0` task manifests plus verifier bundles
   },
   "limits": {
     "toolCalls": 40,
-    "tokenBudget": 12000,
     "commandTimeoutSeconds": 120,
     "episodeTimeoutSeconds": 900,
     "networkAccess": false

@@ -61,7 +61,6 @@ def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[
         },
         "limits": {
             "toolCalls": 40,
-            "tokenBudget": 12000,
             "commandTimeoutSeconds": 120,
             "episodeTimeoutSeconds": 900,
             "networkAccess": False,
@@ -197,7 +196,6 @@ class ManifestTests(unittest.TestCase):
             },
             "limits": {
                 "toolCalls": 40,
-                "tokenBudget": 12000,
                 "commandTimeoutSeconds": 120,
                 "episodeTimeoutSeconds": 900,
                 "networkAccess": False,

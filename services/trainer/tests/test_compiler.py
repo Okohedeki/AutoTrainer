@@ -53,7 +53,6 @@ def _task_manifest(
         },
         "limits": {
             "toolCalls": 20,
-            "tokenBudget": 2000,
             "commandTimeoutSeconds": 30,
             "episodeTimeoutSeconds": 300,
             "networkAccess": False,
@@ -279,7 +278,6 @@ class CompilerTests(unittest.TestCase):
                 },
                 "limits": {
                     "toolCalls": 20,
-                    "tokenBudget": 2000,
                     "commandTimeoutSeconds": 30,
                     "episodeTimeoutSeconds": 300,
                     "networkAccess": False,

@@ -85,10 +85,9 @@
     "limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["toolCalls", "tokenBudget", "commandTimeoutSeconds", "networkAccess"],
+      "required": ["toolCalls", "commandTimeoutSeconds", "networkAccess"],
       "properties": {
         "toolCalls": { "type": "integer", "minimum": 1 },
-        "tokenBudget": { "type": "integer", "minimum": 256 },
         "commandTimeoutSeconds": { "type": "integer", "minimum": 1 },
         "episodeTimeoutSeconds": { "type": "integer", "minimum": 1 },
         "networkAccess": { "const": false }

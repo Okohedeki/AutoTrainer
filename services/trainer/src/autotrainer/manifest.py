@@ -38,7 +38,6 @@ class TaskManifest:
     verifier_report_path: str | None
     reward_weights: dict[str, float]
     tool_call_limit: int
-    token_budget: int
     command_timeout_seconds: int
     episode_timeout_seconds: int
     network_access: bool
@@ -124,7 +123,6 @@ class TaskManifest:
             verifier_report_path=None,
             reward_weights=cls._weights(payload),
             tool_call_limit=int(limits["toolCalls"]),
-            token_budget=int(limits["tokenBudget"]),
             command_timeout_seconds=int(limits["commandTimeoutSeconds"]),
             episode_timeout_seconds=int(limits.get("episodeTimeoutSeconds", 900)),
             network_access=False,
@@ -154,7 +152,7 @@ class TaskManifest:
         }
         if not commands["build"] or not commands["tests"]:
             raise ManifestError("runtime.build and runtime.tests are required")
-        for key in ("toolCalls", "tokenBudget", "commandTimeoutSeconds", "episodeTimeoutSeconds"):
+        for key in ("toolCalls", "commandTimeoutSeconds", "episodeTimeoutSeconds"):
             value = limits.get(key)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ManifestError(f"limits.{key} must be a positive integer")
@@ -174,7 +172,6 @@ class TaskManifest:
             verifier_report_path=str(verifier["reportPath"]),
             reward_weights=cls._weights(payload),
             tool_call_limit=int(limits["toolCalls"]),
-            token_budget=int(limits["tokenBudget"]),
             command_timeout_seconds=int(limits["commandTimeoutSeconds"]),
             episode_timeout_seconds=int(limits["episodeTimeoutSeconds"]),
             network_access=False,

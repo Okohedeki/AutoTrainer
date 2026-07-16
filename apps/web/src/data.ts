@@ -222,7 +222,6 @@ export const environment = {
   tools: ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
   limits: [
     ["Tool calls", "40"],
-    ["Token budget", "12,000"],
     ["Command timeout", "120 seconds"],
     ["Episode timeout", "900 seconds"],
     ["Network", "Disabled"],

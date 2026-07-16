@@ -64,7 +64,6 @@ def _task(task_id: str, *, split: str = "evaluation") -> dict:
         },
         "limits": {
             "toolCalls": 20,
-            "tokenBudget": 2048,
             "commandTimeoutSeconds": 120,
             "episodeTimeoutSeconds": 900,
             "networkAccess": False,

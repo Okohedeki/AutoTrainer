@@ -128,7 +128,6 @@ def task_payload(source_id: str, commit: str, split: str = "train", task_id: str
         },
         "limits": {
             "toolCalls": 20,
-            "tokenBudget": 4096,
             "commandTimeoutSeconds": 60,
             "networkAccess": False,
         },

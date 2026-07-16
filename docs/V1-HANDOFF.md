@@ -158,7 +158,6 @@ These are important but should not block collecting the first honest V1 evidence
 
 - Load the published JSON Schema in the installed CLI as well as maintaining semantic Python validation.
 - Add a pinned Hugging Face/TRL trainer-construction smoke job; current CI does not install the multi-gigabyte CUDA training stack.
-- Enforce the manifest token budget directly in the model-agent loop; environment tool calls and wall-clock deadlines are already enforced.
 - Add a persistent/batched local model runner so a 9B model is loaded once per arm instead of once per trial.
 - Turn the read-only web preview into an artifact viewer for plans, trial completeness, reports, and packages.
 - Evolve that viewer into the primary local control surface for editing the same declarative configuration and starting, monitoring, or resuming jobs through the shared backend. Keep every operation reproducible from the CLI and never introduce GUI-only experiment state.

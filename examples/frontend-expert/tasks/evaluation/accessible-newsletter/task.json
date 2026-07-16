@@ -32,7 +32,6 @@
   },
   "limits": {
     "toolCalls": 40,
-    "tokenBudget": 12000,
     "commandTimeoutSeconds": 120,
     "episodeTimeoutSeconds": 900,
     "networkAccess": false

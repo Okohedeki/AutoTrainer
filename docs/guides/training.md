@@ -209,14 +209,14 @@ A successful optimizer run is not the product success criterion. The required mo
 - The immutable 9B reference declared for the benchmark.
 - The project model with the adapter produced by the configured QLoRA SFT and GRPO sequence.
 
-Use the same held-out tasks, model prompt template, tools, starting revisions, token budget, tool budget, generation settings, and verifier. The primary metric is verified task success; also retain build rate, task-test pass rate, regressions, accessibility, responsive checks, tokens per success, and wall time per success.
+Use the same held-out tasks, model prompt template, tools, starting revisions, completion limit, tool-call limit, generation settings, and verifier. The primary metric is verified task success; also retain build rate, task-test pass rate, regressions, accessibility, responsive checks, tokens per success, and wall time per success.
 
 The second proof runs:
 
 - Fable orchestrator with the base 9B.
 - The identical Fable orchestrator with that same trained candidate adapter.
 
-Both receive identical website briefs, context, tools, time limits, and token budgets. Blind reviewers compare whether the finished sites satisfy the brief and which is better. This final rendering/review step does not make the training pipeline multimodal.
+Both receive identical website briefs, context, tools, time limits, and completion limits. Blind reviewers compare whether the finished sites satisfy the brief and which is better. This final rendering/review step does not make the training pipeline multimodal.
 
 The CLI implements immutable evaluation planning, model-benchmark execution, external Fable request/result exchange, local result verification, blind-review import/export, reporting, and winner-gated packaging. `benchmark` is an alias for `evaluate` and accepts the same subcommands. Implementation alone is not evidence: the configured runners must be pinned, every planned trial must be completed, the model benchmark must satisfy its unique-task and confidence rules, the Fable review must satisfy its unique-task and completeness rules, and both decisions must report `verified_better`. The bundled placeholders and fixtures do not meet that bar. See the [V1 handoff plan](../V1-HANDOFF.md) for the remaining run work.
 
