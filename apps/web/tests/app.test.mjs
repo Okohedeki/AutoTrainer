@@ -113,7 +113,7 @@ test("training starts only after readiness and follows the real job record", asy
   const panel = await source("src/PreparePanel.tsx");
   const api = await source("src/api.ts");
   assert.match(api, /export type TrainingJob/);
-  assert.match(api, /status: "idle" \| "queued" \| "running" \| "completed" \| "failed"/);
+  assert.match(api, /status: "idle" \| "queued" \| "running" \| "completed" \| "failed" \| "interrupted"/);
   assert.match(api, /request\("\/api\/v1\/training", \{ signal \}\)/);
   assert.match(api, /request\("\/api\/v1\/training\/start", \{ method: "POST", body: "\{\}" \}\)/);
   assert.match(panel, /result\.status === "ready"/);
@@ -125,6 +125,9 @@ test("training starts only after readiness and follows the real job record", asy
   assert.match(panel, /Practicing against tests/);
   assert.match(panel, /trainingJob\.message/);
   assert.match(panel, /Training output ready/);
+  assert.match(panel, /trainingJob\?\.result\?\.stages/);
+  assert.match(panel, /Training was interrupted/);
+  assert.match(panel, /Train again/);
   assert.match(panel, /Retry training/);
   assert.doesNotMatch(panel, /type="range"|percentage|progress bar|view logs|learning rate|rank|alpha/i);
 });

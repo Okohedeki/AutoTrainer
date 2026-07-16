@@ -591,6 +591,13 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   line-height: 1.5;
 }
 
+.training-output {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
 .training-state {
   grid-template-columns: 22px minmax(0, 1fr) auto;
   padding: 12px;

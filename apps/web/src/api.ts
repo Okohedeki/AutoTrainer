@@ -95,10 +95,21 @@ export type HistoryWorkspace = {
 
 export type TrainingJob = {
   id: string | null;
-  status: "idle" | "queued" | "running" | "completed" | "failed";
+  status: "idle" | "queued" | "running" | "completed" | "failed" | "interrupted";
   recipe: "teach" | "practice" | "both" | null;
   stage: "prepare" | "sft" | "grpo" | null;
   message: string;
+  result: {
+    status: "completed";
+    recipe: "teach" | "practice" | "both";
+    stages: Array<{
+      status: "completed";
+      stage: "sft" | "grpo";
+      output_dir?: string;
+      metrics?: Record<string, number | boolean>;
+      trainable_adapter_parameters?: number;
+    }>;
+  } | null;
 };
 
 type ApiErrorBody = { error?: { code?: string; message?: string } };

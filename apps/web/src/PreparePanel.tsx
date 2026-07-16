@@ -113,6 +113,10 @@ export default function PreparePanel({ revision = 0 }: { revision?: number }) {
   const recipe = result ? recipeLabels[result.recipe] : null;
   const trainingActive = trainingJob?.status === "queued" || trainingJob?.status === "running";
   const showTrainingControl = result?.status === "ready" || Boolean(trainingJob && trainingJob.status !== "idle");
+  const outputDirectory = trainingJob?.result?.stages
+    .map((stage) => stage.output_dir)
+    .filter((value): value is string => Boolean(value))
+    .at(-1);
 
   return (
     <section className="panel setup-step prepare-panel" aria-labelledby="prepare-heading" data-tour="prepare">
@@ -180,14 +184,26 @@ export default function PreparePanel({ revision = 0 }: { revision?: number }) {
           {trainingJob?.status === "completed" && (
             <div className="training-state complete" role="status">
               <span aria-hidden="true">OK</span>
-              <div><strong>Training output ready</strong><p>{trainingJob.message || "Your trained model output is ready."}</p></div>
+              <div>
+                <strong>Training output ready</strong>
+                <p>{trainingJob.message || "Your trained model output is ready."}</p>
+                {outputDirectory && <code className="training-output">{outputDirectory}</code>}
+              </div>
+              {result?.status === "ready" && (
+                <button className="secondary-button" type="button" onClick={() => void start()} disabled={trainingBusy}>
+                  {trainingBusy ? "Starting..." : "Train again"}
+                </button>
+              )}
             </div>
           )}
 
-          {trainingJob?.status === "failed" && (
+          {(trainingJob?.status === "failed" || trainingJob?.status === "interrupted") && (
             <div className="training-state failed" role="alert">
               <span aria-hidden="true">!</span>
-              <div><strong>Training stopped</strong><p>{trainingJob.message}</p></div>
+              <div>
+                <strong>{trainingJob.status === "interrupted" ? "Training was interrupted" : "Training stopped"}</strong>
+                <p>{trainingJob.message}</p>
+              </div>
               {result?.status === "ready" && (
                 <button className="secondary-button" type="button" onClick={() => void start()} disabled={trainingBusy}>
                   {trainingBusy ? "Retrying..." : "Retry training"}
