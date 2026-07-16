@@ -13,6 +13,7 @@ from typing import Any
 from .config import ConfigError, load_config, project_config_mutation, write_config
 from .model_cache import inspect_model_cache, materialize_model
 from .models import MODEL_CATALOG, resolve_model
+from .project_gate import project_mutation_gate
 
 
 def list_models() -> dict[str, dict[str, Any]]:
@@ -46,17 +47,18 @@ def select_model(
     if not selected_revision:
         raise ConfigError("an explicit model revision is required")
 
-    with project_config_mutation(config_path):
-        # Selection owns only model fields. Re-read while holding the shared
-        # project lock so a simultaneous source edit is never replaced.
-        config = load_config(config_path)
-        model = config.data["model"]
-        model["id"] = resolved["id"]
-        model["revision"] = selected_revision
-        model["loader"] = resolved["loader"]
-        if cache_dir is not None:
-            model["cache_dir"] = cache_dir
-        write_config(config.path, config.data, overwrite=True)
+    with project_mutation_gate(config_path):
+        with project_config_mutation(config_path):
+            # Selection owns only model fields. Re-read while holding the
+            # config lock so unrelated simultaneous edits are never replaced.
+            config = load_config(config_path)
+            model = config.data["model"]
+            model["id"] = resolved["id"]
+            model["revision"] = selected_revision
+            model["loader"] = resolved["loader"]
+            if cache_dir is not None:
+                model["cache_dir"] = cache_dir
+            write_config(config.path, config.data, overwrite=True)
     return {
         "model": dict(model),
         "catalog_key": model_name if model_name in MODEL_CATALOG else None,

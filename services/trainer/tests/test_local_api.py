@@ -15,6 +15,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.local_api import create_local_api_server  # noqa: E402
+from autotrainer.project_gate import project_run_gate  # noqa: E402
 
 
 class LocalApiTests(unittest.TestCase):
@@ -167,6 +168,13 @@ class LocalApiTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(result, prepared)
+
+    def test_active_training_returns_a_project_busy_conflict(self) -> None:
+        with project_run_gate(self.config_path):
+            status, result = self.request("POST", "/api/v1/prepare", {})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(result["error"]["code"], "project_busy")
 
     def test_training_endpoints_use_the_server_owned_single_job_manager(self) -> None:
         status, idle = self.request("GET", "/api/v1/training")

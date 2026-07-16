@@ -30,6 +30,7 @@ from .model_service import (
     select_model,
 )
 from .project_service import prepare_project
+from .project_gate import ProjectBusyError
 from .source_service import add_source, list_sources, remove_source
 from .training_service import TrainingJobManager
 
@@ -108,6 +109,11 @@ class LocalApiHandler(BaseHTTPRequestHandler):
     def _handle(self, operation: Any) -> None:
         try:
             operation()
+        except ProjectBusyError as error:
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {"error": {"code": "project_busy", "message": str(error)}},
+            )
         except (ConfigError, ValueError) as error:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,

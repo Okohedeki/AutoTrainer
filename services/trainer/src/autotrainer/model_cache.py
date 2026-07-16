@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from .config import ConfigError, load_config, project_config_mutation, write_config
 from .locking import _resolve_huggingface_revision
+from .project_gate import project_mutation_gate
 
 
 IMMUTABLE_REVISION = re.compile(r"^[0-9a-fA-F]{40,64}$")
@@ -161,7 +162,7 @@ def inspect_model_cache(config_path: str | Path) -> dict[str, Any]:
     return result
 
 
-def materialize_model(config_path: str | Path) -> dict[str, Any]:
+def _materialize_model_owned(config_path: str | Path) -> dict[str, Any]:
     """Download one immutable model snapshot and update YAML after success."""
 
     config = load_config(config_path)
@@ -197,9 +198,8 @@ def materialize_model(config_path: str | Path) -> dict[str, Any]:
 
     file_count, logical_bytes = _snapshot_size(snapshot)
     with project_config_mutation(config.path):
-        # The download may take hours, so never commit the stale mapping read
-        # before it began. Re-read and patch only our revision, preserving
-        # sources (and every other setting) changed while blobs downloaded.
+        # Re-read even though the project lease is held. This keeps the commit
+        # merge-safe with direct callers using the lower-level config helper.
         current = load_config(config.path)
         current_model = current.data["model"]
         current_id = str(current_model.get("id", "")).strip()
@@ -237,6 +237,13 @@ def materialize_model(config_path: str | Path) -> dict[str, Any]:
         **receipt,
         "receipt": str(receipt_path),
     }
+
+
+def materialize_model(config_path: str | Path) -> dict[str, Any]:
+    """Hold the project lease for the complete model download and commit."""
+
+    with project_mutation_gate(config_path):
+        return _materialize_model_owned(config_path)
 
 
 def require_materialized_model(model: Mapping[str, Any]) -> None:

@@ -11,6 +11,7 @@ from .history import (
     retire_stale_history_reviews,
     review_history,
 )
+from .project_gate import project_mutation_gate
 from .project_service import read_project_config
 
 
@@ -62,24 +63,26 @@ def review_history_candidate(
 ) -> dict[str, Any]:
     """Persist one decision and return the refreshed shared review queue."""
 
-    config = read_project_config(config_path)
-    result = review_history(
-        config.data,
-        config.root,
-        candidate_id=candidate_id,
-        decision=decision,
-        instruction=instruction,
-        rights_confirmed=rights_confirmed,
-    )
-    return _workspace(result["history"])
+    with project_mutation_gate(config_path):
+        config = read_project_config(config_path)
+        result = review_history(
+            config.data,
+            config.root,
+            candidate_id=candidate_id,
+            decision=decision,
+            instruction=instruction,
+            rights_confirmed=rights_confirmed,
+        )
+        return _workspace(result["history"])
 
 
 def retire_stale_reviews(config_path: str | Path) -> dict[str, Any]:
     """Remove stale training authority only after an explicit user action."""
 
-    config = read_project_config(config_path)
-    result = retire_stale_history_reviews(config.data, config.root)
-    return _workspace(result["history"])
+    with project_mutation_gate(config_path):
+        config = read_project_config(config_path)
+        result = retire_stale_history_reviews(config.data, config.root)
+        return _workspace(result["history"])
 
 
 __all__ = [

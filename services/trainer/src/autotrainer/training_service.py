@@ -20,6 +20,12 @@ from uuid import uuid4
 from .config import ConfigError
 from .model_cache import ModelCacheError
 from .project_service import prepare_project, read_project_config
+from .project_gate import (
+    ProjectLease,
+    acquire_project_lease,
+    project_is_busy,
+    project_run_gate,
+)
 from .training import run_grpo, run_sft
 from .training.common import (
     TrainingConfigurationError,
@@ -57,7 +63,7 @@ def _notify(callback: ProgressCallback | None, stage: str, message: str) -> None
         callback(stage, message)
 
 
-def run_project_training(
+def _run_project_training_owned(
     config_path: str | Path,
     *,
     on_progress: ProgressCallback | None = None,
@@ -110,6 +116,17 @@ def run_project_training(
         "recipe": recipe,
         "stages": stages,
     }
+
+
+def run_project_training(
+    config_path: str | Path,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Hold the project snapshot stable from Prepare through every stage."""
+
+    with project_run_gate(config_path):
+        return _run_project_training_owned(config_path, on_progress=on_progress)
 
 
 def _public_error(error: BaseException) -> str:
@@ -277,7 +294,9 @@ class TrainingJobManager:
         self._record_path = config.artifact_dir / "training" / "current-job.json"
         self._worker: Thread | None = None
         self._job = _read_job_record(self._record_path) or _idle_job()
-        if self._job["status"] in _LIVE_JOB_STATUSES:
+        if self._job["status"] in _LIVE_JOB_STATUSES and not project_is_busy(
+            self._config_path
+        ):
             # A fresh Python process cannot own the thread recorded by the old
             # process. Calling it interrupted is honest and permits an explicit retry.
             self._job.update(
@@ -310,6 +329,10 @@ class TrainingJobManager:
         with self._lock:
             if self._job["status"] in _LIVE_JOB_STATUSES:
                 raise TrainingServiceError("A training job is already running.")
+            # Reserve the cross-process lease before exposing `queued`. This
+            # closes the short API window in which a setup request could have
+            # changed YAML before the worker thread reached Prepare.
+            lease = acquire_project_lease(self._config_path)
             job_id = uuid4().hex
             self._job = {
                 "id": job_id,
@@ -319,14 +342,18 @@ class TrainingJobManager:
                 "message": "Training is queued.",
                 "result": None,
             }
-            _write_job_record(self._record_path, self._job)
+            try:
+                _write_job_record(self._record_path, self._job)
+            except Exception:
+                lease.release()
+                raise
 
             # The API remains responsive while the single worker owns model
             # loading and the GPU. A non-daemon thread lets server shutdown wait
             # for the active adapter write instead of abandoning it mid-file.
             worker = Thread(
                 target=self._run,
-                args=(job_id,),
+                args=(job_id, lease),
                 name=f"autotrainer-{job_id[:8]}",
                 daemon=False,
             )
@@ -340,10 +367,11 @@ class TrainingJobManager:
                 )
                 _write_job_record(self._record_path, self._job)
                 self._worker = None
+                lease.release()
                 raise TrainingServiceError(self._job["message"]) from error
         return self.snapshot()
 
-    def _run(self, job_id: str) -> None:
+    def _run(self, job_id: str, lease: ProjectLease) -> None:
         def progress(stage: str, message: str) -> None:
             self._update(
                 job_id,
@@ -353,24 +381,34 @@ class TrainingJobManager:
             )
 
         try:
-            result = run_project_training(self._config_path, on_progress=progress)
-            recipe = str(result["recipe"])
-            last_stage = "grpo" if recipe in {"practice", "both"} else "sft"
-            self._update(
-                job_id,
-                status="completed",
-                recipe=recipe,
-                stage=last_stage,
-                message="Training completed. The adapter is ready.",
-                result=_sanitize_result(result),
-            )
-        except Exception as error:  # worker boundary must always reach a terminal state
-            self._update(
-                job_id,
-                status="failed",
-                message=_redact_secrets(_public_error(error), limit=1000),
-                result=None,
-            )
+            # The request thread reserved this lease before queueing. Context
+            # activation transfers the narrow Prepare bypass to this worker.
+            with lease.activate("run"):
+                try:
+                    result = run_project_training(
+                        self._config_path, on_progress=progress
+                    )
+                    recipe = str(result["recipe"])
+                    last_stage = (
+                        "grpo" if recipe in {"practice", "both"} else "sft"
+                    )
+                    self._update(
+                        job_id,
+                        status="completed",
+                        recipe=recipe,
+                        stage=last_stage,
+                        message="Training completed. The adapter is ready.",
+                        result=_sanitize_result(result),
+                    )
+                except Exception as error:  # worker boundary reaches a terminal state
+                    self._update(
+                        job_id,
+                        status="failed",
+                        message=_redact_secrets(_public_error(error), limit=1000),
+                        result=None,
+                    )
+        finally:
+            lease.release()
 
     def close(self) -> None:
         """Wait for this manager's non-daemon worker during backend shutdown."""

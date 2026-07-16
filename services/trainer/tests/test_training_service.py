@@ -15,8 +15,10 @@ from unittest.mock import patch
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
-from autotrainer.config import default_config, write_config  # noqa: E402
+from autotrainer.config import default_config, load_config, write_config  # noqa: E402
 from autotrainer.cli import main  # noqa: E402
+from autotrainer.model_service import select_model  # noqa: E402
+from autotrainer.project_gate import ProjectBusyError  # noqa: E402
 from autotrainer.training_service import (  # noqa: E402
     TrainingJobManager,
     TrainingServiceError,
@@ -114,6 +116,30 @@ class TrainingServiceTests(unittest.TestCase):
         run_sft.assert_not_called()
         run_grpo.assert_not_called()
 
+    def test_stage_rereads_the_configuration_after_prepare(self) -> None:
+        """Stage selection uses the snapshot Prepare just finished producing."""
+
+        prepared_rate = 0.000321
+
+        def prepare(path: Path) -> dict[str, object]:
+            config = load_config(path)
+            config.data["sft"]["learning_rate"] = prepared_rate
+            write_config(config.path, config.data, overwrite=True)
+            return _prepared("teach")
+
+        with (
+            patch("autotrainer.training_service.prepare_project", side_effect=prepare),
+            patch(
+                "autotrainer.training_service.run_sft",
+                return_value={"stage": "sft"},
+            ) as run_sft,
+        ):
+            run_project_training(self.config_path)
+
+        self.assertEqual(
+            run_sft.call_args.args[0]["sft"]["learning_rate"], prepared_rate
+        )
+
     def test_job_manager_serializes_jobs_and_reaches_completion(self) -> None:
         manager = TrainingJobManager(self.config_path)
         secret = "hf_this_must_never_reach_the_job_record"
@@ -176,6 +202,33 @@ class TrainingServiceTests(unittest.TestCase):
         # the output as the old in-memory-only manager did.
         restored = TrainingJobManager(self.config_path)
         self.assertEqual(restored.snapshot(), completed)
+
+    def test_queued_job_reserves_project_before_worker_execution(self) -> None:
+        """The API cannot expose a mutable queued window before its worker."""
+
+        leases: list[object] = []
+
+        class DeferredThread:
+            daemon = False
+
+            def __init__(self, *, args: tuple[object, ...], **_values: object) -> None:
+                leases.append(args[1])
+
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+        manager = TrainingJobManager(self.config_path)
+        with patch("autotrainer.training_service.Thread", DeferredThread):
+            queued = manager.start()
+        try:
+            self.assertEqual(queued["status"], "queued")
+            with self.assertRaisesRegex(ProjectBusyError, "project is busy"):
+                select_model(self.config_path, "qwen3.5-9b-text")
+        finally:
+            leases[0].release()  # type: ignore[attr-defined]
 
     def test_live_saved_job_becomes_interrupted_and_a_retry_can_start(self) -> None:
         record_path = self.root / ".autotrainer" / "training" / "current-job.json"

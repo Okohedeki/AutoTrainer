@@ -25,6 +25,7 @@ from .config import (
     validate_mapping,
     write_config,
 )
+from .project_gate import project_mutation_gate
 from .sources import materialize_repository
 
 
@@ -334,7 +335,7 @@ def list_sources(config_path: str | Path) -> list[dict[str, Any]]:
     return [_serialize_source(config, source) for source in config.sources]
 
 
-def add_source(
+def _add_source_owned(
     config_path: str | Path,
     value: str,
     *,
@@ -415,7 +416,7 @@ def add_source(
         return {"source": serialized, "sources": [_serialize_source(refreshed, source) for source in refreshed.sources]}
 
 
-def remove_source(config_path: str | Path, source_id: str) -> dict[str, Any]:
+def _remove_source_owned(config_path: str | Path, source_id: str) -> dict[str, Any]:
     """Remove a declaration and only clean up clones managed by AutoTrainer."""
 
     requested_id = str(source_id).strip()
@@ -441,6 +442,39 @@ def remove_source(config_path: str | Path, source_id: str) -> dict[str, Any]:
                 shutil.rmtree(resolved)
         refreshed = load_config(config.path)
         return {"removed": removed, "sources": [_serialize_source(refreshed, item) for item in refreshed.sources]}
+
+
+def add_source(
+    config_path: str | Path,
+    value: str,
+    *,
+    name: str | None = None,
+    kind: str | None = None,
+    partition: str | None = None,
+    roles: Sequence[str] | None = None,
+    revision: str | None = None,
+    license_spdx: str | None = None,
+) -> dict[str, Any]:
+    """Add one source only while no training snapshot is active."""
+
+    with project_mutation_gate(config_path):
+        return _add_source_owned(
+            config_path,
+            value,
+            name=name,
+            kind=kind,
+            partition=partition,
+            roles=roles,
+            revision=revision,
+            license_spdx=license_spdx,
+        )
+
+
+def remove_source(config_path: str | Path, source_id: str) -> dict[str, Any]:
+    """Remove one source only while no training snapshot is active."""
+
+    with project_mutation_gate(config_path):
+        return _remove_source_owned(config_path, source_id)
 
 
 __all__ = ["add_source", "list_sources", "remove_source"]

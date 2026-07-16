@@ -21,6 +21,7 @@ from .config import ConfigError, ProjectConfig, validate_mapping
 from .doctor import run_doctor
 from .model_cache import ModelCacheError, require_materialized_model
 from .planner import build_plan
+from .project_gate import project_prepare_gate
 from .sources import scan_sources
 from .training import resolve_grpo_recipe, resolve_sft_recipe
 from .training.common import TrainingConfigurationError, import_factory
@@ -282,7 +283,7 @@ def _step(step_id: str, status: str) -> dict[str, str]:
     return {"id": step_id, "label": STEP_LABELS[step_id], "status": status}
 
 
-def prepare_project(config_path: str | Path) -> dict[str, Any]:
+def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
     """Prepare deterministic training inputs and return one actionable blocker."""
 
     config = _read_project(config_path)
@@ -450,6 +451,13 @@ def prepare_project(config_path: str | Path) -> dict[str, Any]:
             "doctor": doctor,
         },
     }
+
+
+def prepare_project(config_path: str | Path) -> dict[str, Any]:
+    """Prepare while excluding a training run or another mutating operation."""
+
+    with project_prepare_gate(config_path):
+        return _prepare_project_owned(config_path)
 
 
 __all__ = ["prepare_project", "read_project_config"]

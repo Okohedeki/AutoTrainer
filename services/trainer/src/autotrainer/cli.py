@@ -313,29 +313,39 @@ def _run_source(arguments: argparse.Namespace) -> int:
         _emit(remove_source(arguments.config, arguments.source_id), as_json=arguments.json)
         return 0
 
-    config = load_config(arguments.config)
     if arguments.source_command == "materialize":
+        from .project_gate import project_mutation_gate
         from .sources import materialize_repository
 
-        result = materialize_repository(
-            config.data,
-            config.root,
-            arguments.source_id,
-            destination=arguments.destination,
-        )
-        if not arguments.no_update:
-            for index, source in enumerate(config.data["sources"]):
-                if source.get("id") == arguments.source_id:
-                    config.data["sources"][index] = result["updated_source"]
-                    break
-            _save_loaded(config)
-        result["config_updated"] = not arguments.no_update
+        with project_mutation_gate(arguments.config):
+            config = load_config(arguments.config)
+            result = materialize_repository(
+                config.data,
+                config.root,
+                arguments.source_id,
+                destination=arguments.destination,
+            )
+            if not arguments.no_update:
+                for index, source in enumerate(config.data["sources"]):
+                    if source.get("id") == arguments.source_id:
+                        config.data["sources"][index] = result["updated_source"]
+                        break
+                _save_loaded(config)
+            result["config_updated"] = not arguments.no_update
         _emit(result, as_json=arguments.json)
         return 0
 
     from .sources import scan_sources
 
-    scan = scan_sources(config.data, config.root, write=arguments.write)
+    if arguments.write:
+        from .project_gate import project_mutation_gate
+
+        with project_mutation_gate(arguments.config):
+            config = load_config(arguments.config)
+            scan = scan_sources(config.data, config.root, write=True)
+    else:
+        config = load_config(arguments.config)
+        scan = scan_sources(config.data, config.root, write=False)
     _emit(scan, as_json=arguments.json)
     return 0 if not scan.get("errors") else 3
 
@@ -413,7 +423,7 @@ def _run_prepare(arguments: argparse.Namespace) -> int:
     return 0 if result["status"] == "ready" else 3
 
 
-def _run_compile(arguments: argparse.Namespace) -> int:
+def _run_compile_owned(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     from .compiler import compile_data, invalidate_compile_provenance
     from .sources import scan_sources
@@ -430,7 +440,14 @@ def _run_compile(arguments: argparse.Namespace) -> int:
     return 0 if not scan.get("errors") and not compiled.get("errors") else 3
 
 
-def _run_lock(arguments: argparse.Namespace) -> int:
+def _run_compile(arguments: argparse.Namespace) -> int:
+    from .project_gate import project_mutation_gate
+
+    with project_mutation_gate(arguments.config):
+        return _run_compile_owned(arguments)
+
+
+def _run_lock_owned(arguments: argparse.Namespace) -> int:
     from .locking import build_lock, write_lock
     from .sources import scan_sources
 
@@ -445,9 +462,23 @@ def _run_lock(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_lock(arguments: argparse.Namespace) -> int:
+    from .project_gate import project_mutation_gate
+
+    with project_mutation_gate(arguments.config):
+        return _run_lock_owned(arguments)
+
+
 def _run_plan(arguments: argparse.Namespace) -> int:
-    config = load_config(arguments.config)
-    plan = _scan_and_plan(config, write=arguments.write)
+    if arguments.write:
+        from .project_gate import project_mutation_gate
+
+        with project_mutation_gate(arguments.config):
+            config = load_config(arguments.config)
+            plan = _scan_and_plan(config, write=True)
+    else:
+        config = load_config(arguments.config)
+        plan = _scan_and_plan(config, write=False)
     _emit(plan, as_json=arguments.json)
     return 0 if not plan.get("errors") else 3
 
