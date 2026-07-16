@@ -177,7 +177,7 @@ grpo:
   dataset: ./.autotrainer/compiled/rl/train.jsonl
   # Optional training-loop validation; never point this at evaluation.dataset.
   # eval_dataset: ./data/rl-validation.jsonl
-  sft_adapter: ./.autotrainer/runs/sft
+  start_from: ./.autotrainer/runs/sft
   output_dir: ./.autotrainer/runs/grpo
   max_steps: 500
   per_device_train_batch_size: 1
@@ -199,7 +199,12 @@ grpo:
   seed: 42
 ```
 
-`sft_adapter` must resolve to a completed PEFT adapter containing adapter configuration and weights. `train rl` loads it as trainable and continues updating it; starting GRPO from an uninitialized adapter is rejected.
+`start_from` is either `base` for a practice-only fresh QLoRA adapter, or a
+completed PEFT adapter containing adapter configuration and weights. In a
+combined path it must equal `sft.output_dir`. `train auto` selects the correct
+value in memory from the compiled learning signal; a manual `train rl` run uses
+the value declared here. The legacy `sft_adapter` key remains readable for older
+projects.
 
 `num_generations` controls the candidates compared for each prompt. The V1 defaults use two and disable vLLM to keep the policy trainer and rollout path within the single-GPU boundary. `loss_type: dapo` is the selected loss variant. `beta: 0.0` disables the explicit reference-model KL term in the initial memory-conscious recipe; that is a deliberate experiment choice and must be recorded.
 

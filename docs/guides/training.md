@@ -68,11 +68,17 @@ evaluation:
 
 Compilation is the boundary where source paths and mutable revisions become locked provenance. It also prevents a trainer from silently sweeping every file in a repository into a dataset. `evaluation.dataset` contains held-out task-pack records for the final two-suite proof. `grpo.eval_dataset` is optional trainer feedback and must be a different file; do not let final benchmark tasks affect optimization or checkpoint selection.
 
-Inspect the JSONL before training. Each SFT line must contain text-only conversational `messages`, or conversational `prompt` and `completion`. Each GRPO or evaluation-task line contains a conversational `prompt`, `task_id`, the validated manifest, resolved source path/revision, and sandbox settings.
+Inspect the JSONL before training. SFT source files may use a complete
+`messages` conversation or prompt/completion text, but compilation normalizes
+every trainer row to conversational `prompt` and `completion` message lists.
+Each GRPO or evaluation-task line contains a conversational `prompt`,
+`task_id`, the validated manifest, resolved source path/revision, and sandbox
+settings.
 
 ## QLoRA supervised tuning
 
-Run:
+The normal GUI/agent path selects this stage through `train auto`. To run only
+the supervised stage for a controlled experiment:
 
 ```bash
 autotrainer train sft --config autotrainer.yaml
@@ -106,18 +112,23 @@ SFT is a warm start, not the final proof. Its purpose is to make useful behavior
 
 ### SFT output
 
-The selected SFT checkpoint must contain standard PEFT artifacts, including `adapter_config.json` and adapter weights. Update `grpo.sft_adapter` to that directory:
+The selected SFT checkpoint contains standard PEFT artifacts, including
+`adapter_config.json` and adapter weights. `train auto` wires the SFT output to
+the following GRPO stage without rewriting YAML. For a manual `train rl` run,
+point `grpo.start_from` at that adapter:
 
 ```yaml
 grpo:
-  sft_adapter: ./.autotrainer/runs/sft
+  start_from: ./.autotrainer/runs/sft
 ```
 
 The reference runner saves the final SFT adapter at `sft.output_dir`. Retain periodic checkpoints, select the adapter under test explicitly in `evaluation.arms`, and record why it was chosen; V1 evaluation does not search training checkpoints automatically.
 
 ## GRPO reinforcement learning
 
-Validate the adapter and environment again, then run:
+The normal GUI/agent path selects this stage through `train auto`. To run only
+the practice stage for a controlled experiment, validate the adapter and
+environment again, then run:
 
 ```bash
 autotrainer validate --config autotrainer.yaml
