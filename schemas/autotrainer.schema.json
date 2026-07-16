@@ -46,6 +46,7 @@
         "provider": { "const": "huggingface" },
         "id": { "type": "string", "minLength": 3 },
         "revision": { "type": "string", "minLength": 1 },
+        "cache_dir": { "$ref": "#/$defs/path" },
         "loader": { "enum": ["qwen3_5_text", "auto_text_causal_lm"] },
         "trust_remote_code": { "const": false },
         "dtype": { "const": "bfloat16" },

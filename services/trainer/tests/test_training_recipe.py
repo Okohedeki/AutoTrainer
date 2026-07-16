@@ -107,6 +107,20 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(
             result["recipe"]["sft"]["dataset"]["path"], str(self.sft_dataset)
         )
+        self.assertTrue(result["recipe"]["model"]["local_files_only"])
+        self.assertEqual(
+            result["recipe"]["model"]["cache_dir"],
+            str((self.project_root / ".autotrainer" / "model-cache").resolve()),
+        )
+
+    def test_real_sft_rejects_mutable_model_before_dependency_imports(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "immutable downloaded"):
+            run_sft(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/sft-output"),
+                dry_run=False,
+            )
 
     def test_grpo_dry_run_requires_and_records_same_sft_adapter(self) -> None:
         result = run_grpo(

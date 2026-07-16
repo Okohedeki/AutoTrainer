@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..model_cache import require_materialized_model
 from .common import (
     SUPPORTED_MODEL_CLASS,
     TrainingConfigurationError,
@@ -221,6 +222,7 @@ def run_grpo(
     if dry_run:
         return {"status": "dry_run", "dry_run": True, "recipe": recipe}
 
+    require_materialized_model(recipe["model"])
     installed_versions = validate_reference_dependencies()
 
     # Heavy imports stay behind static validation and dry-run handling.
@@ -250,6 +252,8 @@ def run_grpo(
         tokenizer = AutoTokenizer.from_pretrained(
             model_recipe["id"],
             revision=model_recipe["revision"],
+            cache_dir=model_recipe["cache_dir"],
+            local_files_only=True,
             trust_remote_code=False,
         )
         patched_template = get_training_chat_template(processing_class=tokenizer)
@@ -270,6 +274,8 @@ def run_grpo(
         base_model = AutoModelForCausalLM.from_pretrained(
             model_recipe["id"],
             revision=model_recipe["revision"],
+            cache_dir=model_recipe["cache_dir"],
+            local_files_only=True,
             dtype=torch.bfloat16,
             quantization_config=quantization_config,
             device_map={"": 0},

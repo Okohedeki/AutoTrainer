@@ -59,9 +59,20 @@ def build_parser() -> argparse.ArgumentParser:
     model_sub = model.add_subparsers(dest="model_command", required=True)
     model_show = model_sub.add_parser("show")
     _config_argument(model_show)
+    model_status = model_sub.add_parser("status", help="inspect the exact offline model snapshot")
+    _config_argument(model_status)
+    model_download = model_sub.add_parser(
+        "download", help="resolve, download, and record the configured model snapshot"
+    )
+    _config_argument(model_download)
     model_use = model_sub.add_parser("use")
     model_use.add_argument("model")
     model_use.add_argument("--revision", required=True)
+    model_use.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Hugging Face cache path used by both download and training",
+    )
     _config_argument(model_use)
 
     source = subparsers.add_parser("source", help="declare and inspect repositories or datasets")
@@ -195,7 +206,7 @@ def _run_init(arguments: argparse.Namespace) -> int:
 
 def _run_models(arguments: argparse.Namespace) -> int:
     if arguments.models_command == "list":
-        payload = {alias: details["id"] for alias, details in MODEL_CATALOG.items()}
+        payload = {alias: dict(details) for alias, details in MODEL_CATALOG.items()}
     else:
         payload = resolve_model(arguments.model)
     _emit(payload, as_json=arguments.json)
@@ -207,11 +218,23 @@ def _run_model(arguments: argparse.Namespace) -> int:
     if arguments.model_command == "show":
         _emit(dict(config.model), as_json=arguments.json)
         return 0
+    if arguments.model_command == "status":
+        from .model_cache import inspect_model_cache
+
+        _emit(inspect_model_cache(config.path), as_json=arguments.json)
+        return 0
+    if arguments.model_command == "download":
+        from .model_cache import materialize_model
+
+        _emit(materialize_model(config.path), as_json=arguments.json)
+        return 0
     resolved = resolve_model(arguments.model)
     model = config.data["model"]
     model["id"] = resolved["id"]
     model["revision"] = arguments.revision
     model["loader"] = resolved["loader"]
+    if arguments.cache_dir is not None:
+        model["cache_dir"] = arguments.cache_dir
     _save_loaded(config)
     _emit({"model": model["id"], "revision": model["revision"], "loader": model["loader"]}, as_json=arguments.json)
     return 0

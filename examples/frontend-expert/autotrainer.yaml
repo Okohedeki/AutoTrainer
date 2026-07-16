@@ -11,6 +11,9 @@ model:
   provider: huggingface
   id: Qwen/Qwen3.5-9B
   revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  # Keep the large Hub snapshot on the project drive and in the same runtime
+  # environment used for training. The GUI exposes this path explicitly.
+  cache_dir: ./.autotrainer/model-cache
   loader: qwen3_5_text
   trust_remote_code: false
   dtype: bfloat16

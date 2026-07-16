@@ -303,6 +303,19 @@ def base_recipe(
     root = resolve_project_root(project_root)
     destination = resolve_output_dir(output_dir, root)
     model, warnings = resolve_model_recipe(config)
+    model_section = get_section(config, "model")
+    cache_value = string_value(
+        model_section,
+        "cache_dir",
+        ".autotrainer/model-cache",
+        "model",
+    )
+    cache_dir = Path(cache_value).expanduser()
+    if not cache_dir.is_absolute():
+        cache_dir = root / cache_dir
+    model["cache_dir"] = str(cache_dir.resolve())
+    # Real runs are explicitly offline after the separate materialization step.
+    model["local_files_only"] = True
     return {
         "schema_version": SUPPORTED_SCHEMA_VERSION,
         "project_root": str(root),

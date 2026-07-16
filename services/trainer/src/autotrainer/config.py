@@ -576,6 +576,7 @@ def default_config(
             "provider": "huggingface",
             "id": model_id,
             "revision": revision,
+            "cache_dir": ".autotrainer/model-cache",
             "loader": "qwen3_5_text" if model_id == "Qwen/Qwen3.5-9B" else "auto_text_causal_lm",
             "trust_remote_code": False,
             "dtype": "bfloat16",
