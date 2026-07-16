@@ -178,6 +178,17 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["title"], "Fix the training recipe")
         self.assertIn("generation batch", result["next_action"]["detail"])
 
+    def test_combined_recipe_rejects_shared_sft_and_grpo_output(self) -> None:
+        payload = default_config()
+        payload["grpo"]["output_dir"] = payload["sft"]["output_dir"]
+        write_config(self.config_path, payload, overwrite=True)
+
+        result = self.prepare_with(1, 1)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["next_action"]["title"], "Fix the training recipe")
+        self.assertIn("must differ", result["next_action"]["detail"])
+
     def test_evaluation_only_validation_and_plan_work_are_deferred(self) -> None:
         payload = default_config()
         payload["evaluation"]["task_pack"] = ""

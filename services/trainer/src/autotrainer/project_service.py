@@ -23,7 +23,7 @@ from .model_cache import ModelCacheError, require_materialized_model
 from .planner import build_plan
 from .sources import scan_sources
 from .training import resolve_grpo_recipe, resolve_sft_recipe
-from .training.common import import_factory
+from .training.common import TrainingConfigurationError, import_factory
 from .training.selection import select_stage_config
 
 
@@ -224,6 +224,15 @@ def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str,
         if recipe in {"practice", "both"}:
             grpo_config = selected
             if recipe == "both":
+                sft_output = config.resolve_path(str(selected["sft"]["output_dir"]))
+                grpo_output = config.resolve_path(str(selected["grpo"]["output_dir"]))
+                if sft_output == grpo_output:
+                    # The base-policy projection below cannot exercise the real
+                    # adapter/output collision guard. Check it explicitly so
+                    # Prepare never approves a run that would overwrite SFT.
+                    raise TrainingConfigurationError(
+                        "grpo.output_dir must differ from sft.output_dir in a combined run"
+                    )
                 # The real GRPO resolver normally verifies an existing input
                 # adapter. During Prepare that adapter is intentionally absent:
                 # SFT creates it in stage one. A base-policy projection exercises
@@ -239,8 +248,8 @@ def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str,
             )
             if recipe == "both":
                 resolved_grpo["preflight_start_from"] = {
-                    "type": "sft_output_created_during_run",
-                    "path": str(config.resolve_path(str(selected["sft"]["output_dir"]))),
+                        "type": "sft_output_created_during_run",
+                        "path": str(sft_output),
                 }
             # Importing only the declared factory catches a misspelled module or
             # callable before model loading. The factory is not instantiated.
