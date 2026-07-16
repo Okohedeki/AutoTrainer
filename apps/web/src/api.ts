@@ -55,6 +55,19 @@ export type ProjectSource = {
   status: "ready";
 };
 
+export type PreparationResult = {
+  status: "ready" | "blocked";
+  recipe: "teach" | "practice" | "both" | "needs_training_data";
+  summary: string;
+  next_action: { title: string; detail: string } | null;
+  steps: Array<{
+    id: "validate" | "sources" | "compile" | "runtime";
+    label: string;
+    status: "complete" | "blocked" | "waiting";
+  }>;
+  details: Record<string, unknown>;
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -119,4 +132,8 @@ export async function removeProjectSource(id: string): Promise<ProjectSource[]> 
     method: "DELETE",
   });
   return result.sources;
+}
+
+export async function prepareProject(): Promise<PreparationResult> {
+  return request("/api/v1/prepare", { method: "POST", body: "{}" });
 }

@@ -34,7 +34,7 @@ export default function SourceSetupPanel() {
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
         setConnected(false);
-        setError(reason instanceof Error ? reason.message : "Local backend is not connected.");
+        setError(reason instanceof Error ? reason.message : "AutoTrainer is not connected.");
       });
     return () => controller.abort();
   }, []);
@@ -68,17 +68,17 @@ export default function SourceSetupPanel() {
   };
 
   return (
-    <section className="panel source-setup" aria-labelledby="source-setup-heading" data-tour="sources">
-      <div className="panel-header source-setup-header">
+    <section className="panel setup-step source-setup" aria-labelledby="source-setup-heading" data-tour="sources">
+      <header className="step-heading source-setup-header">
+        <span className="step-number" aria-hidden="true">2</span>
         <div>
-          <p className="panel-kicker">Your work</p>
-          <h2 id="source-setup-heading">Add a GitHub repo or local path</h2>
-          <p>Paste it once. AutoTrainer detects the source, pins it, and keeps the setup reproducible.</p>
+          <h2 id="source-setup-heading">Add your work</h2>
+          <p>Paste a GitHub repository or a local path. AutoTrainer identifies what you added.</p>
         </div>
         <span className={`status-chip ${connected === false ? "danger" : sources.length ? "good" : "muted"}`}>
           {connected === false ? "Backend offline" : `${sources.length} added`}
         </span>
-      </div>
+      </header>
 
       <form
         className="source-entry"
@@ -135,7 +135,7 @@ export default function SourceSetupPanel() {
         </div>
       ) : null}
 
-      <p className="source-truth">A repository shows AutoTrainer your code. Accepted examples and executable tasks provide the learning signal.</p>
+      <p className="source-truth">Repositories show your patterns. Accepted examples and testable tasks teach the model what good work looks like.</p>
     </section>
   );
 }

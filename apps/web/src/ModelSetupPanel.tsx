@@ -7,23 +7,26 @@ import {
   type ModelCacheState,
   type ModelWorkspace,
 } from "./api";
-import { projectSnapshot, type StatusTone } from "./data";
-
 
 type ActionState = "idle" | "saving" | "downloading";
+type StatusTone = "good" | "warning" | "danger" | "muted";
 
-function cacheLabel(cache: ModelCacheState | null): { label: string; tone: StatusTone } {
+const DEFAULT_MODEL = "qwen3.5-9b-text";
+const DEFAULT_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a";
+
+function cacheLabel(cache: ModelCacheState | null, selectionChanged: boolean): { label: string; tone: StatusTone } {
+  if (selectionChanged) return { label: "Not downloaded", tone: "warning" };
   switch (cache?.status) {
     case "downloaded": return { label: "Downloaded", tone: "good" };
-    case "cached_unverified": return { label: "Cached · verify", tone: "warning" };
-    case "dependency_missing": return { label: "Hub dependency missing", tone: "danger" };
-    case "revision_unresolved": return { label: "Revision unresolved", tone: "warning" };
+    case "cached_unverified": return { label: "Download needs checking", tone: "warning" };
+    case "dependency_missing": return { label: "Download support missing", tone: "danger" };
+    case "revision_unresolved": return { label: "Version not pinned", tone: "warning" };
     default: return { label: "Not downloaded", tone: "warning" };
   }
 }
 
 function readableBytes(value?: number): string {
-  if (!value) return "Size recorded after download";
+  if (!value) return "Size appears after download";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let amount = value;
   let unit = 0;
@@ -41,8 +44,8 @@ export default function ModelSetupPanel() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [action, setAction] = useState<ActionState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState("qwen3.5-9b-text");
-  const [revision, setRevision] = useState(projectSnapshot.model.revision);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [revision, setRevision] = useState(DEFAULT_REVISION);
   const [cacheDir, setCacheDir] = useState("./.autotrainer/model-cache");
 
   const hydrate = (next: ModelWorkspace) => {
@@ -62,7 +65,7 @@ export default function ModelSetupPanel() {
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
         setConnected(false);
-        setError(reason instanceof Error ? reason.message : "Local backend is not connected.");
+        setError(reason instanceof Error ? reason.message : "AutoTrainer is not connected.");
       });
     return () => controller.abort();
   }, []);
@@ -71,12 +74,21 @@ export default function ModelSetupPanel() {
     () => Object.entries(workspace?.models || {}).filter(([, model]) => model.trainable_v1),
     [workspace],
   );
+  const selectedRecord = workspace?.models[selectedModel];
+  const selectionChanged = Boolean(
+    workspace
+    && (
+      selectedRecord?.id !== workspace.model.id
+      || revision !== workspace.model.revision
+      || cacheDir !== (workspace.model.cache_dir || ".autotrainer/model-cache")
+    ),
+  );
   const cache = workspace?.cache || null;
   const status = connected === false
-    ? { label: "Backend offline", tone: "danger" as const }
+    ? { label: "Not connected", tone: "danger" as const }
     : connected === null
       ? { label: "Connecting", tone: "muted" as const }
-      : cacheLabel(cache);
+      : cacheLabel(cache, selectionChanged);
   const busy = action !== "idle";
 
   const changeModel = (alias: string) => {
@@ -92,7 +104,7 @@ export default function ModelSetupPanel() {
       await selectProjectModel({ model: selectedModel, revision, cache_dir: cacheDir });
       hydrate(await getModelWorkspace());
     } catch (reason) {
-      setError(reason instanceof ApiClientError ? reason.message : "Could not save the model configuration.");
+      setError(reason instanceof ApiClientError ? reason.message : "Could not save these settings.");
     } finally {
       setAction("idle");
     }
@@ -114,57 +126,78 @@ export default function ModelSetupPanel() {
   };
 
   return (
-    <section className="panel model-contract" aria-labelledby="model-contract-heading" data-tour="model-contract">
-      <div className="panel-header model-setup-header">
-        <div><p className="panel-kicker">Model setup</p><h2 id="model-contract-heading">Choose the training base</h2></div>
+    <section className="panel setup-step model-setup" aria-labelledby="model-heading" data-tour="model">
+      <header className="step-heading">
+        <span className="step-number" aria-hidden="true">1</span>
+        <div>
+          <h2 id="model-heading">Choose model</h2>
+          <p>Pick the small model you want to make better at your work.</p>
+        </div>
         <span className={`status-chip ${status.tone}`}>{status.label}</span>
-      </div>
+      </header>
 
       {connected === false && (
-        <div className="info-callout danger model-api-callout">
-          <strong>Start the local backend</strong>
-          <p><code>autotrainer serve --config examples/frontend-expert/autotrainer.yaml</code></p>
+        <div className="inline-message danger" role="alert">
+          <strong>AutoTrainer is not connected.</strong>
+          <span>Start <code>autotrainer serve --config autotrainer.yaml</code>, then refresh.</span>
         </div>
       )}
-      {error && connected !== false && <div className="info-callout danger model-api-callout"><strong>Model action stopped</strong><p>{error}</p></div>}
+      {error && connected !== false && <div className="inline-message danger" role="alert">{error}</div>}
 
-      <div className="model-setup-layout">
-        <form className="model-form" onSubmit={(event) => { event.preventDefault(); void saveSelection(); }}>
-          <label>
-            <span>Base model</span>
-            <select value={selectedModel} onChange={(event) => changeModel(event.target.value)} disabled={!connected || busy}>
+      <form
+        className="model-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void downloadSelection();
+        }}
+      >
+        <div className="model-primary-action">
+          <label htmlFor="base-model">
+            <span>Model</span>
+            <select
+              id="base-model"
+              value={selectedModel}
+              onChange={(event) => changeModel(event.target.value)}
+              disabled={!connected || busy}
+            >
               {trainableModels.length > 0
                 ? trainableModels.map(([alias, model]) => <option key={alias} value={alias}>{model.id} · {model.parameters}</option>)
-                : <option value="qwen3.5-9b-text">Qwen/Qwen3.5-9B · 9B</option>}
+                : <option value={DEFAULT_MODEL}>Qwen/Qwen3.5-9B · 9B</option>}
             </select>
-            <small>Only V1 profiles validated for one-GPU training appear here.</small>
+            <small>Only models prepared for one local GPU appear here.</small>
           </label>
-          <label>
-            <span>Immutable revision</span>
-            <input value={revision} onChange={(event) => setRevision(event.target.value)} disabled={!connected || busy} spellCheck={false} />
-            <small>A branch is resolved and pinned before weights are accepted.</small>
-          </label>
-          <label>
-            <span>Model cache</span>
-            <input value={cacheDir} onChange={(event) => setCacheDir(event.target.value)} disabled={!connected || busy} spellCheck={false} />
-            <small>Used by both the downloader and offline training.</small>
-          </label>
-          <div className="model-form-actions">
-            <button className="secondary-button" type="submit" disabled={!connected || busy}>{action === "saving" ? "Saving…" : "Save model"}</button>
-            <button className="primary-button" type="button" onClick={() => void downloadSelection()} disabled={!connected || busy || cache?.status === "downloaded"}>
-              {action === "downloading" ? "Downloading…" : cache?.status === "downloaded" ? "Model downloaded" : "Download model"}
+          <button
+            className="primary-button model-download"
+            type="submit"
+            disabled={!connected || busy || (cache?.status === "downloaded" && !selectionChanged)}
+          >
+            {action === "downloading" ? "Downloading…" : cache?.status === "downloaded" && !selectionChanged ? "Downloaded" : "Select & download"}
+          </button>
+        </div>
+
+        <details className="advanced-options">
+          <summary>Advanced</summary>
+          <div className="advanced-fields">
+            <label htmlFor="model-revision">
+              <span>Exact version</span>
+              <input id="model-revision" value={revision} onChange={(event) => setRevision(event.target.value)} disabled={!connected || busy} spellCheck={false} />
+            </label>
+            <label htmlFor="model-cache">
+              <span>Download folder</span>
+              <input id="model-cache" value={cacheDir} onChange={(event) => setCacheDir(event.target.value)} disabled={!connected || busy} spellCheck={false} />
+            </label>
+            <div className="advanced-meta">
+              <span>{readableBytes(cache?.logical_bytes)}</span>
+              <span>{cache?.hf_token_configured ? "Access key found" : "Public models need no key"}</span>
+            </div>
+            <button className="secondary-button" type="button" onClick={() => void saveSelection()} disabled={!connected || busy || !selectionChanged}>
+              {action === "saving" ? "Saving…" : "Save settings"}
             </button>
           </div>
-        </form>
+        </details>
+      </form>
 
-        <div className="model-facts" aria-live="polite">
-          <div><span>Configured model</span><strong>{workspace?.model.id || projectSnapshot.model.id}</strong><code>{workspace?.model.revision || projectSnapshot.model.revision}</code></div>
-          <div><span>Cache state</span><strong>{status.label}</strong><small>{readableBytes(cache?.logical_bytes)}</small></div>
-          <div><span>Hugging Face access</span><strong>{cache?.hf_token_configured ? "HF_TOKEN detected" : "No token detected"}</strong><small>Public models need no key; gated models do.</small></div>
-          <div><span>Training mode</span><strong>{projectSnapshot.recipe.method}</strong><small>{projectSnapshot.recipe.quantization} · {projectSnapshot.recipe.context}</small></div>
-        </div>
-      </div>
-      {action === "downloading" && <p className="download-note" role="status">The local backend is downloading and verifying the complete snapshot. Keep it running; AutoTrainer reports success only after the receipt is written.</p>}
+      {action === "downloading" && <p className="download-note" role="status">Downloading and checking the complete model. Keep AutoTrainer open.</p>}
     </section>
   );
 }

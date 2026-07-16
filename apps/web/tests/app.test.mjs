@@ -4,11 +4,15 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-test("build emits a conventional static web application", async () => {
+async function source(path) {
+  return readFile(new URL(path, root), "utf8");
+}
+
+test("build emits the focused AutoTrainer application", async () => {
   const indexUrl = new URL("dist/index.html", root);
   await access(indexUrl);
   const html = await readFile(indexUrl, "utf8");
-  assert.match(html, /<title>AutoTrainer · Local training control plane<\/title>/);
+  assert.match(html, /<title>AutoTrainer · Train a local specialist<\/title>/);
   assert.match(html, /<div id="root"><\/div>/);
 
   const assets = await readdir(new URL("dist/assets/", root));
@@ -16,82 +20,83 @@ test("build emits a conventional static web application", async () => {
   assert.ok(assets.some((name) => name.endsWith(".css")));
 });
 
-test("the control plane exposes truthful training operations", async () => {
-  const source = await readFile(new URL("src/App.tsx", root), "utf8");
-  const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
-  assert.match(source, /Training overview/);
-  assert.match(source, /One-GPU training lab/);
-  assert.match(source, /Turn one small model and your code into an adapter you can prove is better\./);
-  assert.match(source, /Training runs/);
-  assert.match(source, /Local backend required/);
-  assert.match(source, /Configured ≠ downloaded ≠ trained ≠ verified/);
-  assert.match(snapshot, /Model benchmark/);
-  assert.match(snapshot, /Fable A\/B/);
-  assert.match(source, /QLoRA/);
-  assert.match(source, /GRPO/);
-  assert.doesNotMatch(source, /Build a better 9B frontend model/);
+test("the page is one clear three-step setup flow", async () => {
+  const app = await source("src/App.tsx");
+  assert.match(app, /Make a small model excellent at your work/);
+  assert.match(app, /<ModelSetupPanel \/>/);
+  assert.match(app, /<SourceSetupPanel \/>/);
+  assert.match(app, /<PreparePanel \/>/);
+  assert.match(app, /aria-label="Training setup"/);
+  assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
+  await assert.rejects(access(new URL("src/data.ts", root)));
 });
 
-test("the GUI and CLI share the real model lifecycle", async () => {
-  const panel = await readFile(new URL("src/ModelSetupPanel.tsx", root), "utf8");
-  const api = await readFile(new URL("src/api.ts", root), "utf8");
-  const vite = await readFile(new URL("vite.config.ts", root), "utf8");
-  const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
-  assert.match(panel, /Choose the training base/);
-  assert.match(panel, /Only V1 profiles validated for one-GPU training/);
+test("model selection and download use the real shared lifecycle", async () => {
+  const panel = await source("src/ModelSetupPanel.tsx");
+  const api = await source("src/api.ts");
+  const vite = await source("vite.config.ts");
+  assert.match(panel, /<h2 id="model-heading">Choose model<\/h2>/);
+  assert.match(panel, /Select & download/);
   assert.match(panel, /await selectProjectModel/);
   assert.match(panel, /await downloadProjectModel/);
-  assert.match(panel, /reports success only after the receipt is written/);
-  assert.match(panel, /autotrainer serve --config/);
+  assert.match(panel, /<details className="advanced-options">/);
+  assert.match(panel, /<summary>Advanced<\/summary>/);
+  assert.match(panel, /Save settings/);
   assert.match(api, /\/api\/v1\/model\/select/);
   assert.match(api, /\/api\/v1\/model\/download/);
   assert.match(vite, /127\.0\.0\.1:8765/);
-  assert.match(snapshot, /autotrainer model download --config/);
 });
 
-test("sources are added through one inferred GitHub or local-path workflow", async () => {
-  const panel = await readFile(new URL("src/SourceSetupPanel.tsx", root), "utf8");
-  const api = await readFile(new URL("src/api.ts", root), "utf8");
-  const app = await readFile(new URL("src/App.tsx", root), "utf8");
-  assert.match(panel, /Add a GitHub repo or local path/);
+test("work is added and removed through the real source contract", async () => {
+  const panel = await source("src/SourceSetupPanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(panel, /<h2 id="source-setup-heading">Add your work<\/h2>/);
   assert.match(panel, /GitHub URL or local path/);
   assert.match(panel, /await addProjectSource/);
   assert.match(panel, /await removeProjectSource/);
-  assert.match(panel, /Accepted examples and executable tasks provide the learning signal/);
+  assert.match(panel, /aria-label={`Remove \${source\.label}`}/);
   assert.match(api, /GET|ProjectSource/);
   assert.match(api, /\/api\/v1\/sources/);
-  assert.match(app, /<SourceSetupPanel \/>/);
+  assert.match(api, /method: "DELETE"/);
 });
 
-test("the example snapshot cannot imply a downloaded or active model", async () => {
-  const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
-  assert.match(snapshot, /cache: "Not downloaded"/);
-  assert.match(snapshot, /label: "Training stack", value: "Blocked"/);
-  assert.match(snapshot, /Configured: base Qwen3\.5 9B vs AutoTrainer adapter/);
-  assert.match(snapshot, /Deferred baseline: Qwythos 9B Claude Mythos/);
-  assert.doesNotMatch(snapshot, /Qwythos 9B reference vs AutoTrainer adapter/);
-  assert.doesNotMatch(snapshot, /status: "running"/i);
-  assert.doesNotMatch(snapshot, /cache: "Downloaded"/);
+test("one preparation action returns an honest next step", async () => {
+  const panel = await source("src/PreparePanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(panel, /<h2 id="prepare-heading">Prepare training<\/h2>/);
+  assert.match(panel, /await prepareProject/);
+  assert.match(panel, /Teach from accepted work/);
+  assert.match(panel, /Practice against tests/);
+  assert.match(panel, /Action needed/);
+  assert.match(panel, /Do this next/);
+  assert.match(api, /\/api\/v1\/prepare/);
 });
 
-test("navigation and the command drawer keep their accessible contracts", async () => {
-  const source = await readFile(new URL("src/App.tsx", root), "utf8");
-  assert.match(source, /aria-label=\{item\.label\}/);
-  assert.match(source, /inert=\{drawerOpen \|\| walkthroughOpen \? true : undefined\}/);
-  assert.match(source, /event\.key === "Escape"/);
-  assert.match(source, /previouslyFocused\?\.focus\(\)/);
+test("the first run has exactly three accessible walkthrough steps", async () => {
+  const app = await source("src/App.tsx");
+  assert.equal(app.match(/title: "/g)?.length, 3);
+  assert.match(app, /autotrainer\.walkthrough\.v2/);
+  assert.match(app, /data-tour="model"/);
+  assert.match(app, /data-tour="sources"/);
+  assert.match(app, /data-tour="prepare"/);
+  assert.match(app, /role="dialog"/);
+  assert.match(app, /aria-modal="true"/);
+  assert.match(app, /event\.key === "Escape"/);
+  assert.match(app, /inert={walkthroughOpen \? true : undefined}/);
+  assert.match(app, /Walkthrough/);
+  assert.match(app, /window\.localStorage\.setItem/);
 });
 
-test("the first-run walkthrough follows the truthful training journey", async () => {
-  const source = await readFile(new URL("src/App.tsx", root), "utf8");
-  assert.match(source, /autotrainer\.walkthrough\.v1/);
-  assert.match(source, /Train one small model\. Prove it got better\./);
-  assert.match(source, /data-tour="model-contract"/);
-  assert.match(source, /data-tour="sources"/);
-  assert.match(source, /data-tour="environment"/);
-  assert.match(source, /data-tour="pipeline"/);
-  assert.match(source, /data-tour="evaluations"/);
-  assert.match(source, /Prepare my run/);
-  assert.match(source, /role="dialog"/);
-  assert.match(source, /window\.localStorage\.setItem/);
+test("normal UI stays plain, truthful, and free of research jargon", async () => {
+  const visibleUi = await Promise.all([
+    source("src/App.tsx"),
+    source("src/ModelSetupPanel.tsx"),
+    source("src/SourceSetupPanel.tsx"),
+    source("src/PreparePanel.tsx"),
+    source("index.html"),
+  ]).then((files) => files.join("\n"));
+
+  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab|dashboard/i);
+  assert.doesNotMatch(visibleUi, /status:\s*["']running["']|training started|job queued/i);
+  assert.match(visibleUi, /Training never starts by accident/);
 });
