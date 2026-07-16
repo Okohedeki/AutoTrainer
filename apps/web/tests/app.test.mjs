@@ -23,13 +23,28 @@ test("the control plane exposes truthful training operations", async () => {
   assert.match(source, /One-GPU training lab/);
   assert.match(source, /Turn one small model and your code into an adapter you can prove is better\./);
   assert.match(source, /Training runs/);
-  assert.match(source, /Backend not connected/);
+  assert.match(source, /Local backend required/);
   assert.match(source, /Configured ≠ downloaded ≠ trained ≠ verified/);
   assert.match(snapshot, /Model benchmark/);
   assert.match(snapshot, /Fable A\/B/);
   assert.match(source, /QLoRA/);
   assert.match(source, /GRPO/);
   assert.doesNotMatch(source, /Build a better 9B frontend model/);
+});
+
+test("the GUI and CLI share the real model lifecycle", async () => {
+  const panel = await readFile(new URL("src/ModelSetupPanel.tsx", root), "utf8");
+  const api = await readFile(new URL("src/api.ts", root), "utf8");
+  const vite = await readFile(new URL("vite.config.ts", root), "utf8");
+  assert.match(panel, /Choose the training base/);
+  assert.match(panel, /Only V1 profiles validated for one-GPU training/);
+  assert.match(panel, /await selectProjectModel/);
+  assert.match(panel, /await downloadProjectModel/);
+  assert.match(panel, /reports success only after the receipt is written/);
+  assert.match(panel, /autotrainer serve --config/);
+  assert.match(api, /\/api\/v1\/model\/select/);
+  assert.match(api, /\/api\/v1\/model\/download/);
+  assert.match(vite, /127\.0\.0\.1:8765/);
 });
 
 test("the example snapshot cannot imply a downloaded or active model", async () => {

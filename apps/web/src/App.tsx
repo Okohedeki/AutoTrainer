@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import ModelSetupPanel from "./ModelSetupPanel";
 import {
   commands,
   environment,
@@ -271,27 +272,6 @@ function ActivityPanel() {
   );
 }
 
-// The immutable model contract is kept above run controls because model ID,
-// revision, loader, and adapter recipe define what a future run actually means.
-function ModelContractPanel() {
-  return (
-    <section className="panel model-contract" aria-labelledby="model-contract-heading" data-tour="model-contract">
-      <div className="panel-header">
-        <div><p className="panel-kicker">Declared configuration</p><h2 id="model-contract-heading">Model contract</h2></div>
-        <StatusChip tone="warning">{projectSnapshot.model.cache}</StatusChip>
-      </div>
-      <div className="model-contract-grid">
-        <article className="wide"><span>Trainable model</span><strong>{projectSnapshot.model.id}</strong><code>{projectSnapshot.model.revision}</code></article>
-        <article><span>Loader</span><strong>{projectSnapshot.model.loader}</strong><small>{projectSnapshot.model.state}</small></article>
-        <article><span>Adapter recipe</span><strong>{projectSnapshot.recipe.method}</strong><small>{projectSnapshot.recipe.quantization}</small></article>
-        <article><span>LoRA rank</span><strong>{projectSnapshot.recipe.rank}</strong><small>Single adapter</small></article>
-        <article><span>Context</span><strong>{projectSnapshot.recipe.context}</strong><small>V1 text only</small></article>
-        <article className="wide planned-reference"><span>Deferred benchmark reference</span><strong>{projectSnapshot.referenceModel.id}</strong><code>{projectSnapshot.referenceModel.revision}</code></article>
-      </div>
-    </section>
-  );
-}
-
 function OverviewView({ onOpenCommands }: { onOpenCommands: () => void }) {
   return (
     <>
@@ -301,7 +281,7 @@ function OverviewView({ onOpenCommands }: { onOpenCommands: () => void }) {
         <article><span>Compute</span><strong>1 × RTX 4090</strong><small>24,564 MiB detected</small></article>
         <article><span>Release proof</span><strong>Blocked</strong><small>Holdout + runner pins</small></article>
       </section>
-      <ModelContractPanel />
+      <ModelSetupPanel />
       <div className="overview-grid">
         <PipelinePanel />
         <RuntimePanel onOpenCommands={onOpenCommands} />
@@ -543,7 +523,7 @@ function CommandDrawer({
       <button className="drawer-backdrop" type="button" tabIndex={-1} aria-label="Close launch checklist" onClick={onClose} />
       <aside ref={drawerRef} className="command-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-heading">
         <div className="drawer-header"><div><p className="panel-kicker">Local handoff</p><h2 id="drawer-heading">Prepare the first run</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close">×</button></div>
-        <div className="info-callout danger"><strong>Backend not connected</strong><p>The dashboard will not pretend a job started. Resolve Doctor blockers, then run the same commands the future local backend will call.</p></div>
+        <div className="info-callout danger"><strong>Local backend required</strong><p>The dashboard and CLI use the same operations. Start the backend for human controls, or run these equivalent commands through an agent.</p></div>
         <div className="launch-summary">
           <div><span>Project</span><strong>{projectSnapshot.slug}</strong></div>
           <div><span>Recipe</span><strong>{projectSnapshot.recipe.method}</strong></div>
