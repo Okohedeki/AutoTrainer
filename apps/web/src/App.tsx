@@ -17,9 +17,9 @@ import {
 
 const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   overview: {
-    eyebrow: "Project control plane",
+    eyebrow: "One-GPU training lab",
     title: "Training overview",
-    description: "Resolve local blockers, then move one adapter through QLoRA, GRPO, and proof.",
+    description: "Turn one small model and your code into an adapter you can prove is better.",
   },
   runs: {
     eyebrow: "Single-GPU queue",
@@ -754,7 +754,7 @@ export default function App() {
     <>
     <div className="console-shell" inert={drawerOpen || walkthroughOpen ? true : undefined}>
       <aside className="sidebar">
-        <div className="brand-row"><span className="brand-mark" aria-hidden="true">A</span><div><strong>AutoTrainer</strong><small>Local control plane</small></div></div>
+        <div className="brand-row"><span className="brand-mark" aria-hidden="true">A</span><div><strong>AutoTrainer</strong><small>Small-model training lab</small></div></div>
         <div className="project-switcher"><span className="project-avatar" aria-hidden="true">PF</span><div><strong>{projectSnapshot.name}</strong><small>{projectSnapshot.slug}</small></div><span className="project-state">Snapshot</span></div>
         <nav className="primary-nav" aria-label="Project navigation">
           {navigation.map((item) => (

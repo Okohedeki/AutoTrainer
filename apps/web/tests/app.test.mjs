@@ -20,6 +20,8 @@ test("the control plane exposes truthful training operations", async () => {
   const source = await readFile(new URL("src/App.tsx", root), "utf8");
   const snapshot = await readFile(new URL("src/data.ts", root), "utf8");
   assert.match(source, /Training overview/);
+  assert.match(source, /One-GPU training lab/);
+  assert.match(source, /Turn one small model and your code into an adapter you can prove is better\./);
   assert.match(source, /Training runs/);
   assert.match(source, /Backend not connected/);
   assert.match(source, /Configured ≠ downloaded ≠ trained ≠ verified/);
