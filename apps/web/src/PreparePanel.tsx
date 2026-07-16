@@ -138,7 +138,7 @@ export default function PreparePanel({
           <h2 id="prepare-heading">Prepare training</h2>
           <p>Check the model, your work, the learning data, and this machine in one step.</p>
         </div>
-        <button className="primary-button prepare-button" type="button" onClick={() => void prepare()} disabled={busy}>
+        <button className="primary-button prepare-button" type="button" onClick={() => void prepare()} disabled={busy || trainingActive}>
           {busy ? "Preparing..." : result ? "Check again" : "Prepare training"}
         </button>
       </header>
