@@ -25,7 +25,10 @@ test("the page is one clear three-step setup flow", async () => {
   assert.match(app, /Make a small model excellent at your work/);
   assert.match(app, /<ModelSetupPanel \/>/);
   assert.match(app, /<SourceSetupPanel \/>/);
+  assert.match(app, /<HistoryReviewPanel \/>/);
   assert.match(app, /<PreparePanel \/>/);
+  assert.ok(app.indexOf("<SourceSetupPanel />") < app.indexOf("<HistoryReviewPanel />"));
+  assert.ok(app.indexOf("<HistoryReviewPanel />") < app.indexOf("<PreparePanel />"));
   assert.match(app, /aria-label="Training setup"/);
   assert.doesNotMatch(app, /sidebar|CommandDrawer|Training runs|Training overview/);
   await assert.rejects(access(new URL("src/data.ts", root)));
@@ -60,6 +63,26 @@ test("work is added and removed through the real source contract", async () => {
   assert.match(api, /method: "DELETE"/);
 });
 
+test("reviewed history approves one real change at a time", async () => {
+  const panel = await source("src/HistoryReviewPanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(panel, /workspace\?\.candidates\[0\]/);
+  assert.doesNotMatch(panel, /workspace\?\.candidates\.map|workspace\.candidates\.map/);
+  assert.match(panel, /<textarea/);
+  assert.match(panel, /<pre className="history-diff"/);
+  assert.match(panel, /type="checkbox"/);
+  assert.match(panel, /I have the right to use this change for training/);
+  assert.match(panel, /Approve example/);
+  assert.match(panel, />\s*Skip\s*</);
+  assert.match(panel, /review\("approved"\)/);
+  assert.match(panel, /review\("rejected"\)/);
+  assert.match(panel, /if \(!workspace \|\| \(!candidate && workspace\.summary\.approved_count === 0\)\) return null/);
+  assert.doesNotMatch(panel, /role="dialog"|modal|bulk|ranking|filter/i);
+  assert.match(api, /\/api\/v1\/history/);
+  assert.match(api, /\/api\/v1\/history\/review/);
+  assert.match(api, /rights_confirmed\?: boolean/);
+});
+
 test("one preparation action returns an honest next step", async () => {
   const panel = await source("src/PreparePanel.tsx");
   const api = await source("src/api.ts");
@@ -92,6 +115,7 @@ test("normal UI stays plain, truthful, and free of research jargon", async () =>
     source("src/App.tsx"),
     source("src/ModelSetupPanel.tsx"),
     source("src/SourceSetupPanel.tsx"),
+    source("src/HistoryReviewPanel.tsx"),
     source("src/PreparePanel.tsx"),
     source("index.html"),
   ]).then((files) => files.join("\n"));

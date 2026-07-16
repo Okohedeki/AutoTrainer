@@ -68,6 +68,30 @@ export type PreparationResult = {
   details: Record<string, unknown>;
 };
 
+export type HistoryFile = {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+};
+
+export type HistoryCandidate = {
+  candidate_id: string;
+  proposed_instruction: string;
+  files: HistoryFile[];
+  patch: string;
+  flags: string[];
+};
+
+export type HistoryWorkspace = {
+  summary: {
+    reviewable_count: number;
+    approved_count: number;
+    blocked_counts?: Record<string, number>;
+  };
+  candidates: HistoryCandidate[];
+};
+
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
 export class ApiClientError extends Error {
@@ -136,4 +160,17 @@ export async function removeProjectSource(id: string): Promise<ProjectSource[]> 
 
 export async function prepareProject(): Promise<PreparationResult> {
   return request("/api/v1/prepare", { method: "POST", body: "{}" });
+}
+
+export async function getReviewHistory(signal?: AbortSignal): Promise<HistoryWorkspace> {
+  return request("/api/v1/history", { signal });
+}
+
+export async function reviewHistoryCandidate(input: {
+  candidate_id: string;
+  decision: "approved" | "rejected";
+  instruction?: string;
+  rights_confirmed?: boolean;
+}): Promise<HistoryWorkspace> {
+  return request("/api/v1/history/review", { method: "POST", body: JSON.stringify(input) });
 }

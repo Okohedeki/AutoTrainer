@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import HistoryReviewPanel from "./HistoryReviewPanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import PreparePanel from "./PreparePanel";
 import SourceSetupPanel from "./SourceSetupPanel";
@@ -152,6 +153,7 @@ export default function App() {
           <div className="setup-flow" aria-label="Training setup">
             <ModelSetupPanel />
             <SourceSetupPanel />
+            <HistoryReviewPanel />
             <PreparePanel />
           </div>
 
