@@ -495,6 +495,19 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   line-height: 1.5;
 }
 
+.history-stale {
+  margin-top: 17px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border-left: 3px solid var(--warning);
+  background: var(--warning-soft);
+}
+.history-stale strong { color: var(--warning); font-size: 11px; }
+.history-stale p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+
 .prepare-button { align-self: center; }
 .prepare-error { margin-left: 48px; }
 
@@ -710,6 +723,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .history-files > div { grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
   .history-lines { grid-column: 1 / -1; }
   .history-actions { justify-content: space-between; }
+  .history-stale { grid-template-columns: 1fr; }
+  .history-stale .secondary-button { width: 100%; }
   .training-start,
   .training-state { grid-template-columns: 1fr; align-items: start; }
   .training-state > span,

@@ -16,6 +16,7 @@ from autotrainer.cli import main  # noqa: E402
 from autotrainer.config import default_config, write_config  # noqa: E402
 from autotrainer.history_service import (  # noqa: E402
     get_history_workspace,
+    retire_stale_reviews,
     review_history_candidate,
 )
 
@@ -34,7 +35,7 @@ class HistoryServiceTests(unittest.TestCase):
         return {
             "errors": [],
             "excluded": {"generated_path": 2},
-            "summary": {"pending": 1, "approved": 1},
+            "summary": {"pending": 1, "approved": 1, "stale_reviews": 0},
             "candidates": [
                 {
                     "candidate_id": "pending",
@@ -61,6 +62,7 @@ class HistoryServiceTests(unittest.TestCase):
 
         self.assertEqual(result["summary"]["reviewable_count"], 1)
         self.assertEqual(result["summary"]["approved_count"], 1)
+        self.assertEqual(result["summary"]["stale_review_count"], 0)
         self.assertEqual(result["summary"]["blocked_counts"], {"generated_path": 2})
         self.assertEqual(
             [item["candidate_id"] for item in result["candidates"]],
@@ -79,6 +81,18 @@ class HistoryServiceTests(unittest.TestCase):
             )
         self.assertEqual(result["summary"]["approved_count"], 1)
         review.assert_called_once()
+
+    def test_retire_returns_the_refreshed_queue(self) -> None:
+        history = self.history()
+        history["summary"]["stale_reviews"] = 0  # type: ignore[index]
+        retired = {"history": history, "retired_count": 1}
+        with patch(
+            "autotrainer.history_service.retire_stale_history_reviews",
+            return_value=retired,
+        ) as retire:
+            result = retire_stale_reviews(self.config_path)
+        self.assertEqual(result["summary"]["stale_review_count"], 0)
+        retire.assert_called_once()
 
     def test_agent_cli_uses_the_same_history_workspace(self) -> None:
         workspace = {

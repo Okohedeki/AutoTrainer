@@ -16,7 +16,11 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .config import ConfigError
-from .history_service import get_history_workspace, review_history_candidate
+from .history_service import (
+    get_history_workspace,
+    retire_stale_reviews,
+    review_history_candidate,
+)
 from .model_cache import ModelCacheError
 from .model_service import (
     download_model,
@@ -198,6 +202,13 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         instruction=instruction_value,
                         rights_confirmed=payload.get("rights_confirmed") is True,
                     ),
+                )
+            elif path == f"{API_PREFIX}/history/retire-stale":
+                if payload:
+                    raise ConfigError("retiring stale reviews accepts no settings")
+                self._send_json(
+                    HTTPStatus.OK,
+                    retire_stale_reviews(self.server.config_path),
                 )
             elif path == f"{API_PREFIX}/prepare":
                 # Preparation calls shared Python operations directly; the API

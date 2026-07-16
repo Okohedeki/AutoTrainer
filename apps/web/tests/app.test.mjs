@@ -78,11 +78,17 @@ test("reviewed history approves one real change at a time", async () => {
   assert.match(panel, />\s*Skip\s*</);
   assert.match(panel, /review\("approved"\)/);
   assert.match(panel, /review\("rejected"\)/);
-  assert.match(panel, /if \(!workspace \|\| \(!candidate && workspace\.summary\.approved_count === 0\)\) return null/);
+  assert.match(
+    panel,
+    /!candidate && workspace\.summary\.approved_count === 0 && workspace\.summary\.stale_review_count === 0/,
+  );
   assert.doesNotMatch(panel, /role="dialog"|modal|bulk|ranking|filter/i);
   assert.match(api, /\/api\/v1\/history/);
   assert.match(api, /\/api\/v1\/history\/review/);
+  assert.match(api, /\/api\/v1\/history\/retire-stale/);
   assert.match(api, /rights_confirmed\?: boolean/);
+  assert.match(panel, /Retire old approval/);
+  assert.match(panel, /retireStaleHistoryReviews/);
 });
 
 test("one preparation action returns an honest next step", async () => {

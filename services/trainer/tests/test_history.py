@@ -15,6 +15,7 @@ from autotrainer.history import (  # noqa: E402
     HistoryError,
     approved_history_records,
     list_history,
+    retire_stale_history_reviews,
     review_history,
 )
 
@@ -442,6 +443,38 @@ class HistoryServiceTests(unittest.TestCase):
         self.assertTrue(
             (self.root / ".autotrainer" / "history" / "reviews.json").is_file()
         )
+
+    def test_stale_authority_can_be_explicitly_retired_after_history_rewrite(self) -> None:
+        repository, revision = self.create_focused_history()
+        config = self.config(repository, revision)
+        candidate = list_history(config, self.root)["candidates"][0]
+        review_history(
+            config,
+            self.root,
+            candidate_id=candidate["candidate_id"],
+            decision="approved",
+            instruction="Clarify the application label without changing its public API.",
+            rights_confirmed=True,
+        )
+        run_git(repository, "reset", "-q", "--hard", f"{revision}^")
+        (repository / "src" / "App.tsx").write_text(
+            "export const label = 'Replacement';\n", encoding="utf-8"
+        )
+        replacement = self.commit(
+            repository, "Make the application label easier to understand"
+        )
+        rewritten = self.config(repository, replacement)
+
+        retired = retire_stale_history_reviews(rewritten, self.root)
+
+        self.assertEqual(retired["retired_count"], 1)
+        self.assertEqual(retired["history"]["summary"]["stale_reviews"], 0)
+        self.assertEqual(retired["history"]["summary"]["retired_reviews"], 1)
+        self.assertEqual(approved_history_records(rewritten, self.root), [])
+        review_bytes = (
+            self.root / ".autotrainer" / "history" / "reviews.json"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"decision": "retired"', review_bytes)
 
     def test_only_train_history_sources_are_discovered(self) -> None:
         repository, revision = self.create_focused_history()

@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from .history import HistoryError, list_history, review_history
+from .history import (
+    HistoryError,
+    list_history,
+    retire_stale_history_reviews,
+    review_history,
+)
 from .project_service import read_project_config
 
 
@@ -33,6 +38,7 @@ def _workspace(history: Mapping[str, Any]) -> dict[str, Any]:
         "summary": {
             "reviewable_count": int(summary.get("pending", 0) or 0),
             "approved_count": int(summary.get("approved", 0) or 0),
+            "stale_review_count": int(summary.get("stale_reviews", 0) or 0),
             "blocked_counts": dict(history.get("excluded", {})),
         },
         "candidates": candidates,
@@ -68,4 +74,16 @@ def review_history_candidate(
     return _workspace(result["history"])
 
 
-__all__ = ["get_history_workspace", "review_history_candidate"]
+def retire_stale_reviews(config_path: str | Path) -> dict[str, Any]:
+    """Remove stale training authority only after an explicit user action."""
+
+    config = read_project_config(config_path)
+    result = retire_stale_history_reviews(config.data, config.root)
+    return _workspace(result["history"])
+
+
+__all__ = [
+    "get_history_workspace",
+    "retire_stale_reviews",
+    "review_history_candidate",
+]

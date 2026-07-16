@@ -942,6 +942,26 @@ def _write_source_artifacts(
     )
 
 
+def _review_has_stale_authority(
+    review: Mapping[str, Any],
+    declared_source_ids: set[str],
+    current_identities: Mapping[str, str],
+) -> bool:
+    if review.get("decision") != "approved":
+        return False
+    source_id = str(review.get("source_id", ""))
+    identity = str(review.get("repository_identity", ""))
+    # Legacy reviews without source metadata stay fail-closed. New reviews stop
+    # carrying authority after their repository is deliberately removed or
+    # replaced by a different repository under the same display ID.
+    if not source_id:
+        return True
+    if source_id not in declared_source_ids:
+        return False
+    current_identity = current_identities.get(source_id)
+    return not identity or current_identity is None or identity == current_identity
+
+
 def list_history(
     config_or_path: Mapping[str, Any] | str | Path,
     project_root: Path | None = None,
@@ -986,7 +1006,11 @@ def list_history(
         for candidate in discovered:
             item = dict(candidate)
             review = reviews.get(item["candidate_id"])
-            if review and review.get("decision") == "rejected":
+            if review and review.get("decision") == "retired":
+                # Retiring authority does not reject the underlying change. If
+                # that commit becomes current again it needs a fresh decision.
+                item["decision"] = "pending"
+            elif review and review.get("decision") == "rejected":
                 item["decision"] = "rejected"
             elif review and review.get("decision") == "approved":
                 try:
@@ -1021,29 +1045,19 @@ def list_history(
         for report in reports
     }
 
-    def stale_authority(review: Mapping[str, Any]) -> bool:
-        if review.get("decision") != "approved":
-            return False
-        source_id = str(review.get("source_id", ""))
-        identity = str(review.get("repository_identity", ""))
-        # Legacy reviews without source metadata stay fail-closed. New reviews
-        # stop carrying authority when their repository is deliberately removed
-        # or replaced by another repository under the same display ID.
-        if not source_id:
-            return True
-        if source_id not in declared_source_ids:
-            return False
-        current_identity = current_identities.get(source_id)
-        return not identity or current_identity is None or identity == current_identity
-
     stale_reviews = sum(
-        candidate_id not in current_ids and stale_authority(review)
+        candidate_id not in current_ids
+        and _review_has_stale_authority(
+            review, declared_source_ids, current_identities
+        )
         for candidate_id, review in reviews.items()
     )
     orphaned_reviews = sum(
         candidate_id not in current_ids
         and review.get("decision") == "approved"
-        and not stale_authority(review)
+        and not _review_has_stale_authority(
+            review, declared_source_ids, current_identities
+        )
         for candidate_id, review in reviews.items()
     )
     summary = {
@@ -1052,6 +1066,9 @@ def list_history(
         "excluded": sum(excluded.values()),
         "pending": sum(item["decision"] == "pending" for item in candidates),
         "rejected": sum(item["decision"] == "rejected" for item in candidates),
+        "retired_reviews": sum(
+            review.get("decision") == "retired" for review in reviews.values()
+        ),
         "reviewable": len(candidates),
         "source_count": len(reports),
         "orphaned_reviews": orphaned_reviews,
@@ -1149,6 +1166,57 @@ def review_history(
     }
 
 
+def retire_stale_history_reviews(
+    config_or_path: Mapping[str, Any] | str | Path,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    """Explicitly retire missing approvals while preserving their audit rows."""
+
+    config, root = _coerce_project(config_or_path, project_root)
+    history = list_history(config, root, write=True)
+    current_ids = {str(item["candidate_id"]) for item in history["candidates"]}
+    sources = [
+        source
+        for source in _source_specs(config)
+        if source.get("kind") == "repository"
+        and source.get("partition", "train") == "train"
+        and "history" in _strings(source.get("roles"))
+    ]
+    declared_source_ids = {str(source.get("id", "")) for source in sources}
+    current_identities = {
+        str(report["source_id"]): str(report["repository_identity"])
+        for report in history["sources"]
+    }
+    history_root = _artifact_dir(config, root) / "history"
+    reviews_path = history_root / "reviews.json"
+    retired_count = 0
+    with _REVIEW_LOCK, _review_file_lock(reviews_path):
+        reviews = _read_reviews(reviews_path)
+        for candidate_id, review in list(reviews.items()):
+            if candidate_id in current_ids or not _review_has_stale_authority(
+                review, declared_source_ids, current_identities
+            ):
+                continue
+            replacement = dict(review)
+            replacement["decision"] = "retired"
+            replacement["retired_reason"] = "stale_source_revision"
+            reviews[candidate_id] = replacement
+            retired_count += 1
+        if retired_count:
+            payload = {
+                "reviews": dict(sorted(reviews.items())),
+                "schema_version": SCHEMA_VERSION,
+            }
+            _write_atomic(
+                reviews_path,
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+    return {
+        "history": list_history(config, root, write=True),
+        "retired_count": retired_count,
+    }
+
+
 def approved_history_records(
     config_or_path: Mapping[str, Any] | str | Path,
     project_root: Path | None = None,
@@ -1201,5 +1269,6 @@ __all__ = [
     "HistoryError",
     "approved_history_records",
     "list_history",
+    "retire_stale_history_reviews",
     "review_history",
 ]

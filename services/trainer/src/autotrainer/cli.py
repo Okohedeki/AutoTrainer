@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     history_review.add_argument("--instruction", default=None)
     history_review.add_argument("--rights-confirmed", action="store_true")
     _config_argument(history_review)
+    history_retire = history_sub.add_parser(
+        "retire-stale", help="retire approvals that no longer match pinned history"
+    )
+    _config_argument(history_retire)
 
     validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
     _config_argument(validate)
@@ -365,10 +369,16 @@ def _run_validate(arguments: argparse.Namespace) -> int:
 
 
 def _run_history(arguments: argparse.Namespace) -> int:
-    from .history_service import get_history_workspace, review_history_candidate
+    from .history_service import (
+        get_history_workspace,
+        retire_stale_reviews,
+        review_history_candidate,
+    )
 
     if arguments.history_command == "list":
         result = get_history_workspace(arguments.config)
+    elif arguments.history_command == "retire-stale":
+        result = retire_stale_reviews(arguments.config)
     else:
         result = review_history_candidate(
             arguments.config,

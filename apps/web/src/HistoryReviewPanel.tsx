@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   ApiClientError,
   getReviewHistory,
+  retireStaleHistoryReviews,
   reviewHistoryCandidate,
   type HistoryWorkspace,
 } from "./api";
@@ -39,7 +40,10 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
     setRightsConfirmed(false);
   }, [candidate?.candidate_id, candidate?.proposed_instruction]);
 
-  if (!workspace || (!candidate && workspace.summary.approved_count === 0)) return null;
+  if (
+    !workspace
+    || (!candidate && workspace.summary.approved_count === 0 && workspace.summary.stale_review_count === 0)
+  ) return null;
 
   const review = async (decision: "approved" | "rejected") => {
     if (!candidate) return;
@@ -66,6 +70,18 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
     }
   };
 
+  const retireStale = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setWorkspace(await retireStaleHistoryReviews());
+    } catch (reason) {
+      setError(reason instanceof ApiClientError ? reason.message : "The old approval could not be retired.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="panel history-review" aria-labelledby="history-heading">
       <header className="history-heading">
@@ -75,15 +91,31 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
           <p>Turn a real change into one clear example for the model.</p>
         </div>
         <span className="status-chip muted">
-          {candidate ? `${workspace.candidates.length} to review` : `${workspace.summary.approved_count} approved`}
+          {workspace.summary.stale_review_count > 0
+            ? `${workspace.summary.stale_review_count} old approval`
+            : candidate
+              ? `${workspace.candidates.length} to review`
+              : `${workspace.summary.approved_count} approved`}
         </span>
       </header>
 
-      {!candidate ? (
+      {workspace.summary.stale_review_count > 0 && (
+        <div className="history-stale" role="alert">
+          <div>
+            <strong>Review history changed</strong>
+            <p>An earlier approval no longer matches this repository. Retire it before preparing new training data.</p>
+          </div>
+          <button className="secondary-button" type="button" onClick={() => void retireStale()} disabled={busy}>
+            {busy ? "Retiring..." : "Retire old approval"}
+          </button>
+        </div>
+      )}
+
+      {!candidate && workspace.summary.approved_count > 0 ? (
         <p className="history-complete">
           {workspace.summary.approved_count} approved {workspace.summary.approved_count === 1 ? "change is" : "changes are"} ready as training examples.
         </p>
-      ) : (
+      ) : candidate ? (
         <div className="history-candidate">
           <label className="history-instruction" htmlFor="history-instruction">
             <span>What was this change meant to do?</span>
@@ -140,7 +172,7 @@ export default function HistoryReviewPanel({ refreshKey = 0 }: { refreshKey?: nu
             </button>
           </div>
         </div>
-      )}
+      ) : null}
     </section>
   );
 }

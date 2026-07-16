@@ -143,6 +143,16 @@ class LocalApiTests(unittest.TestCase):
             rights_confirmed=True,
         )
 
+        with patch(
+            "autotrainer.local_api.retire_stale_reviews", return_value=refreshed
+        ) as retire:
+            status, result = self.request(
+                "POST", "/api/v1/history/retire-stale", {}
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, refreshed)
+        retire.assert_called_once_with(self.config_path.resolve())
+
     def test_prepare_endpoint_returns_the_shared_project_result_directly(self) -> None:
         prepared = {
             "status": "blocked",

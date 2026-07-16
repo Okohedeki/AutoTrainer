@@ -87,6 +87,7 @@ export type HistoryWorkspace = {
   summary: {
     reviewable_count: number;
     approved_count: number;
+    stale_review_count: number;
     blocked_counts?: Record<string, number>;
   };
   candidates: HistoryCandidate[];
@@ -181,6 +182,10 @@ export async function reviewHistoryCandidate(input: {
   rights_confirmed?: boolean;
 }): Promise<HistoryWorkspace> {
   return request("/api/v1/history/review", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function retireStaleHistoryReviews(): Promise<HistoryWorkspace> {
+  return request("/api/v1/history/retire-stale", { method: "POST", body: "{}" });
 }
 
 export async function getTrainingJob(signal?: AbortSignal): Promise<TrainingJob> {
