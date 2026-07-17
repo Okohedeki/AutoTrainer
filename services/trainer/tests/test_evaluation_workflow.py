@@ -17,7 +17,9 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 from autotrainer.evaluation import (  # noqa: E402
     EvaluationError,
     MAX_RESULT_ARTIFACT_BYTES,
+    _build_trial_matrix,
     _copy_evidence,
+    _digest,
     _paired_delta,
     _result_documents,
     _review_summary,
@@ -249,7 +251,9 @@ def _config(root: Path) -> dict:
                 "same_sampling": True,
                 "require_seed_control": True,
                 "immutable_models_and_adapter": True,
-                "randomize_arm_order": True,
+                "pair_position_policy": "deterministic_counterbalance",
+                "execution_order_policy": "frozen_per_suite",
+                "per_trial_arm_randomization": False,
                 "failures_score_zero": True,
                 "allow_unplanned_reruns": False,
             },
@@ -355,6 +359,110 @@ class EvaluationPlanTests(unittest.TestCase):
             self.assertNotEqual(
                 first["plan_id"], build_evaluation_plan(changed, root)["plan_id"]
             )
+
+    def test_default_fable_placeholders_defer_only_the_external_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            defaults = default_config()
+            config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
+                "type": "builtin"
+            }
+            config["evaluation"]["suites"]["fable_ab"]["runner"] = dict(
+                defaults["evaluation"]["suites"]["fable_ab"]["runner"]
+            )
+
+            plan = build_evaluation_plan(config, root)
+
+            local_suite = plan["suites"]["model_benchmark"]
+            fable_suite = plan["suites"]["fable_ab"]
+            self.assertTrue(local_suite["runnable"])
+            self.assertEqual(local_suite["execution_policy"]["type"], "grouped_by_arm")
+            self.assertFalse(fable_suite["runnable"])
+            self.assertEqual(fable_suite["runner"]["status"], "deferred")
+            self.assertTrue(fable_suite["blockers"])
+            self.assertEqual(
+                {trial["suite_id"] for trial in plan["trials"]},
+                {"model_benchmark"},
+            )
+            write_evaluation_plan(config, root)
+            reports = build_evaluation_reports(config, root)
+            self.assertEqual(reports["suites"]["fable_ab"]["status"], "deferred")
+            self.assertFalse(reports["v1_success_criteria_verified"])
+
+    def test_load_current_plan_rejects_task_and_trial_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            written = write_evaluation_plan(config, root)
+            plan_path = Path(written["artifact"])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["task_rows"]["checkout"]["manifest"]["task"][
+                "instruction"
+            ] = "tampered"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            with self.assertRaisesRegex(EvaluationError, "content digest"):
+                load_current_plan(config, root)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            written = write_evaluation_plan(config, root)
+            plan_path = Path(written["artifact"])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["trials"][0]["sequence"] = 99
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            trials_path = plan_path.parent / "trials.jsonl"
+            trials_path.write_text(
+                "".join(json.dumps(item) + "\n" for item in plan["trials"]),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(EvaluationError, "canonical derivation"):
+                load_current_plan(config, root)
+
+    def test_load_current_plan_rebuilds_resolved_arms_after_a_rehashed_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            original = write_evaluation_plan(config, root)
+            forged = json.loads(Path(original["artifact"]).read_text(encoding="utf-8"))
+            forged["arms"]["autotrainer"]["label"] = "forged candidate"
+            identity = {
+                key: value
+                for key, value in forged.items()
+                if key not in {"plan_id", "trials"}
+            }
+            forged["plan_id"] = f"sha256:{_digest(identity)}"
+            task_map = {item["task_id"]: item for item in forged["tasks"]}
+            forged["trials"] = _build_trial_matrix(
+                forged["plan_id"],
+                forged["suites"],
+                task_map,
+                forged["seeds"],
+            )
+            run_dir = (
+                root
+                / ".artifacts"
+                / "evaluation"
+                / forged["plan_id"].removeprefix("sha256:")
+            )
+            run_dir.mkdir(parents=True)
+            forged_path = run_dir / "evaluation-plan.json"
+            forged_path.write_text(json.dumps(forged), encoding="utf-8")
+            (run_dir / "trials.jsonl").write_text(
+                "".join(json.dumps(item) + "\n" for item in forged["trials"]),
+                encoding="utf-8",
+            )
+            pointer = root / ".artifacts" / "evaluation" / "current-plan.json"
+            pointer.write_text(
+                json.dumps({"plan_id": forged["plan_id"], "path": str(forged_path)}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(EvaluationError, "resolved arms"):
+                load_current_plan(config, root)
 
     def test_plan_rejects_repository_alias_across_compiled_splits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -516,16 +624,9 @@ class EvaluationPlanTests(unittest.TestCase):
             config["evaluation"]["dataset"] = ".artifacts/compiled/rl/evaluation.jsonl"
             config["evaluation"]["arms"]["reference_9b"]["model"]["id"] = "Qwen/Qwen3.5-9B"
             config["evaluation"]["arms"]["reference_9b"]["model"]["revision"] = REVISION
-            for suite in config["evaluation"]["suites"].values():
-                suite["runner"]["version"] = "1.0.0"
-                suite["runner"]["orchestration_sha256"] = ORCHESTRATION
-            config["evaluation"]["suites"]["model_benchmark"]["runner"]["argv"] = [
-                "model-agent",
-                "--request",
-                "{request}",
-                "--result",
-                "{result}",
-            ]
+            fable_runner = config["evaluation"]["suites"]["fable_ab"]["runner"]
+            fable_runner["version"] = "1.0.0"
+            fable_runner["orchestration_sha256"] = ORCHESTRATION
             adapter = root / ".autotrainer" / "checkpoints" / "grpo"
             adapter.mkdir(parents=True)
             (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
@@ -571,6 +672,89 @@ class EvaluationPlanTests(unittest.TestCase):
 
 
 class EvaluationWorkflowTests(unittest.TestCase):
+    def test_builtin_suite_preflights_then_loads_trials_in_arm_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
+                "type": "builtin"
+            }
+            plan = write_evaluation_plan(config, root)
+            preflighted: list[str] = []
+            produced: list[str] = []
+            closed: list[bool] = []
+
+            class FakeProducer:
+                def preflight(self, arm_ids: list[str]) -> None:
+                    preflighted.extend(arm_ids)
+
+                def produce(self, request: dict, result_path: Path) -> None:
+                    arm_id = request["arm_id"]
+                    produced.append(arm_id)
+                    patch_path = result_path.parent / "patch.diff"
+                    patch_path.write_text(f"arm={arm_id}\n", encoding="utf-8")
+                    arm = plan["arms"][arm_id]
+                    runner = plan["suites"]["model_benchmark"]["runner"]
+                    result_path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "plan_id": request["plan_id"],
+                                "trial_id": request["trial_id"],
+                                "suite_id": request["suite_id"],
+                                "arm_id": arm_id,
+                                "task_id": request["task_id"],
+                                "repetition": request["repetition"],
+                                "seed": request["seed"],
+                                "status": "completed",
+                                "producer": {
+                                    "name": runner["producer"],
+                                    "version": runner["version"],
+                                    "orchestration_sha256": runner[
+                                        "orchestration_sha256"
+                                    ],
+                                    "model_revision": arm["model"]["revision"],
+                                    "adapter_sha256": (
+                                        arm["adapter"]["sha256"]
+                                        if arm["adapter"]
+                                        else None
+                                    ),
+                                    "seed_honored": True,
+                                    "fallback_models_used": False,
+                                },
+                                "usage": {"tool_calls": 0},
+                                "output": {"patch": patch_path.name},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                def close(self) -> None:
+                    closed.append(True)
+
+            outcome = run_command_suite(
+                config,
+                root,
+                "model_benchmark",
+                scorer=_scorer,
+                producer_factory=lambda _config, _root, _plan: FakeProducer(),
+            )
+
+            suite_arms = plan["suites"]["model_benchmark"]["arms"]
+            self.assertFalse(plan["fairness"]["per_trial_arm_randomization"])
+            self.assertEqual(
+                plan["suites"]["model_benchmark"]["execution_policy"],
+                outcome["execution_policy"],
+            )
+            self.assertEqual(outcome["execution_policy"]["type"], "grouped_by_arm")
+            self.assertEqual(preflighted, suite_arms)
+            self.assertEqual(
+                produced,
+                [suite_arms[0]] * 4 + [suite_arms[1]] * 4,
+            )
+            self.assertEqual(outcome["completed"], 8)
+            self.assertEqual(closed, [True])
+
     def test_command_suite_reports_only_observed_trial_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -623,6 +807,148 @@ class EvaluationWorkflowTests(unittest.TestCase):
             # progress advances only after a trusted scored artifact exists.
             completed = [event["completed"] for event in events]
             self.assertEqual(completed, sorted(completed))
+
+    def test_resume_scores_the_existing_result_without_regenerating_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
+                "type": "command",
+                "producer": "local-agent",
+                "version": "1.0.0",
+                "orchestration_sha256": ORCHESTRATION,
+                "argv": ["model-agent", "{request}", "{result}"],
+            }
+            plan = write_evaluation_plan(config, root)
+            generated: list[str] = []
+            score_calls = 0
+            scored_patches: list[str] = []
+
+            def command(argv: list[str], **_: object) -> SimpleNamespace:
+                request = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+                trial = next(
+                    item for item in plan["trials"] if item["trial_id"] == request["trial_id"]
+                )
+                generated.append(trial["trial_id"])
+                result_path = Path(argv[2])
+                producer_dir = result_path.parent / "producer"
+                _result(plan, trial, producer_dir)
+                for artifact in producer_dir.iterdir():
+                    artifact.replace(result_path.parent / artifact.name)
+                producer_dir.rmdir()
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+            def fails_once(task: dict, patch_text: str) -> dict:
+                nonlocal score_calls
+                score_calls += 1
+                scored_patches.append(patch_text)
+                if score_calls == 1:
+                    raise RuntimeError("trusted scorer temporarily unavailable")
+                return _scorer(task, patch_text)
+
+            with patch("autotrainer.evaluation.subprocess.run", side_effect=command):
+                with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
+                    run_command_suite(
+                        config,
+                        root,
+                        "model_benchmark",
+                        scorer=fails_once,
+                    )
+                first_model_trial = next(
+                    item
+                    for item in plan["trials"]
+                    if item["suite_id"] == "model_benchmark"
+                )
+                generated_patch = (
+                    Path(plan["artifact"]).parent
+                    / "incoming"
+                    / first_model_trial["trial_id"]
+                    / "patch.diff"
+                )
+                generated_patch.write_text("producer mutated its patch\n", encoding="utf-8")
+                outcome = run_command_suite(
+                    config,
+                    root,
+                    "model_benchmark",
+                    resume=True,
+                    scorer=fails_once,
+                )
+
+            first_trial = next(
+                item["trial_id"]
+                for item in plan["trials"]
+                if item["suite_id"] == "model_benchmark"
+            )
+            self.assertEqual(generated.count(first_trial), 1)
+            self.assertEqual(len(generated), outcome["total"])
+            self.assertEqual(outcome["completed"], outcome["total"])
+            self.assertEqual(score_calls, outcome["total"] + 1)
+            self.assertEqual(scored_patches[0], scored_patches[1])
+            self.assertNotIn("mutated", scored_patches[1])
+
+    def test_resume_fails_closed_on_a_mismatched_existing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
+                "type": "command",
+                "producer": "local-agent",
+                "version": "1.0.0",
+                "orchestration_sha256": ORCHESTRATION,
+                "argv": ["model-agent", "{request}", "{result}"],
+            }
+            plan = write_evaluation_plan(config, root)
+
+            def command(argv: list[str], **_: object) -> SimpleNamespace:
+                request = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+                trial = next(
+                    item for item in plan["trials"] if item["trial_id"] == request["trial_id"]
+                )
+                result_path = Path(argv[2])
+                producer_dir = result_path.parent / "producer"
+                _result(plan, trial, producer_dir)
+                for artifact in producer_dir.iterdir():
+                    artifact.replace(result_path.parent / artifact.name)
+                producer_dir.rmdir()
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+            command_patch = patch(
+                "autotrainer.evaluation.subprocess.run", side_effect=command
+            )
+            with command_patch as command_mock:
+                with self.assertRaisesRegex(RuntimeError, "scorer failed"):
+                    run_command_suite(
+                        config,
+                        root,
+                        "model_benchmark",
+                        scorer=lambda _task, _patch: (_ for _ in ()).throw(
+                            RuntimeError("scorer failed")
+                        ),
+                    )
+                first = next(
+                    item
+                    for item in plan["trials"]
+                    if item["suite_id"] == "model_benchmark"
+                )
+                result_path = (
+                    Path(plan["artifact"]).parent
+                    / "incoming"
+                    / first["trial_id"]
+                    / "result.json"
+                )
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                result["arm_id"] = "base_fable"
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+                with self.assertRaisesRegex(EvaluationError, "changed planned field arm_id"):
+                    run_command_suite(
+                        config,
+                        root,
+                        "model_benchmark",
+                        resume=True,
+                        scorer=_scorer,
+                    )
+                self.assertEqual(command_mock.call_count, 1)
 
     def test_evidence_copy_hashes_the_private_bounded_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

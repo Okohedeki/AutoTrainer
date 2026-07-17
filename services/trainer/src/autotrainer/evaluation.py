@@ -1,9 +1,10 @@
 """Reproducible two-suite evaluation workflow for AutoTrainer V1.
 
-Evaluation is intentionally separated from model generation.  AutoTrainer
-freezes a paired trial matrix, exports public task envelopes to a local agent or
-Fable, ingests unified patches, and re-scores every patch in the trusted
-frontend environment.  Producer supplied scores are never accepted.
+Evaluation scoring is intentionally separated from model generation.
+AutoTrainer freezes a paired trial matrix, sends public task envelopes to its
+built-in local producer, a declared command producer, or Fable, then re-scores
+every submitted patch in the trusted frontend environment. Producer-supplied
+scores are never accepted, including from AutoTrainer's own local producer.
 """
 
 from __future__ import annotations
@@ -96,7 +97,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _sha256_tree(path: Path) -> str:
-    if not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
         raise EvaluationError(f"adapter directory does not exist: {path}")
     # Hash relative paths as well as bytes: renaming an adapter file changes the
     # load contract even when its contents happen to be identical.
@@ -568,19 +569,68 @@ def _resolved_arm(
 def _resolved_runner(suite_id: str, suite: Mapping[str, Any]) -> dict[str, Any]:
     runner = _mapping(suite.get("runner", {}), f"evaluation.suites.{suite_id}.runner")
     runner_type = _text(runner.get("type"), f"evaluation.suites.{suite_id}.runner.type")
+    if runner_type == "builtin":
+        unknown = sorted(set(runner) - {"type"})
+        if unknown:
+            raise EvaluationError(
+                f"evaluation suite {suite_id!r} builtin runner accepts only type; "
+                "remove: " + ", ".join(unknown)
+            )
+        # The built-in producer owns its prompt, sampling, and context policy.
+        # Derive identity from that code instead of trusting editable YAML to
+        # describe behavior the evaluator is about to invoke.
+        from .local_evaluation_runner import builtin_runner_identity
+
+        return {"type": "builtin", **builtin_runner_identity()}
     if runner_type not in {"command", "external"}:
-        raise EvaluationError(f"evaluation suite {suite_id!r} runner type must be command or external")
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} runner type must be builtin, command, or external"
+        )
+    producer_value = str(runner.get("producer", "local-command")).strip()
+    version_value = str(runner.get("version", "")).strip()
+    orchestration_value = str(runner.get("orchestration_sha256", "")).strip()
+
+    # Fable is an optional, later external proof. Its unpinned default must not
+    # prevent the local model benchmark from freezing and running. Preserve the
+    # exact unresolved declarations in the plan, but create no trials until a
+    # new plan can freeze concrete external runner pins.
+    if runner_type == "external":
+        blockers: list[str] = []
+        if not producer_value:
+            blockers.append("external producer is not declared")
+        if not version_value or version_value.startswith("REPLACE_WITH_"):
+            blockers.append("external runner version is not pinned")
+        orchestration_hex = orchestration_value.removeprefix("sha256:")
+        if (
+            len(orchestration_hex) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in orchestration_hex)
+            or set(orchestration_hex.lower()) == {"0"}
+        ):
+            blockers.append("external orchestration digest is not pinned")
+        result_schema = str(runner.get("result_schema", "")).strip()
+        return {
+            "type": "external",
+            "producer": producer_value or None,
+            "version": version_value or None,
+            "orchestration_sha256": orchestration_value or None,
+            "result_schema": result_schema or None,
+            "status": "deferred" if blockers else "ready",
+            "blockers": blockers,
+        }
+
     producer = _text(
-        runner.get("producer", "local-command"),
+        producer_value,
         f"evaluation.suites.{suite_id}.runner.producer",
     )
-    version = _text(runner.get("version"), f"evaluation.suites.{suite_id}.runner.version")
+    version = _text(version_value, f"evaluation.suites.{suite_id}.runner.version")
     if version.startswith("REPLACE_WITH_"):
-        raise EvaluationError(f"evaluation suite {suite_id!r} still contains a placeholder runner version")
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} still contains a placeholder runner version"
+        )
     # Model weights alone do not define an agent run. The orchestrator digest
     # freezes prompts, tool routing, fallbacks, and other behavior around them.
     orchestration = _text(
-        runner.get("orchestration_sha256"),
+        orchestration_value,
         f"evaluation.suites.{suite_id}.runner.orchestration_sha256",
     )
     orchestration_hex = orchestration.removeprefix("sha256:")
@@ -610,6 +660,103 @@ def _resolved_runner(suite_id: str, suite: Mapping[str, Any]) -> dict[str, Any]:
             )
         resolved["argv"] = list(argv)
     return resolved
+
+
+def _suite_execution_policy(
+    runner: Mapping[str, Any], arms: Sequence[str]
+) -> dict[str, Any]:
+    """Freeze the truthful wall-clock ordering used by each suite runner."""
+
+    if runner.get("status") == "deferred":
+        return {
+            "type": "deferred",
+            "paired_seed_control": True,
+            "per_trial_arm_randomization": False,
+        }
+    if runner.get("type") == "builtin":
+        return {
+            "type": "grouped_by_arm",
+            "arm_group_order": list(arms),
+            "within_group_order": "trial_id",
+            "paired_seed_control": True,
+            "per_trial_arm_randomization": False,
+            "model_residency": "one_9b_arm_at_a_time",
+        }
+    return {
+        "type": "frozen_trial_matrix_order",
+        "pair_position_policy": "deterministic_counterbalance",
+        "paired_seed_control": True,
+        "per_trial_arm_randomization": False,
+    }
+
+
+def _frozen_fairness(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze the declared policy only when it matches actual V1 execution."""
+
+    result = dict(value)
+    expected = {
+        "pair_position_policy": "deterministic_counterbalance",
+        "execution_order_policy": "frozen_per_suite",
+        "per_trial_arm_randomization": False,
+    }
+    if result.get("randomize_arm_order") is True and not any(
+        key in result for key in expected
+    ):
+        # Read old V1 project files without preserving their inaccurate
+        # wall-clock randomization claim in new immutable evidence.
+        result.pop("randomize_arm_order")
+        result.update(expected)
+        return result
+    if "randomize_arm_order" in result or any(
+        result.get(key) != expected_value for key, expected_value in expected.items()
+    ):
+        raise EvaluationError(
+            "evaluation fairness must declare deterministic counterbalanced pair positions, "
+            "frozen per-suite execution, and no per-trial arm randomization"
+        )
+    return result
+
+
+def _build_trial_matrix(
+    plan_id: str,
+    suites: Mapping[str, Mapping[str, Any]],
+    tasks: Mapping[str, Mapping[str, Any]],
+    seeds: Sequence[int],
+) -> list[dict[str, Any]]:
+    """Derive every immutable trial from the hashed plan inputs."""
+
+    trials: list[dict[str, Any]] = []
+    for suite_index, (suite_id, suite) in enumerate(sorted(suites.items())):
+        if suite.get("runnable") is False:
+            continue
+        suite_arms = list(suite["arms"])
+        for task_index, task_id in enumerate(sorted(tasks)):
+            for repetition, seed in enumerate(seeds):
+                # Position is deterministic and counterbalanced for paired
+                # analysis. It does not claim randomized wall-clock loading.
+                ordered_arms = (
+                    suite_arms
+                    if (suite_index + task_index + repetition) % 2 == 0
+                    else list(reversed(suite_arms))
+                )
+                for sequence, arm_id in enumerate(ordered_arms):
+                    identity = {
+                        "plan_id": plan_id,
+                        "suite_id": suite_id,
+                        "arm_id": arm_id,
+                        "task_id": task_id,
+                        "repetition": repetition,
+                        "seed": seed,
+                    }
+                    trials.append(
+                        {
+                            **identity,
+                            "trial_id": f"trial-{_digest(identity)[:24]}",
+                            "sequence": sequence,
+                            "task_fingerprint": tasks[task_id]["fingerprint"],
+                        }
+                    )
+    return trials
 
 
 def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict[str, Any]:
@@ -710,11 +857,17 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             raise EvaluationError(
                 f"evaluation suite {suite_id!r} refers to unknown arms: {', '.join(missing)}"
             )
+        resolved_runner = _resolved_runner(suite_id, suite)
+        blockers = list(resolved_runner.get("blockers", []))
+        runnable = not blockers
         suites[suite_id] = {
             "kind": _text(suite.get("kind"), f"evaluation.suites.{suite_id}.kind"),
             "arms": list(suite_arms),
-            "runner": _resolved_runner(suite_id, suite),
+            "runner": resolved_runner,
             "review": suite.get("review"),
+            "runnable": runnable,
+            "blockers": blockers,
+            "execution_policy": _suite_execution_policy(resolved_runner, suite_arms),
         }
 
     environment = _mapping(config.get("environment", {}), "environment")
@@ -752,7 +905,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
                 "episode_timeout_seconds",
             )
         },
-        "fairness": fairness,
+        "fairness": _frozen_fairness(fairness),
         "arms": arms,
         "suites": suites,
         "tasks": [
@@ -765,35 +918,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         "decisions": decisions,
     }
     plan_id = f"sha256:{_digest(plan_input)}"
-    trials: list[dict[str, Any]] = []
-    for suite_index, (suite_id, suite) in enumerate(sorted(suites.items())):
-        suite_arms = list(suite["arms"])
-        for task_index, task_id in enumerate(sorted(tasks)):
-            for repetition, seed in enumerate(seeds):
-                # Counterbalance left/first position deterministically. This is
-                # predictable for reproduction but alternates across pairs.
-                ordered_arms = (
-                    suite_arms
-                    if (suite_index + task_index + repetition) % 2 == 0
-                    else list(reversed(suite_arms))
-                )
-                for sequence, arm_id in enumerate(ordered_arms):
-                    identity = {
-                        "plan_id": plan_id,
-                        "suite_id": suite_id,
-                        "arm_id": arm_id,
-                        "task_id": task_id,
-                        "repetition": repetition,
-                        "seed": seed,
-                    }
-                    trials.append(
-                        {
-                            **identity,
-                            "trial_id": f"trial-{_digest(identity)[:24]}",
-                            "sequence": sequence,
-                            "task_fingerprint": tasks[task_id]["fingerprint"],
-                        }
-                    )
+    trials = _build_trial_matrix(plan_id, suites, tasks, seeds)
     plan = {**plan_input, "plan_id": plan_id, "trials": trials}
     return plan
 
@@ -819,7 +944,9 @@ def _write_jsonl(path: Path, values: Iterable[Mapping[str, Any]]) -> None:
 
 def evaluation_run_dir(config: Mapping[str, Any], root: Path, plan_id: str) -> Path:
     digest = plan_id.removeprefix("sha256:")
-    if len(digest) != 64:
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in digest
+    ):
         raise EvaluationError(f"invalid evaluation plan id: {plan_id}")
     return _artifact_dir(config, root) / "evaluation" / digest
 
@@ -843,22 +970,164 @@ def write_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     return {**plan, "artifact": str(plan_path)}
 
 
+_PLAN_DOCUMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "project",
+        "task_source",
+        "holdout",
+        "repetitions",
+        "seeds",
+        "environment",
+        "fairness",
+        "arms",
+        "suites",
+        "tasks",
+        "task_rows",
+        "decisions",
+        "plan_id",
+        "trials",
+    }
+)
+
+
+def _derived_plan_tasks(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = _mapping(plan.get("task_rows"), "evaluation plan task_rows")
+    tasks: dict[str, dict[str, Any]] = {}
+    for index, (declared_task_id, value) in enumerate(sorted(rows.items())):
+        row = _mapping(value, f"evaluation plan task_rows.{declared_task_id}")
+        task_id, manifest = _task_identity(row, index)
+        if task_id != declared_task_id:
+            raise EvaluationError(
+                "evaluation plan task row key does not match its immutable task id: "
+                f"{declared_task_id!r} != {task_id!r}"
+            )
+        tasks[task_id] = {
+            "task_id": task_id,
+            "group_id": manifest["task"].get("groupId"),
+            "source_id": manifest["task"].get("sourceId"),
+            "source_repository_identity": row.get("source_repository_identity"),
+            "source_revision": row.get("source_revision"),
+            "fingerprint": f"sha256:{_digest(row)}",
+        }
+    return tasks
+
+
+def _read_frozen_trials(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        values = [json.loads(line) for line in lines if line.strip()]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(f"frozen trial matrix is unreadable: {error}") from error
+    if not all(isinstance(value, dict) for value in values):
+        raise EvaluationError("frozen trial matrix must contain JSON objects")
+    return values
+
+
+def _validate_frozen_plan(
+    plan: Mapping[str, Any],
+    config: Mapping[str, Any],
+    root: Path,
+    run_dir: Path,
+) -> None:
+    """Recompute the plan hash and every derived identity before trusting it."""
+
+    unknown = sorted(set(plan) - _PLAN_DOCUMENT_FIELDS)
+    missing = sorted(_PLAN_DOCUMENT_FIELDS - set(plan))
+    if missing or unknown:
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if unknown:
+            detail.append("unknown " + ", ".join(unknown))
+        raise EvaluationError("evaluation plan document fields changed: " + "; ".join(detail))
+
+    plan_id = _text(plan.get("plan_id"), "evaluation plan id")
+    identity = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"plan_id", "trials"}
+    }
+    expected_plan_id = f"sha256:{_digest(identity)}"
+    if plan_id != expected_plan_id:
+        raise EvaluationError(
+            "evaluation plan content digest does not match its immutable plan_id"
+        )
+
+    derived_tasks = _derived_plan_tasks(plan)
+    declared_tasks = plan.get("tasks")
+    expected_tasks = [derived_tasks[task_id] for task_id in sorted(derived_tasks)]
+    if declared_tasks != expected_tasks:
+        raise EvaluationError(
+            "evaluation plan task descriptors do not match the frozen task rows"
+        )
+
+    suites = _mapping(plan.get("suites"), "evaluation plan suites")
+    seeds = plan.get("seeds")
+    trials = plan.get("trials")
+    if not isinstance(seeds, list) or not isinstance(trials, list):
+        raise EvaluationError("evaluation plan seeds and trials must be arrays")
+    expected_trials = _build_trial_matrix(plan_id, suites, derived_tasks, seeds)
+    if trials != expected_trials:
+        raise EvaluationError(
+            "evaluation plan trial matrix does not match its canonical derivation"
+        )
+    if _read_frozen_trials(run_dir / "trials.jsonl") != expected_trials:
+        raise EvaluationError(
+            "frozen trials.jsonl does not match the canonical evaluation plan"
+        )
+
+    # Canonical self-validation prevents editable plan_id trust. Rebuilding
+    # against current configuration and artifacts additionally proves that the
+    # resolved arms, adapter digest, datasets, and runner code are still exact.
+    try:
+        rebuilt = build_evaluation_plan(config, root)
+    except EvaluationError as error:
+        raise EvaluationError(
+            f"evaluation plan no longer matches its immutable inputs: {error}"
+        ) from error
+    if dict(plan) != rebuilt:
+        if plan.get("arms") != rebuilt.get("arms"):
+            changed = "resolved arms or adapter identity"
+        elif plan.get("task_rows") != rebuilt.get("task_rows"):
+            changed = "task rows"
+        elif plan.get("trials") != rebuilt.get("trials"):
+            changed = "derived trials"
+        else:
+            changed = "configuration or runner identity"
+        raise EvaluationError(
+            f"evaluation plan no longer matches current immutable {changed}; freeze a new plan"
+        )
+
+
 def load_current_plan(config: Mapping[str, Any], project_root: Path) -> tuple[dict[str, Any], Path]:
     root = Path(project_root).expanduser().resolve()
     pointer = _artifact_dir(config, root) / "evaluation" / "current-plan.json"
     if not pointer.is_file():
         raise EvaluationError("no evaluation plan exists; run `autotrainer evaluate plan --write`")
     try:
-        pointer_value = json.loads(pointer.read_text(encoding="utf-8"))
+        pointer_value = _exact_mapping(
+            json.loads(pointer.read_text(encoding="utf-8")),
+            "current evaluation plan pointer",
+            required=("plan_id", "path"),
+        )
         plan_id = _text(pointer_value.get("plan_id"), "current plan id")
         plan_path = Path(_text(pointer_value.get("path"), "current plan path")).resolve()
         expected_dir = evaluation_run_dir(config, root, plan_id).resolve()
-        plan_path.relative_to(expected_dir)
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        expected_plan_path = (expected_dir / "evaluation-plan.json").resolve()
+        if plan_path != expected_plan_path:
+            raise EvaluationError(
+                "current evaluation plan pointer does not name its canonical plan document"
+            )
+        plan = _mapping(
+            json.loads(plan_path.read_text(encoding="utf-8")),
+            "current evaluation plan",
+        )
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise EvaluationError(f"current evaluation plan is unreadable: {error}") from error
     if plan.get("plan_id") != plan_id:
         raise EvaluationError("current evaluation plan pointer does not match the plan document")
+    _validate_frozen_plan(plan, config, root, expected_dir)
     return plan, expected_dir
 
 
@@ -914,6 +1183,12 @@ def export_evaluation_suite(
     plan, _ = load_current_plan(config, project_root)
     if suite_id not in plan["suites"]:
         raise EvaluationError(f"unknown evaluation suite: {suite_id}")
+    suite = plan["suites"][suite_id]
+    if suite.get("runnable") is False:
+        blockers = "; ".join(str(item) for item in suite.get("blockers", []))
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} is deferred: {blockers or 'runner is not pinned'}"
+        )
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     exported: list[str] = []
@@ -1092,6 +1367,87 @@ def _copy_evidence(source: Path, destination: Path) -> dict[str, Any]:
         temporary.unlink(missing_ok=True)
 
 
+def _result_file_snapshot(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read one bounded envelope descriptor and JSON value from the same bytes."""
+
+    if _is_link_or_reparse(path) or not path.is_file():
+        raise EvaluationError(f"result envelope must be a regular file: {path}")
+    data = path.read_bytes()
+    if len(data) > MAX_RESULT_ARTIFACT_BYTES:
+        raise EvaluationError(f"result envelope exceeds the 10 MiB limit: {path}")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(f"result envelope became unreadable: {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise EvaluationError(f"result envelope must contain one JSON object: {path}")
+    return (
+        {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)},
+        value,
+    )
+
+
+def _pending_evidence(
+    pending_path: Path,
+    result: Mapping[str, Any],
+    result_path: Path,
+    evidence_dir: Path,
+) -> dict[str, Any] | None:
+    """Load a prior pre-score receipt and verify every staged byte."""
+
+    if not pending_path.exists():
+        return None
+    if _is_link_or_reparse(pending_path) or not pending_path.is_file():
+        raise EvaluationError(
+            f"pending ingest receipt must be a regular file: {pending_path}"
+        )
+    try:
+        pending = _exact_mapping(
+            json.loads(pending_path.read_text(encoding="utf-8")),
+            f"pending ingest receipt {pending_path}",
+            required=("schema_version", "envelope", "result", "evidence"),
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(f"pending ingest receipt is unreadable: {error}") from error
+    if pending.get("schema_version") != SCHEMA_VERSION or pending.get("result") != result:
+        raise EvaluationError(
+            "existing result envelope does not match its durable pre-score receipt"
+        )
+    envelope = _exact_mapping(
+        pending.get("envelope"),
+        "pending ingest envelope identity",
+        required=("sha256", "bytes"),
+    )
+    current_identity, current_result = _result_file_snapshot(result_path)
+    if current_result != result or envelope != current_identity:
+        raise EvaluationError(
+            "existing result envelope bytes changed after generation; refusing resume"
+        )
+    evidence = _mapping(pending.get("evidence"), "pending ingest evidence")
+    expected_root = evidence_dir.resolve()
+    for field, value in evidence.items():
+        descriptor = _exact_mapping(
+            value,
+            f"pending ingest evidence.{field}",
+            required=("path", "sha256", "bytes"),
+        )
+        target = Path(_text(descriptor.get("path"), f"pending ingest evidence.{field}.path"))
+        try:
+            target.resolve().relative_to(expected_root)
+        except ValueError as error:
+            raise EvaluationError(
+                f"pending ingest evidence.{field} escaped the evidence store"
+            ) from error
+        digest = _text(
+            descriptor.get("sha256"), f"pending ingest evidence.{field}.sha256"
+        )
+        size = _schema_non_negative_integer(
+            descriptor.get("bytes"), f"pending ingest evidence.{field}.bytes"
+        )
+        _verify_evidence_target(target, digest, size)
+    return evidence
+
+
 def _producer_fairness(
     result: Mapping[str, Any],
     trial: Mapping[str, Any],
@@ -1227,6 +1583,12 @@ def ingest_evaluation_results(
     plan, run_dir = load_current_plan(config, project_root)
     if suite_id not in plan["suites"]:
         raise EvaluationError(f"unknown evaluation suite: {suite_id}")
+    suite = plan["suites"][suite_id]
+    if suite.get("runnable") is False:
+        blockers = "; ".join(str(item) for item in suite.get("blockers", []))
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} is deferred: {blockers or 'runner is not pinned'}"
+        )
     trial_by_id = {
         trial["trial_id"]: trial
         for trial in plan["trials"]
@@ -1251,8 +1613,20 @@ def ingest_evaluation_results(
                 )
         raw_path = run_dir / "raw" / suite_id / f"{trial_id}.json"
         scored_path = run_dir / "scored-trials" / f"{trial_id}.json"
-        if raw_path.exists() or scored_path.exists():
+        pending_path = run_dir / "pending-ingest" / suite_id / f"{trial_id}.json"
+        if scored_path.exists():
             raise EvaluationError(f"duplicate result refused for immutable trial: {trial_id}")
+        if raw_path.exists() and not pending_path.exists():
+            raise EvaluationError(f"duplicate result refused for immutable trial: {trial_id}")
+        if raw_path.exists():
+            try:
+                raw_result = json.loads(raw_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise EvaluationError(f"raw trial evidence is unreadable: {raw_path}") from error
+            if raw_result != result:
+                raise EvaluationError(
+                    f"raw trial evidence changed for immutable trial: {trial_id}"
+                )
 
         fairness = _producer_fairness(result, trial, plan)
         usage = _mapping(result["usage"], "result.usage")
@@ -1260,12 +1634,32 @@ def ingest_evaluation_results(
         output = _mapping(result["output"], "result.output")
         # Copy submitted artifacts under content hashes before executing any
         # patch. The original envelope and evidence remain auditable afterward.
-        evidence: dict[str, Any] = {}
         evidence_dir = run_dir / "evidence"
-        for field in ("patch", "transcript", "review_artifact"):
-            if output.get(field):
-                source = _safe_result_file(result_path, output[field], f"result.output.{field}")
-                evidence[field] = _copy_evidence(source, evidence_dir)
+        evidence = _pending_evidence(
+            pending_path, result, result_path, evidence_dir
+        )
+        if evidence is None:
+            evidence = {}
+            for field in ("patch", "transcript", "review_artifact"):
+                if output.get(field):
+                    source = _safe_result_file(
+                        result_path, output[field], f"result.output.{field}"
+                    )
+                    evidence[field] = _copy_evidence(source, evidence_dir)
+            envelope_identity, current_result = _result_file_snapshot(result_path)
+            if current_result != result:
+                raise EvaluationError(
+                    "result envelope changed while its evidence was being staged"
+                )
+            _write_json(
+                pending_path,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "envelope": envelope_identity,
+                    "result": result,
+                    "evidence": evidence,
+                },
+            )
 
         if not fairness["passed"]:
             scored = _zero_scored_result(
@@ -1322,10 +1716,12 @@ def ingest_evaluation_results(
                     "episode": episode_metadata,
                 },
             }
-        # Write the immutable raw/scored pair only after local scoring succeeds.
-        # A missing container runtime can therefore be fixed and retried safely.
+        # The pre-score receipt makes generation durable across verifier
+        # failures. Publish the raw/scored pair only after trusted scoring, then
+        # remove the receipt; a crash between these writes remains retryable.
         _write_json(raw_path, result)
         _write_json(scored_path, scored)
+        pending_path.unlink(missing_ok=True)
         ingested.append(str(scored_path))
     return {
         "plan_id": plan["plan_id"],
@@ -1413,6 +1809,8 @@ def _suite_payload(
             "plan_id": plan["plan_id"],
             "suite_id": suite_id,
             "suite_kind": suite["kind"],
+            "execution_policy": suite.get("execution_policy"),
+            "fairness_policy": plan.get("fairness"),
         },
         "candidates": candidates,
         "runs": runs,
@@ -1577,6 +1975,38 @@ def build_evaluation_reports(
     # Each suite has its own runner, so each receives an independent comparison
     # and decision. Local-agent reward is never pooled with Fable A/B results.
     for suite_id in sorted(plan["suites"]):
+        suite = plan["suites"][suite_id]
+        if suite.get("runnable") is False:
+            blockers = list(suite.get("blockers", []))
+            suite_report = {
+                "suite_id": suite_id,
+                "kind": suite["kind"],
+                "status": "deferred",
+                "blockers": blockers,
+                "execution_policy": suite.get("execution_policy"),
+                "completeness": {
+                    "expected_trials": 0,
+                    "completed_trials": 0,
+                    "rate": 0.0,
+                    "fairness_passed": False,
+                },
+                "comparison": None,
+                "decision": {
+                    "observed_better": False,
+                    "verified_better": False,
+                    "reason": "suite_deferred",
+                },
+            }
+            all_verified = False
+            suite_reports[suite_id] = suite_report
+            _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
+            _atomic_text(
+                run_dir / "reports" / f"{suite_id}.md",
+                "# Deferred evaluation suite\n\n"
+                + "\n".join(f"- {item}" for item in blockers)
+                + "\n",
+            )
+            continue
         payload, completeness = _suite_payload(plan, suite_id, scored)
         comparison = compare_benchmark(payload)
         decision_config = _mapping(
@@ -1635,7 +2065,8 @@ def build_evaluation_reports(
         all_verified = all_verified and bool(decision["verified_better"])
         suite_report = {
             "suite_id": suite_id,
-            "kind": plan["suites"][suite_id]["kind"],
+            "kind": suite["kind"],
+            "execution_policy": suite.get("execution_policy"),
             "completeness": completeness,
             "comparison": comparison,
             "decision": decision,
@@ -1678,6 +2109,11 @@ def export_blind_review(
     suite = plan["suites"].get(suite_id)
     if not suite or suite.get("kind") != "fable_ab":
         raise EvaluationError("blind review export requires a fable_ab suite")
+    if suite.get("runnable") is False:
+        blockers = "; ".join(str(item) for item in suite.get("blockers", []))
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} is deferred: {blockers or 'runner is not pinned'}"
+        )
     scored = _load_scored(run_dir)
     by_key: dict[tuple[str, int, int], dict[str, Mapping[str, Any]]] = {}
     for trial in plan["trials"]:
@@ -1787,15 +2223,24 @@ def run_command_suite(
     resume: bool = False,
     scorer: Callable[[Mapping[str, Any], str], Any] | None = None,
     on_progress: EvaluationProgressCallback | None = None,
+    producer_factory: Callable[
+        [Mapping[str, Any], Path, Mapping[str, Any]], Any
+    ]
+    | None = None,
 ) -> dict[str, Any]:
-    """Run an explicitly declared argv adapter without invoking a shell."""
+    """Run the built-in producer or an explicitly declared shell-free argv adapter."""
 
     plan, run_dir = load_current_plan(config, project_root)
     suite = plan["suites"].get(suite_id)
     if not suite:
         raise EvaluationError(f"unknown evaluation suite: {suite_id}")
+    if suite.get("runnable") is False:
+        blockers = "; ".join(str(item) for item in suite.get("blockers", []))
+        raise EvaluationError(
+            f"evaluation suite {suite_id!r} is deferred: {blockers or 'runner is not pinned'}"
+        )
     runner = suite["runner"]
-    if runner["type"] != "command":
+    if runner["type"] not in {"builtin", "command"}:
         raise EvaluationError(
             f"suite {suite_id!r} is external; use evaluate export and evaluate ingest"
         )
@@ -1818,84 +2263,225 @@ def run_command_suite(
         completed=existing_count,
         total=total,
     )
-    for trial in suite_trials:
-        scored_path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
-        if scored_path.exists() and resume:
-            skipped += 1
+
+    # A single GPU cannot hold both 9B arms. The exact grouped execution policy
+    # is frozen in the plan and reported separately from paired presentation
+    # position; there is no claim of per-trial wall-clock arm randomization.
+    ordered_trials = suite_trials
+    producer: Any | None = None
+    if runner["type"] == "builtin":
+        execution_policy = _mapping(
+            suite.get("execution_policy"),
+            f"evaluation.suites.{suite_id}.execution_policy",
+        )
+        if (
+            execution_policy.get("type") != "grouped_by_arm"
+            or execution_policy.get("arm_group_order") != suite["arms"]
+            or execution_policy.get("within_group_order") != "trial_id"
+            or execution_policy.get("per_trial_arm_randomization") is not False
+        ):
+            raise EvaluationError(
+                f"suite {suite_id!r} does not contain the supported frozen single-GPU execution policy"
+            )
+        arm_order = {
+            arm_id: index
+            for index, arm_id in enumerate(execution_policy["arm_group_order"])
+        }
+        ordered_trials = sorted(
+            suite_trials,
+            key=lambda trial: (
+                arm_order.get(trial["arm_id"], len(arm_order)),
+                trial["trial_id"],
+            ),
+        )
+        pending_arm_ids = [
+            arm_id
+            for arm_id in suite["arms"]
+            if any(
+                trial["arm_id"] == arm_id
+                and not (
+                    resume
+                    and (run_dir / "scored-trials" / f"{trial['trial_id']}.json").exists()
+                )
+                and not (
+                    resume
+                    and (run_dir / "incoming" / trial["trial_id"] / "result.json").exists()
+                )
+                for trial in ordered_trials
+            )
+        ]
+        if pending_arm_ids:
+            if producer_factory is None:
+                from .local_evaluation_runner import create_builtin_producer
+
+                producer_factory = create_builtin_producer
+            try:
+                producer = producer_factory(config, Path(project_root).resolve(), plan)
+                # Resolve every local snapshot and adapter before committing the
+                # first result. A missing reference model is one clear blocker,
+                # never an implicit network download or a half-run comparison.
+                producer.preflight(pending_arm_ids)
+            except Exception as error:
+                if producer is not None:
+                    producer.close()
+                raise EvaluationError(str(error)) from error
+
+    try:
+        for trial in ordered_trials:
+            scored_path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
+            if scored_path.exists() and resume:
+                skipped += 1
+                _notify_progress(
+                    on_progress,
+                    phase="resuming",
+                    trial=trial,
+                    completed=existing_count + completed,
+                    total=total,
+                )
+                continue
+            if scored_path.exists():
+                raise EvaluationError(
+                    f"trial already exists: {trial['trial_id']}; use --resume to skip it"
+                )
+
+            incoming = run_dir / "incoming" / trial["trial_id"]
+            incoming.mkdir(parents=True, exist_ok=True)
+            request_path = incoming / "request.json"
+            result_path = incoming / "result.json"
+            request = _request_for(plan, trial)
+            if request_path.exists():
+                try:
+                    existing_request = json.loads(request_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise EvaluationError(
+                        f"existing evaluation request is unreadable: {request_path}: {error}"
+                    ) from error
+                if existing_request != request:
+                    raise EvaluationError(
+                        f"existing evaluation request changed: {request_path}"
+                    )
+                if not resume:
+                    raise EvaluationError(
+                        f"trial request already exists: {trial['trial_id']}; use --resume"
+                    )
+            else:
+                _write_json(request_path, request)
+
+            # Generation is durable independently from trusted scoring. If the
+            # verifier failed after the producer atomically wrote its envelope,
+            # resume validates and ingests those exact bytes without another
+            # stochastic model call or overwrite.
+            if result_path.exists():
+                if not resume:
+                    raise EvaluationError(
+                        f"trial result already exists: {trial['trial_id']}; use --resume"
+                    )
+                _notify_progress(
+                    on_progress,
+                    phase="verifying",
+                    trial=trial,
+                    completed=existing_count + completed,
+                    total=total,
+                )
+                ingest_evaluation_results(
+                    config,
+                    project_root,
+                    suite_id,
+                    result_path,
+                    scorer=scorer,
+                )
+                completed += 1
+                _notify_progress(
+                    on_progress,
+                    phase="trial_completed",
+                    trial=trial,
+                    completed=existing_count + completed,
+                    total=total,
+                )
+                continue
             _notify_progress(
                 on_progress,
-                phase="resuming",
+                phase="generating",
                 trial=trial,
                 completed=existing_count + completed,
                 total=total,
             )
-            continue
-        if scored_path.exists():
-            raise EvaluationError(
-                f"trial already exists: {trial['trial_id']}; use --resume to skip it"
+
+            if runner["type"] == "builtin":
+                if producer is None:
+                    raise EvaluationError(
+                        "the built-in evaluation producer was not initialized"
+                    )
+                try:
+                    producer.produce(request, result_path)
+                except Exception as error:
+                    raise EvaluationError(str(error)) from error
+                _atomic_text(
+                    incoming / "stdout.txt",
+                    "AutoTrainer built-in local patch producer completed.\n",
+                )
+                _atomic_text(incoming / "stderr.txt", "")
+            else:
+                substitutions = {
+                    "request": str(request_path),
+                    "result": str(result_path),
+                    "trial_id": trial["trial_id"],
+                    "arm_id": trial["arm_id"],
+                }
+                try:
+                    argv = [item.format(**substitutions) for item in runner["argv"]]
+                except KeyError as error:
+                    raise EvaluationError(
+                        f"unknown command runner placeholder: {error}"
+                    ) from error
+                timeout = int(plan["environment"].get("episode_timeout_seconds") or 900)
+                # argv execution is explicit and shell-free. This prevents task
+                # or artifact values from becoming shell syntax.
+                completed_process = subprocess.run(
+                    argv,
+                    cwd=str(Path(project_root).resolve()),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    shell=False,
+                )
+                _atomic_text(incoming / "stdout.txt", completed_process.stdout)
+                _atomic_text(incoming / "stderr.txt", completed_process.stderr)
+                if not result_path.is_file():
+                    raise EvaluationError(
+                        f"command runner did not write {result_path} "
+                        f"(exit {completed_process.returncode})"
+                    )
+
+            if not result_path.is_file():
+                raise EvaluationError(f"evaluation producer did not write {result_path}")
+            _notify_progress(
+                on_progress,
+                phase="verifying",
+                trial=trial,
+                completed=existing_count + completed,
+                total=total,
             )
-        incoming = run_dir / "incoming" / trial["trial_id"]
-        incoming.mkdir(parents=True, exist_ok=True)
-        request_path = incoming / "request.json"
-        result_path = incoming / "result.json"
-        _write_json(request_path, _request_for(plan, trial))
-        substitutions = {
-            "request": str(request_path),
-            "result": str(result_path),
-            "trial_id": trial["trial_id"],
-            "arm_id": trial["arm_id"],
-        }
-        try:
-            argv = [item.format(**substitutions) for item in runner["argv"]]
-        except KeyError as error:
-            raise EvaluationError(f"unknown command runner placeholder: {error}") from error
-        timeout = int(plan["environment"].get("episode_timeout_seconds") or 900)
-        _notify_progress(
-            on_progress,
-            phase="generating",
-            trial=trial,
-            completed=existing_count + completed,
-            total=total,
-        )
-        # argv execution is explicit and shell-free. This prevents values in a
-        # task or artifact path from being interpreted as shell syntax.
-        completed_process = subprocess.run(
-            argv,
-            cwd=str(Path(project_root).resolve()),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            shell=False,
-        )
-        _atomic_text(incoming / "stdout.txt", completed_process.stdout)
-        _atomic_text(incoming / "stderr.txt", completed_process.stderr)
-        if not result_path.is_file():
-            raise EvaluationError(
-                f"command runner did not write {result_path} (exit {completed_process.returncode})"
+            ingest_evaluation_results(
+                config,
+                project_root,
+                suite_id,
+                result_path,
+                scorer=scorer,
             )
-        _notify_progress(
-            on_progress,
-            phase="verifying",
-            trial=trial,
-            completed=existing_count + completed,
-            total=total,
-        )
-        ingest_evaluation_results(
-            config,
-            project_root,
-            suite_id,
-            result_path,
-            scorer=scorer,
-        )
-        completed += 1
-        _notify_progress(
-            on_progress,
-            phase="trial_completed",
-            trial=trial,
-            completed=existing_count + completed,
-            total=total,
-        )
+            completed += 1
+            _notify_progress(
+                on_progress,
+                phase="trial_completed",
+                trial=trial,
+                completed=existing_count + completed,
+                total=total,
+            )
+    finally:
+        if producer is not None:
+            producer.close()
+
     _notify_progress(
         on_progress,
         phase="completed",
@@ -1906,6 +2492,7 @@ def run_command_suite(
     return {
         "plan_id": plan["plan_id"],
         "suite_id": suite_id,
+        "execution_policy": suite.get("execution_policy"),
         "completed": completed,
         "skipped": skipped,
         "total": total,
