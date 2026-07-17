@@ -15,6 +15,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.local_api import create_local_api_server  # noqa: E402
+from autotrainer.model_service import ModelSearchError  # noqa: E402
 from autotrainer.project_gate import project_run_gate  # noqa: E402
 
 
@@ -36,10 +37,20 @@ class LocalApiTests(unittest.TestCase):
         self.thread.join(timeout=3)
         self.temporary_directory.cleanup()
 
-    def request(self, method: str, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object]]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        include_content_type: bool = True,
+    ) -> tuple[int, dict[str, object]]:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
-        headers = {"Content-Type": "application/json"} if body is not None else {}
-        self.connection.request(method, path, body=body, headers=headers)
+        request_headers = dict(headers or {})
+        if body is not None and include_content_type:
+            request_headers.setdefault("Content-Type", "application/json")
+        self.connection.request(method, path, body=body, headers=request_headers)
         response = self.connection.getresponse()
         return response.status, json.loads(response.read().decode("utf-8"))
 
@@ -52,24 +63,240 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(current["model"]["id"], "Qwen/Qwen3.5-9B")
         self.assertEqual(current["cache"]["status"], "revision_unresolved")
+        self.assertEqual(current["download_job"]["status"], "idle")
+
+    def test_projects_can_be_created_listed_and_selected_without_browser_paths(self) -> None:
+        status, initial = self.request("GET", "/api/v1/projects")
+        self.assertEqual(status, 200)
+        self.assertEqual(initial["active_id"], "startup")
+        self.assertEqual([item["id"] for item in initial["projects"]], ["startup"])
+
+        status, created = self.request(
+            "POST",
+            "/api/v1/projects",
+            {"name": "Frontend Specialist"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["id"], "frontend-specialist")
+        self.assertFalse(created["active"])
+
+        old_managers = (
+            self.server.model_download,
+            self.server.training,
+            self.server.evaluation,
+            self.server.hosting,
+        )
+        status, selected = self.request(
+            "POST",
+            "/api/v1/projects/select",
+            {"project_id": created["id"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(selected["active"])
+        selected_config = Path(selected["config_path"]).resolve()
+        self.assertEqual(self.server.config_path, selected_config)
+        self.assertEqual(self.server.model_download._config_path, selected_config)
+        self.assertEqual(self.server.training._config_path, selected_config)
+        self.assertEqual(self.server.evaluation._config_path, selected_config)
+        self.assertEqual(self.server.hosting.config_path, selected_config)
+        for old, current in zip(
+            old_managers,
+            (
+                self.server.model_download,
+                self.server.training,
+                self.server.evaluation,
+                self.server.hosting,
+            ),
+        ):
+            self.assertIsNot(old, current)
+
+        status, health = self.request("GET", "/api/v1/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(health["active_project"]["id"], created["id"])
+        self.assertEqual(Path(health["config"]), selected_config)
+
+        status, listed = self.request("GET", "/api/v1/projects")
+        self.assertEqual(status, 200)
+        self.assertEqual(listed["active_id"], created["id"])
+
+    def test_project_switch_rejects_an_active_project_lease(self) -> None:
+        status, created = self.request(
+            "POST",
+            "/api/v1/projects",
+            {"name": "Second Project"},
+        )
+        self.assertEqual(status, 201)
+
+        with project_run_gate(self.config_path):
+            status, result = self.request(
+                "POST",
+                "/api/v1/projects/select",
+                {"project_id": created["id"]},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(result["error"]["code"], "project_busy")
+        self.assertEqual(self.server.workspace.active_id, "startup")
+
+    def test_server_uses_a_safe_default_or_explicit_projects_root(self) -> None:
+        self.assertEqual(
+            self.server.workspace.projects_root,
+            (self.config_path.parent / ".autotrainer" / "projects").resolve(),
+        )
+        explicit = self.root / "bounded-projects"
+        second = create_local_api_server(
+            self.config_path,
+            "127.0.0.1",
+            0,
+            projects_root=explicit,
+        )
+        try:
+            self.assertEqual(second.workspace.projects_root, explicit.resolve())
+        finally:
+            second.server_close()
+
+    def test_hugging_face_search_is_bounded_and_sanitizes_upstream_errors(self) -> None:
+        models = [
+            {
+                "id": "example/model",
+                "revision": "a" * 40,
+                "compatibility": "unverified",
+            }
+        ]
+        with patch(
+            "autotrainer.local_api.search_models",
+            return_value=models,
+        ) as search:
+            status, result = self.request(
+                "GET",
+                "/api/v1/models/search?q=qwen&limit=5",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"models": models})
+        search.assert_called_once_with("qwen", limit=5)
+
+        status, result = self.request(
+            "GET",
+            "/api/v1/models/search?q=qwen&limit=5&limit=6",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
+        with patch(
+            "autotrainer.local_api.search_models",
+            side_effect=ModelSearchError("token=hf_supersecretvalue upstream failed"),
+        ):
+            status, result = self.request(
+                "GET",
+                "/api/v1/models/search?q=qwen",
+            )
+        self.assertEqual(status, 503)
+        self.assertNotIn("hf_supersecretvalue", result["error"]["message"])
 
     def test_model_selection_persists_the_same_yaml_used_by_cli(self) -> None:
+        original_cache = load_config(self.config_path).model["cache_dir"]
         status, result = self.request(
+            "POST",
+            "/api/v1/model/select",
+            {"model": "qwen3.5-9b-text"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["model"]["cache_dir"], original_cache)
+        selected = load_config(self.config_path).model
+        self.assertEqual(selected["revision"], "c202236235762e1c871ad0ccb60c8ee5ba337b9a")
+
+        status, rejected = self.request(
             "POST",
             "/api/v1/model/select",
             {"model": "qwen3.5-9b-text", "cache_dir": "D:/models"},
         )
-        self.assertEqual(status, 200)
-        self.assertEqual(result["model"]["cache_dir"], "D:/models")
-        selected = load_config(self.config_path).model
-        self.assertEqual(selected["revision"], "c202236235762e1c871ad0ccb60c8ee5ba337b9a")
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
 
-    def test_download_endpoint_calls_the_shared_model_operation(self) -> None:
-        completed = {"status": "downloaded", "model_id": "Qwen/Qwen3.5-9B"}
-        with patch("autotrainer.local_api.download_model", return_value=completed):
+    def test_download_endpoint_queues_the_server_owned_background_manager(self) -> None:
+        queued = {
+            "id": "a" * 32,
+            "status": "queued",
+            "message": "The exact Hugging Face snapshot is queued for download.",
+            "model_id": "Qwen/Qwen3.5-9B",
+            "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+            "result": None,
+            "kind": "project",
+        }
+        with patch.object(self.server.model_download, "start", return_value=queued) as start:
             status, result = self.request("POST", "/api/v1/model/download", {})
+        self.assertEqual(status, 202)
+        self.assertEqual(result, queued)
+        start.assert_called_once_with()
+
+        with patch.object(
+            self.server.model_download,
+            "snapshot",
+            return_value=queued,
+        ):
+            status, result = self.request("GET", "/api/v1/model/status")
         self.assertEqual(status, 200)
-        self.assertEqual(result, completed)
+        self.assertEqual(result["download_job"], queued)
+
+    def test_fixed_reference_model_has_a_separate_inspection_and_download_route(self) -> None:
+        reference = {
+            "alias": "qwythos-9b-reference",
+            "model_id": "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+            "revision": "b" * 40,
+            "status": "not_downloaded",
+            "snapshot_path": None,
+            "cache_dir": str(self.root / "model-cache"),
+            "receipt": None,
+        }
+        queued = {
+            "id": "c" * 32,
+            "status": "queued",
+            "message": "The exact Hugging Face snapshot is queued for download.",
+            "model_id": reference["model_id"],
+            "revision": reference["revision"],
+            "result": None,
+            "kind": "reference",
+        }
+        with (
+            patch(
+                "autotrainer.local_api.inspect_reference_model",
+                return_value=reference,
+            ) as inspect,
+            patch.object(
+                self.server.model_download,
+                "snapshot",
+                return_value=queued,
+            ),
+        ):
+            status, result = self.request("GET", "/api/v1/reference-model")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {**reference, "download_job": queued})
+        inspect.assert_called_once_with(self.config_path.resolve())
+
+        with patch.object(
+            self.server.model_download,
+            "start_reference",
+            return_value=queued,
+        ) as start_reference:
+            status, result = self.request(
+                "POST",
+                "/api/v1/reference-model/download",
+                {},
+            )
+        self.assertEqual(status, 202)
+        self.assertEqual(result, queued)
+        start_reference.assert_called_once_with()
+
+        # A reference transfer never masquerades as the selected base-model
+        # transfer in the neighboring model panel.
+        with patch.object(
+            self.server.model_download,
+            "snapshot",
+            return_value=queued,
+        ):
+            status, result = self.request("GET", "/api/v1/model/status")
+        self.assertEqual(status, 200)
+        self.assertIsNone(result["download_job"])
 
     def test_source_endpoints_share_the_persisted_source_contract(self) -> None:
         demonstrations = self.root / "accepted.jsonl"
@@ -87,12 +314,26 @@ class LocalApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         source = added["source"]
-        self.assertEqual(
-            set(source),
-            {"id", "kind", "label", "value", "origin", "purpose", "status"},
+        self.assertTrue(
+            {
+                "id",
+                "kind",
+                "label",
+                "value",
+                "origin",
+                "purpose",
+                "modes",
+                "partition",
+                "roles",
+                "filters",
+                "license",
+                "status",
+                "next_action",
+            }
+            <= set(source)
         )
         self.assertEqual(source["purpose"], "examples")
-        self.assertEqual(source["status"], "ready")
+        self.assertEqual(source["status"], "configured")
         self.assertEqual(len(load_config(self.config_path).sources), 1)
 
         status, removed = self.request("DELETE", f"/api/v1/sources/{source['id']}")
@@ -104,6 +345,61 @@ class LocalApiTests(unittest.TestCase):
     def test_source_endpoint_rejects_missing_value(self) -> None:
         status, result = self.request("POST", "/api/v1/sources", {})
 
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
+    def test_source_endpoint_passes_explicit_repository_learning_scope(self) -> None:
+        response = {"source": {"id": "repo"}, "sources": [{"id": "repo"}]}
+        with patch(
+            "autotrainer.local_api.add_source",
+            return_value=response,
+        ) as add:
+            status, result = self.request(
+                "POST",
+                "/api/v1/sources",
+                {
+                    "value": "owner/repository",
+                    "modes": ["accepted_changes", "practice_tasks"],
+                    "revision": "a" * 40,
+                    "include": ["src/**"],
+                    "exclude": ["vendor/**"],
+                    "license_spdx": "MIT",
+                    "license_attribution": "Example authors",
+                },
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result, response)
+        add.assert_called_once_with(
+            self.config_path.resolve(),
+            "owner/repository",
+            modes=["accepted_changes", "practice_tasks"],
+            require_modes=True,
+            revision="a" * 40,
+            include=["src/**"],
+            exclude=["vendor/**"],
+            license_spdx="MIT",
+            license_attribution="Example authors",
+        )
+
+    def test_repository_source_requires_modes_and_rejects_unsupported_fields(self) -> None:
+        status, result = self.request(
+            "POST",
+            "/api/v1/sources",
+            {"value": "owner/repository"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("mode", result["error"]["message"])
+
+        status, result = self.request(
+            "POST",
+            "/api/v1/sources",
+            {
+                "value": "owner/repository",
+                "modes": ["reference_only"],
+                "kind": "repository",
+            },
+        )
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
@@ -212,6 +508,30 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(rejected["error"]["code"], "invalid_request")
 
+    def test_training_events_accept_only_one_nonnegative_cursor(self) -> None:
+        page = {
+            "job_id": "a" * 32,
+            "cursor": 7,
+            "events": [{"sequence": 7, "type": "rubric_scored"}],
+            "truncated": False,
+            "has_more": False,
+        }
+        with patch.object(self.server.training, "events", return_value=page) as events:
+            status, result = self.request(
+                "GET",
+                "/api/v1/training/events?after=6",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, page)
+        events.assert_called_once_with(6)
+
+        status, result = self.request(
+            "GET",
+            "/api/v1/training/events?after=-1",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_evaluation_endpoints_use_the_server_owned_job_manager(self) -> None:
         workspace = {
             "readiness": {"status": "ready", "blockers": []},
@@ -259,6 +579,165 @@ class LocalApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(rejected["error"]["code"], "invalid_request")
+
+    def test_evaluation_start_can_plan_and_choose_the_first_command_suite(self) -> None:
+        planned = {
+            "readiness": {"status": "ready", "blockers": []},
+            "plan": {"plan_id": "sha256:" + "a" * 64},
+            "job": {"status": "idle", "phase": "idle"},
+            "suites": [
+                {"id": "fable_ab", "runner_type": "external"},
+                {"id": "model_benchmark", "runner_type": "command"},
+                {"id": "secondary", "runner_type": "command"},
+            ],
+        }
+        queued = {
+            "id": "b" * 32,
+            "status": "queued",
+            "suite": "model_benchmark",
+            "phase": "queued",
+        }
+        with (
+            patch.object(self.server.evaluation, "plan", return_value=planned) as plan,
+            patch.object(self.server.evaluation, "start", return_value=queued) as start,
+        ):
+            status, result = self.request(
+                "POST",
+                "/api/v1/evaluation/start",
+                {},
+            )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(result, queued)
+        plan.assert_called_once_with()
+        start.assert_called_once_with("model_benchmark")
+
+    def test_evaluation_events_accept_a_reconnect_cursor(self) -> None:
+        page = {
+            "events": [
+                {
+                    "sequence": 4,
+                    "phase": "trial_scored",
+                    "result": {"reward": 0.8},
+                }
+            ],
+            "oldest_sequence": 1,
+            "latest_sequence": 4,
+            "cursor_reset": False,
+        }
+        with patch.object(self.server.evaluation, "events", return_value=page) as events:
+            status, result = self.request(
+                "GET",
+                "/api/v1/evaluation/events?after=3",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, page)
+        events.assert_called_once_with(3)
+
+        status, result = self.request(
+            "GET",
+            "/api/v1/evaluation/events?after=3&unexpected=true",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
+    def test_hosting_endpoints_use_one_loopback_only_manager(self) -> None:
+        ready = {
+            "status": "ready",
+            "message": "An adapter is ready to host.",
+            "endpoint": None,
+        }
+        with patch.object(self.server.hosting, "snapshot", return_value=ready) as snapshot:
+            status, result = self.request("GET", "/api/v1/hosting")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, ready)
+        snapshot.assert_called_once_with()
+
+        loading = {
+            "status": "loading",
+            "message": "The model process is loading weights.",
+            "endpoint": "http://127.0.0.1:9911",
+        }
+        with patch.object(self.server.hosting, "start", return_value=loading) as start:
+            status, result = self.request(
+                "POST",
+                "/api/v1/hosting/start",
+                {"adapter": "sft", "port": 9911},
+            )
+        self.assertEqual(status, 202)
+        self.assertEqual(result, loading)
+        start.assert_called_once_with(adapter="sft", host="127.0.0.1", port=9911)
+
+        stopped = {
+            "status": "stopped",
+            "message": "The local model host is stopped.",
+            "endpoint": None,
+        }
+        with patch.object(self.server.hosting, "stop", return_value=stopped) as stop:
+            status, result = self.request(
+                "POST",
+                "/api/v1/hosting/stop",
+                {},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, stopped)
+        stop.assert_called_once_with()
+
+        completed = {
+            "status": "completed",
+            "model": "frontend-specialist",
+            "content": "A narrow implementation.",
+            "usage": {},
+        }
+        with patch.object(self.server.hosting, "test", return_value=completed) as test:
+            status, result = self.request(
+                "POST",
+                "/api/v1/hosting/test",
+                {"prompt": "Build the page."},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, completed)
+        test.assert_called_once_with("Build the page.")
+
+    def test_mutations_require_json_and_reject_foreign_origins(self) -> None:
+        with patch.object(self.server.training, "start") as start:
+            status, result = self.request(
+                "POST",
+                "/api/v1/training/start",
+                {},
+                headers={"Origin": "https://attacker.example"},
+            )
+        self.assertEqual(status, 403)
+        self.assertEqual(result["error"]["code"], "origin_denied")
+        start.assert_not_called()
+
+        status, result = self.request(
+            "POST",
+            "/api/v1/training/start",
+            {},
+            include_content_type=False,
+        )
+        self.assertEqual(status, 415)
+        self.assertEqual(result["error"]["code"], "invalid_content_type")
+
+        with patch("autotrainer.local_api.remove_source") as remove:
+            status, result = self.request(
+                "DELETE",
+                "/api/v1/sources/example",
+                headers={"Origin": "https://attacker.example"},
+            )
+        self.assertEqual(status, 403)
+        self.assertEqual(result["error"]["code"], "origin_denied")
+        remove.assert_not_called()
+
+    def test_post_operations_reject_extra_payload_fields(self) -> None:
+        status, result = self.request(
+            "POST",
+            "/api/v1/model/download",
+            {"force": True},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
 
     def test_server_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(ConfigError, "loopback"):
