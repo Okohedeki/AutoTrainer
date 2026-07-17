@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -57,6 +61,12 @@ class ConfigTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def _json_command(self, arguments: list[str]) -> tuple[int, object]:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = main(arguments)
+        return status, json.loads(output.getvalue())
+
     def test_init_and_model_use(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(main(["init", directory, "--name", "test-project"]), 0)
@@ -108,6 +118,163 @@ class CliTests(unittest.TestCase):
             write_config(path, default_config(), overwrite=False)
             with self.assertRaisesRegex(ValueError, "not a validated V1 training base"):
                 select_model(path, "qwythos-9b-reference")
+
+    def test_projects_commands_create_list_and_resolve_explicit_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "current" / "autotrainer.yaml"
+            projects_root = root / "projects"
+            projects_root.mkdir()
+            write_config(
+                config_path,
+                default_config(name="Current"),
+                overwrite=False,
+            )
+            common = [
+                "--projects-root",
+                str(projects_root),
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+
+            status, created = self._json_command(
+                ["projects", "create", "CLI Project", *common]
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(created["id"], "cli-project")
+
+            status, listed = self._json_command(["projects", "list", *common])
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                [project["id"] for project in listed["projects"]],
+                ["startup", "cli-project"],
+            )
+
+            status, selected = self._json_command(
+                ["projects", "select", "cli-project", *common]
+            )
+            self.assertEqual(status, 0)
+            self.assertTrue(selected["active"])
+            self.assertEqual(
+                Path(selected["config_path"]).resolve(),
+                projects_root / "cli-project" / "autotrainer.yaml",
+            )
+
+    def test_models_search_uses_shared_service_and_json_contract(self) -> None:
+        result = [{"id": "Qwen/Qwen3.5-9B", "compatibility": "supported"}]
+        with patch(
+            "autotrainer.model_service.search_models",
+            return_value=result,
+        ) as search:
+            status, payload = self._json_command(
+                ["models", "search", "qwen", "--limit", "5", "--json"]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, {"models": result})
+        search.assert_called_once_with("qwen", limit=5)
+
+    def test_source_add_flattens_repeatable_intent_and_scope_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "autotrainer.yaml"
+            expected = {"source": {"id": "owner-repository"}, "sources": []}
+            with patch(
+                "autotrainer.source_service.add_source",
+                return_value=expected,
+            ) as add:
+                status, payload = self._json_command(
+                    [
+                        "source",
+                        "add",
+                        "owner/repository",
+                        "--mode",
+                        "accepted_changes,practice_tasks",
+                        "--include",
+                        "src/**,tests/**",
+                        "--include",
+                        "scripts/**",
+                        "--exclude",
+                        "dist/**",
+                        "--exclude",
+                        "coverage/**,tmp/**",
+                        "--license",
+                        "Apache-2.0",
+                        "--license-attribution",
+                        "Copyright Example",
+                        "--config",
+                        str(config_path),
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        add.assert_called_once_with(
+            config_path,
+            "owner/repository",
+            name=None,
+            kind=None,
+            partition=None,
+            roles=None,
+            modes=["accepted_changes", "practice_tasks"],
+            revision=None,
+            include=["src/**", "tests/**", "scripts/**"],
+            exclude=["dist/**", "coverage/**", "tmp/**"],
+            license_spdx="Apache-2.0",
+            license_attribution="Copyright Example",
+        )
+
+    def test_host_commands_delegate_without_blocking_on_model_load(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        with patch("autotrainer.hosting_service.HostingManager") as manager_type:
+            manager = manager_type.return_value
+            manager.start.return_value = {"status": "loading", "endpoint": "http://127.0.0.1:9000"}
+            status, started = self._json_command(
+                [
+                    "host",
+                    "start",
+                    "--adapter",
+                    "grpo",
+                    "--port",
+                    "9000",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(started["status"], "loading")
+            manager.start.assert_called_once_with(
+                adapter="grpo",
+                host="127.0.0.1",
+                port=9000,
+            )
+
+            manager.snapshot.return_value = {"status": "live"}
+            status, snapshot = self._json_command(
+                ["host", "status", "--config", str(config_path), "--json"]
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(snapshot["status"], "live")
+
+            manager.test.return_value = {"status": "completed", "content": "Hello"}
+            status, tested = self._json_command(
+                ["host", "test", "Hello?", "--config", str(config_path), "--json"]
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(tested["content"], "Hello")
+            manager.test.assert_called_once_with("Hello?")
+
+            manager.stop.return_value = {"status": "stopped"}
+            status, stopped = self._json_command(
+                ["host", "stop", "--config", str(config_path), "--json"]
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(stopped["status"], "stopped")
+
+        self.assertEqual(manager_type.call_count, 4)
+        manager_type.assert_called_with(config_path)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,14 @@ def _config_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
 
+def _csv_values(values: list[str] | None) -> list[str] | None:
+    """Flatten repeatable or comma-separated CLI values in declaration order."""
+
+    if values is None:
+        return None
+    return [item.strip() for value in values for item in value.split(",") if item.strip()]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autotrainer",
@@ -47,6 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--revision", default="main")
     init.add_argument("--force", action="store_true")
 
+    projects = subparsers.add_parser(
+        "projects", help="create and resolve projects in one trusted local workspace"
+    )
+    projects_sub = projects.add_subparsers(dest="projects_command", required=True)
+    projects_list = projects_sub.add_parser("list")
+    projects_list.add_argument("--projects-root", type=Path, required=True)
+    _config_argument(projects_list)
+    projects_create = projects_sub.add_parser("create")
+    projects_create.add_argument("name")
+    projects_create.add_argument("--projects-root", type=Path, required=True)
+    _config_argument(projects_create)
+    projects_select = projects_sub.add_parser(
+        "select", help="resolve a project config for later explicit --config use"
+    )
+    projects_select.add_argument("project_id")
+    projects_select.add_argument("--projects-root", type=Path, required=True)
+    _config_argument(projects_select)
+
     models = subparsers.add_parser("models", help="inspect the small supported model catalogue")
     models_sub = models.add_subparsers(dest="models_command", required=True)
     models_list = models_sub.add_parser("list")
@@ -54,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     models_show = models_sub.add_parser("show")
     models_show.add_argument("model")
     models_show.add_argument("--json", action="store_true")
+    models_search = models_sub.add_parser(
+        "search", help="search Hugging Face with explicit V1 compatibility labels"
+    )
+    models_search.add_argument("query")
+    models_search.add_argument("--limit", type=int, default=12)
+    models_search.add_argument("--json", action="store_true")
 
     model = subparsers.add_parser("model", help="show or update the configured base model")
     model_sub = model.add_subparsers(dest="model_command", required=True)
@@ -93,8 +125,32 @@ def build_parser() -> argparse.ArgumentParser:
     source_add.add_argument("--kind", default=None, choices=["repository", "sft_jsonl", "task_pack"])
     source_add.add_argument("--partition", choices=["train", "evaluation"], default=None)
     source_add.add_argument("--roles", default=None, help="comma-separated repository roles")
+    source_add.add_argument(
+        "--mode",
+        "--modes",
+        dest="modes",
+        action="append",
+        default=None,
+        help=(
+            "repository intent; repeat or comma-separate accepted_changes, "
+            "practice_tasks, reference_only, evaluation_holdout"
+        ),
+    )
     source_add.add_argument("--revision", default=None)
+    source_add.add_argument(
+        "--include",
+        action="append",
+        default=None,
+        help="included repository glob; repeat or comma-separate",
+    )
+    source_add.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="excluded repository glob; repeat or comma-separate",
+    )
     source_add.add_argument("--license", dest="source_license", default=None)
+    source_add.add_argument("--license-attribution", default=None)
     _config_argument(source_add)
     source_remove = source_sub.add_parser("remove", help="remove one declared source")
     source_remove.add_argument("source_id")
@@ -227,6 +283,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(package)
 
+    host = subparsers.add_parser(
+        "host", help="make the downloaded base or trained adapter callable locally"
+    )
+    host_sub = host.add_subparsers(dest="host_command", required=True)
+    host_start = host_sub.add_parser("start", help="spawn a model host and return while it loads")
+    host_start.add_argument(
+        "--adapter", choices=["auto", "grpo", "sft", "base"], default="auto"
+    )
+    host_start.add_argument("--host", default="127.0.0.1")
+    host_start.add_argument("--port", type=int, default=8791)
+    _config_argument(host_start)
+    host_status = host_sub.add_parser("status", help="inspect the durable host receipt")
+    _config_argument(host_status)
+    host_stop = host_sub.add_parser("stop", help="stop the model process and release GPU memory")
+    _config_argument(host_stop)
+    host_test = host_sub.add_parser("test", help="send one prompt to the live model")
+    host_test.add_argument("prompt")
+    _config_argument(host_test)
+
     serve = subparsers.add_parser("serve", help="run the loopback backend used by the human GUI")
     serve.add_argument("--config", type=Path, default=Path("autotrainer.yaml"))
     serve.add_argument("--host", default="127.0.0.1")
@@ -248,13 +323,31 @@ def _run_init(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_projects(arguments: argparse.Namespace) -> int:
+    from .workspace_service import ProjectWorkspace
+
+    workspace = ProjectWorkspace(arguments.projects_root, arguments.config)
+    if arguments.projects_command == "list":
+        result = workspace.list_projects()
+    elif arguments.projects_command == "create":
+        result = workspace.create_project(arguments.name)
+    else:
+        # CLI selection is deliberately explicit rather than global state. The
+        # returned config_path is what an agent passes to its next --config.
+        result = workspace.select_project(arguments.project_id)
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def _run_models(arguments: argparse.Namespace) -> int:
-    from .model_service import list_models
+    from .model_service import list_models, search_models
 
     if arguments.models_command == "list":
         payload = list_models()
-    else:
+    elif arguments.models_command == "show":
         payload = resolve_model(arguments.model)
+    else:
+        payload = {"models": search_models(arguments.query, limit=arguments.limit)}
     _emit(payload, as_json=arguments.json)
     return 0
 
@@ -290,11 +383,7 @@ def _run_source(arguments: argparse.Namespace) -> int:
     if arguments.source_command == "add":
         from .source_service import add_source
 
-        roles = (
-            [role.strip() for role in arguments.roles.split(",") if role.strip()]
-            if arguments.roles is not None
-            else None
-        )
+        roles = _csv_values([arguments.roles]) if arguments.roles is not None else None
         result = add_source(
             arguments.config,
             arguments.uri,
@@ -302,8 +391,12 @@ def _run_source(arguments: argparse.Namespace) -> int:
             kind=arguments.kind,
             partition=arguments.partition,
             roles=roles,
+            modes=_csv_values(arguments.modes),
             revision=arguments.revision,
+            include=_csv_values(arguments.include),
+            exclude=_csv_values(arguments.exclude),
             license_spdx=arguments.source_license,
+            license_attribution=arguments.license_attribution,
         )
         _emit(result, as_json=arguments.json)
         return 0
@@ -606,12 +699,36 @@ def _run_package(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_host(arguments: argparse.Namespace) -> int:
+    from .hosting_service import HostingManager
+
+    manager = HostingManager(arguments.config)
+    if arguments.host_command == "start":
+        # HostingManager spawns a separate process; returning `loading` here is
+        # intentional so agent calls never block on multi-gigabyte model load.
+        result = manager.start(
+            adapter=arguments.adapter,
+            host=arguments.host,
+            port=arguments.port,
+        )
+    elif arguments.host_command == "status":
+        result = manager.snapshot()
+    elif arguments.host_command == "stop":
+        result = manager.stop()
+    else:
+        result = manager.test(arguments.prompt)
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "init":
             return _run_init(arguments)
+        if arguments.command == "projects":
+            return _run_projects(arguments)
         if arguments.command == "models":
             return _run_models(arguments)
         if arguments.command == "model":
@@ -638,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_evaluate(arguments)
         if arguments.command == "package":
             return _run_package(arguments)
+        if arguments.command == "host":
+            return _run_host(arguments)
         if arguments.command == "serve":
             from .local_api import serve_local_api
 
