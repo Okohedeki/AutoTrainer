@@ -162,8 +162,14 @@ def inspect_model_cache(config_path: str | Path) -> dict[str, Any]:
     return result
 
 
-def _materialize_model_owned(config_path: str | Path) -> dict[str, Any]:
-    """Download one immutable model snapshot and update YAML after success."""
+def materialize_model_owned(config_path: str | Path) -> dict[str, Any]:
+    """Download one immutable snapshot while the caller owns the project lease.
+
+    The synchronous CLI uses :func:`materialize_model` below.  The human API
+    reserves the lease before queueing a background worker and calls this
+    narrower entry point so the browser can disconnect without releasing the
+    model or configuration boundary mid-download.
+    """
 
     config = load_config(config_path)
     model_id = str(config.model.get("id", "")).strip()
@@ -243,7 +249,7 @@ def materialize_model(config_path: str | Path) -> dict[str, Any]:
     """Hold the project lease for the complete model download and commit."""
 
     with project_mutation_gate(config_path):
-        return _materialize_model_owned(config_path)
+        return materialize_model_owned(config_path)
 
 
 def require_materialized_model(model: Mapping[str, Any]) -> None:
@@ -278,5 +284,6 @@ __all__ = [
     "ModelCacheError",
     "inspect_model_cache",
     "materialize_model",
+    "materialize_model_owned",
     "require_materialized_model",
 ]
