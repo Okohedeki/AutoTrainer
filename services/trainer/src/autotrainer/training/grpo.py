@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from .telemetry import TrainingEventCallback, make_trainer_log_callback
 from .common import (
     SUPPORTED_MODEL_CLASS,
     TrainingConfigurationError,
@@ -240,6 +241,7 @@ def run_grpo(
     project_root: Path,
     output_dir: Path,
     dry_run: bool = False,
+    on_event: TrainingEventCallback | None = None,
 ) -> dict[str, Any]:
     """Validate and optionally train a QLoRA policy with verified tool-use GRPO."""
 
@@ -260,7 +262,12 @@ def run_grpo(
             get_peft_model,
             prepare_model_for_kbit_training,
         )
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+            TrainerCallback,
+        )
         from trl import GRPOConfig, GRPOTrainer
         from trl.chat_template_utils import get_training_chat_template
     except (ImportError, OSError) as error:
@@ -271,7 +278,18 @@ def run_grpo(
         ) from error
 
     runtime = validate_single_gpu(torch)
-    environment_factory = import_factory(recipe["environment"]["factory"])
+    base_environment_factory = import_factory(recipe["environment"]["factory"])
+
+    def environment_factory() -> Any:
+        """Attach the private observer without changing the TRL tool surface."""
+
+        environment = base_environment_factory()
+        setter = getattr(environment, "_set_episode_callback", None)
+        if on_event is not None and callable(setter):
+            setter(
+                lambda event: on_event({"stage": "grpo", **dict(event)})
+            )
+        return environment
     destination = Path(recipe["output_dir"])
     destination.mkdir(parents=True, exist_ok=True)
     model_recipe = recipe["model"]
@@ -396,6 +414,13 @@ def run_grpo(
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
             environment_factory=environment_factory,
+            callbacks=[
+                make_trainer_log_callback(
+                    TrainerCallback,
+                    stage="grpo",
+                    on_event=on_event,
+                )
+            ],
         )
         train_output = trainer.train()
         trainer.save_model(str(destination))

@@ -618,6 +618,39 @@ class EpisodeFinalizationTests(unittest.TestCase):
             self.assertIs(environment.last_result, result)
             self.assertEqual(environment._finalize(), result)
 
+    def test_grpo_observer_receives_only_the_scored_rubric_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self.prepare_environment(temporary_directory)
+            events: list[dict[str, Any]] = []
+            environment._set_episode_callback(  # type: ignore[attr-defined]
+                lambda event: events.append(dict(event))
+            )
+
+            result = environment._finalize()
+
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(event["type"], "episode_scored")
+            self.assertEqual(event["task_id"], result.task_id)
+            self.assertEqual(event["reward"], result.reward)
+            self.assertTrue(event["hard_gate_passed"])
+            self.assertEqual(
+                set(event["rubric"]),
+                {
+                    "design_rules",
+                    "patch_quality",
+                    "regression_safety",
+                    "responsive_rules",
+                    "task_tests",
+                },
+            )
+            serialized = json.dumps(event)
+            self.assertNotIn(environment.diff, serialized)
+            self.assertNotIn("stdout", serialized)
+            # Returning the cached final result must not duplicate a graph point.
+            self.assertIs(environment._finalize(), result)
+            self.assertEqual(len(events), 1)
+
     def test_browser_tests_are_a_hard_gate_when_declared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             environment = self.prepare_environment(

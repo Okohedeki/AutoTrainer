@@ -47,12 +47,16 @@ class TrainingServiceTests(unittest.TestCase):
 
     def test_teach_runs_only_sft(self) -> None:
         sft_result = {"status": "completed", "stage": "sft"}
+        events: list[dict[str, object]] = []
         with (
             patch("autotrainer.training_service.prepare_project", return_value=_prepared("teach")),
             patch("autotrainer.training_service.run_sft", return_value=sft_result) as run_sft,
             patch("autotrainer.training_service.run_grpo") as run_grpo,
         ):
-            result = run_project_training(self.config_path)
+            result = run_project_training(
+                self.config_path,
+                on_event=lambda event: events.append(dict(event)),
+            )
 
         self.assertEqual(result, {"status": "completed", "recipe": "teach", "stages": [sft_result]})
         run_sft.assert_called_once()
@@ -60,6 +64,15 @@ class TrainingServiceTests(unittest.TestCase):
         stage_config = run_sft.call_args.args[0]
         self.assertTrue(stage_config["sft"]["enabled"])
         self.assertFalse(stage_config["grpo"]["enabled"])
+        self.assertEqual(
+            events,
+            [
+                {"type": "stage_started", "stage": "prepare"},
+                {"type": "stage_completed", "stage": "prepare"},
+                {"type": "stage_started", "stage": "sft"},
+                {"type": "stage_completed", "stage": "sft"},
+            ],
+        )
 
     def test_practice_runs_only_verified_rl(self) -> None:
         rl_result = {"status": "completed", "stage": "grpo"}
@@ -152,7 +165,9 @@ class TrainingServiceTests(unittest.TestCase):
             "recipe": {"token": secret},
         }
 
-        def run(_path: Path, *, on_progress: object) -> dict[str, object]:
+        def run(
+            _path: Path, *, on_progress: object, on_event: object
+        ) -> dict[str, object]:
             on_progress("sft", "Teaching from approved examples.")  # type: ignore[operator]
             time.sleep(0.03)
             return {"status": "completed", "recipe": "teach", "stages": [stage_result]}
@@ -202,6 +217,112 @@ class TrainingServiceTests(unittest.TestCase):
         # the output as the old in-memory-only manager did.
         restored = TrainingJobManager(self.config_path)
         self.assertEqual(restored.snapshot(), completed)
+
+    def test_live_events_are_cursor_ordered_sanitized_and_restored(self) -> None:
+        manager = TrainingJobManager(self.config_path)
+        secret = "hf_event_secret_must_not_persist"
+
+        def run(
+            _path: Path, *, on_progress: object, on_event: object
+        ) -> dict[str, object]:
+            on_progress("grpo", "Practicing against verified tasks.")  # type: ignore[operator]
+            on_event({"type": "stage_started", "stage": "grpo"})  # type: ignore[operator]
+            on_event(  # type: ignore[operator]
+                {
+                    "type": "trainer_log",
+                    "stage": "grpo",
+                    "step": 5,
+                    "epoch": 0.5,
+                    "metrics": {
+                        "loss": 0.25,
+                        "reward": 0.75,
+                        "token_secret": 99,
+                        "text": secret,
+                    },
+                }
+            )
+            on_event(  # type: ignore[operator]
+                {
+                    "type": "episode_scored",
+                    "stage": "grpo",
+                    "task_id": "pricing-task",
+                    "reward": 0.91,
+                    "hard_gate_passed": True,
+                    "gate_reason": None,
+                    "rubric": {
+                        "design_rules": 0.8,
+                        "patch_quality": 0.9,
+                        "regression_safety": 1.0,
+                        "responsive_rules": 0.75,
+                        "task_tests": 1.0,
+                    },
+                    "patch": secret,
+                }
+            )
+            on_event({"type": "stage_completed", "stage": "grpo"})  # type: ignore[operator]
+            return {"status": "completed", "recipe": "practice", "stages": []}
+
+        with patch(
+            "autotrainer.training_service.run_project_training", side_effect=run
+        ):
+            manager.start()
+            manager.close()
+
+        page = manager.events()
+        self.assertEqual(
+            [event["type"] for event in page["events"]],
+            [
+                "stage_started",
+                "trainer_log",
+                "episode_scored",
+                "stage_completed",
+                "job_completed",
+            ],
+        )
+        self.assertEqual(
+            [event["sequence"] for event in page["events"]],
+            list(range(1, 6)),
+        )
+        trainer_log = page["events"][1]
+        self.assertEqual(trainer_log["metrics"], {"loss": 0.25, "reward": 0.75})
+        self.assertEqual(page["events"][2]["rubric"]["task_tests"], 1.0)
+        serialized = json.dumps(page)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn('"patch":', serialized)
+
+        tail = manager.events(after=2)
+        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5])
+        self.assertEqual(tail["cursor"], 5)
+        self.assertFalse(tail["truncated"])
+
+        restored = TrainingJobManager(self.config_path)
+        self.assertEqual(restored.events(), page)
+
+    def test_event_storage_is_bounded_and_reports_a_stale_cursor(self) -> None:
+        manager = TrainingJobManager(self.config_path)
+        with patch("autotrainer.training_service._EVENT_STORAGE_LIMIT", 3):
+            with patch("autotrainer.training_service.Thread") as thread:
+                thread.return_value.start.return_value = None
+                thread.return_value.is_alive.return_value = False
+                job = manager.start()
+            try:
+                for step in range(5):
+                    manager._append_event(  # type: ignore[attr-defined]
+                        job["id"],
+                        {
+                            "type": "trainer_log",
+                            "stage": "sft",
+                            "step": step,
+                            "metrics": {"loss": 1.0 / (step + 1)},
+                        },
+                    )
+            finally:
+                thread.call_args.kwargs["args"][1].release()
+
+        page = manager.events(after=0)
+        self.assertEqual(len(page["events"]), 3)
+        self.assertEqual([event["sequence"] for event in page["events"]], [3, 4, 5])
+        self.assertTrue(page["truncated"])
 
     def test_queued_job_reserves_project_before_worker_execution(self) -> None:
         """The API cannot expose a mutable queued window before its worker."""
@@ -274,7 +395,10 @@ class TrainingServiceTests(unittest.TestCase):
         entered = Event()
         release = Event()
 
-        def run(_path: Path, *, on_progress: object) -> dict[str, object]:
+        def run(
+            _path: Path, *, on_progress: object, on_event: object
+        ) -> dict[str, object]:
+            del on_progress, on_event
             entered.set()
             release.wait(timeout=2)
             return {"status": "completed", "recipe": "teach", "stages": []}

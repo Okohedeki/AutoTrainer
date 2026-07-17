@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from .telemetry import TrainingEventCallback, make_trainer_log_callback
 from .common import (
     SUPPORTED_MODEL_CLASS,
     TrainingConfigurationError,
@@ -131,6 +132,7 @@ def run_sft(
     project_root: Path,
     output_dir: Path,
     dry_run: bool = False,
+    on_event: TrainingEventCallback | None = None,
 ) -> dict[str, Any]:
     """Validate and optionally execute text-only 9B QLoRA SFT.
 
@@ -150,7 +152,12 @@ def run_sft(
         import torch
         from datasets import load_dataset
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+            TrainerCallback,
+        )
         from trl import SFTConfig, SFTTrainer
         from trl.chat_template_utils import get_training_chat_template
     except (ImportError, OSError) as error:
@@ -265,6 +272,15 @@ def run_sft(
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
+            # This callback publishes only numeric values that the trainer
+            # actually logged; it never reads batches, prompts, or tokens.
+            callbacks=[
+                make_trainer_log_callback(
+                    TrainerCallback,
+                    stage="sft",
+                    on_event=on_event,
+                )
+            ],
         )
         train_output = trainer.train()
         trainer.save_model(str(destination))

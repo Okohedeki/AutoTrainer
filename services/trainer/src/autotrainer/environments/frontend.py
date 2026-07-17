@@ -16,7 +16,7 @@ import tempfile
 import time
 import unicodedata
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..environment import CheckResult, EpisodeResult, RolloutVerifierReport, score_rollout
 from ..manifest import TaskManifest
@@ -24,6 +24,17 @@ from ..manifest import TaskManifest
 
 class EpisodeTimeoutError(TimeoutError):
     """Raised when the trusted episode-wide deadline is exhausted."""
+
+
+_RUBRIC_COMPONENTS = (
+    "design_rules",
+    "patch_quality",
+    "regression_safety",
+    "responsive_rules",
+    "task_tests",
+)
+
+EpisodeEventCallback = Callable[[Mapping[str, Any]], None]
 
 
 class FrontendEnvironment:
@@ -50,6 +61,14 @@ class FrontendEnvironment:
         self._deadline: float | None = None
         self._latest_diff = ""
         self._last_result: EpisodeResult | None = None
+        self._episode_callback: EpisodeEventCallback | None = None
+
+    def _set_episode_callback(
+        self, callback: EpisodeEventCallback | None
+    ) -> None:
+        """Attach GRPO telemetry without adding a policy-visible tool method."""
+
+        self._episode_callback = callback
 
     def reset(self, **task_row: Any) -> str:
         """Materialize the task row and return the policy's first observation."""
@@ -576,6 +595,22 @@ class FrontendEnvironment:
             unified_diff=self._latest_diff,
         )
         self._last_result = result
+        if self._episode_callback is not None:
+            # Only verifier scores cross this boundary. The editable patch,
+            # prompts, check output, and tool observations remain private.
+            self._episode_callback(
+                {
+                    "type": "episode_scored",
+                    "task_id": result.task_id,
+                    "reward": result.reward,
+                    "hard_gate_passed": not result.gated,
+                    "gate_reason": result.hard_gate_reason,
+                    "rubric": {
+                        name: float(result.raw_verifier_rates.get(name, 0.0))
+                        for name in _RUBRIC_COMPONENTS
+                    },
+                }
+            )
         return result
 
     def _finish_timeout(self, result: CheckResult, name: str) -> None:
