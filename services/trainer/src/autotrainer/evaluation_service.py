@@ -55,6 +55,12 @@ _PHASES = frozenset(
     }
 )
 _PUBLIC_RESULT_LIMIT = 500
+_PUBLIC_TRIAL_LIMIT = 1000
+_EVENT_SCHEMA_VERSION = 1
+_EVENT_LIMIT = 1000
+_EVENT_PHASES = frozenset(
+    {"queued", "generating", "verifying", "trial_completed", "completed", "failed"}
+)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 _PLAN_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECRET_PATTERNS = (
@@ -190,6 +196,108 @@ def _suite_results(
     return results
 
 
+def _planned_trials(
+    trials: list[Mapping[str, Any]],
+    scored: list[Mapping[str, Any]],
+    job: Mapping[str, Any],
+    suite_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Expose plan identity and only lifecycle state observed by AutoTrainer."""
+
+    completed_ids = {str(result.get("trial_id")) for result in scored}
+    current = (
+        _safe_trial(job.get("current_trial"))
+        if job.get("suite") == suite_id and job.get("status") in _LIVE_JOB_STATUSES
+        else None
+    )
+    active_status = (
+        str(job.get("phase"))
+        if job.get("phase") in {"generating", "verifying"}
+        else None
+    )
+    public: list[dict[str, Any]] = []
+    for raw_trial in trials[:_PUBLIC_TRIAL_LIMIT]:
+        trial = _safe_trial(raw_trial)
+        if trial is None:
+            raise EvaluationServiceError("The frozen evaluation plan contains an invalid trial.")
+        if trial["trial_id"] in completed_ids:
+            status = "completed"
+        elif current is not None and trial["trial_id"] == current["trial_id"] and active_status:
+            status = active_status
+        else:
+            status = "planned"
+        public.append({**trial, "status": status})
+    return public, len(trials) > len(public)
+
+
+def _safe_event(value: object) -> dict[str, Any] | None:
+    """Validate one persisted event and derive its rubric from a safe result."""
+
+    if not isinstance(value, Mapping):
+        return None
+    sequence = value.get("sequence")
+    job_id = value.get("job_id")
+    plan_id = value.get("plan_id")
+    suite = value.get("suite")
+    phase = value.get("phase")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        return None
+    if not isinstance(job_id, str) or re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        return None
+    if not isinstance(plan_id, str) or _PLAN_ID.fullmatch(plan_id) is None:
+        return None
+    if not isinstance(suite, str) or _SAFE_ID.fullmatch(suite) is None:
+        return None
+    if phase not in _EVENT_PHASES:
+        return None
+    completed = _safe_integer(value.get("completed"))
+    total = _safe_integer(value.get("total"))
+    if completed > total:
+        return None
+    trial = _safe_trial(value.get("trial"))
+    safe_result = (
+        _safe_result(value.get("result"), trial)
+        if phase == "trial_completed" and trial is not None
+        else None
+    )
+    result = (
+        {
+            **{key: safe_result[key] for key in ("trial_id", "task_id", "arm_id", "repetition", "seed")},
+            "status": safe_result["status"],
+            "hard_gate_passed": safe_result["hard_gate_passed"],
+            "reward": safe_result["reward"],
+            "components": dict(safe_result["components"]),
+        }
+        if safe_result is not None
+        else None
+    )
+    # A rubric is never accepted independently from disk. It is reconstructed
+    # from the already-whitelisted trusted result so paths, prompts, and model
+    # transcripts cannot enter the browser event stream.
+    rubric = (
+        {
+            "hard_gate_passed": result["hard_gate_passed"],
+            "reward": result["reward"],
+            "components": dict(result["components"]),
+        }
+        if result is not None
+        else None
+    )
+    return {
+        "sequence": sequence,
+        "job_id": job_id,
+        "plan_id": plan_id,
+        "suite": suite,
+        "phase": str(phase),
+        "message": _redact(value.get("message", "Evaluation status changed.")),
+        "completed": completed,
+        "total": total,
+        "trial": trial,
+        "result": result,
+        "rubric": rubric,
+    }
+
+
 def _idle_job(*, plan_id: str | None = None) -> dict[str, Any]:
     return {
         "id": None,
@@ -283,6 +391,63 @@ def _read_job_record(path: Path) -> dict[str, Any] | None:
     if not isinstance(payload, Mapping) or payload.get("schema_version") != _JOB_SCHEMA_VERSION:
         return None
     return _normalize_saved_job(payload.get("job"))
+
+
+def _write_event_record(
+    destination: Path,
+    events: list[Mapping[str, Any]],
+    next_sequence: int,
+) -> None:
+    """Atomically persist the bounded cursor log beside the durable job."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": _EVENT_SCHEMA_VERSION,
+                    "next_sequence": next_sequence,
+                    "events": list(events),
+                },
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_event_record(path: Path) -> tuple[list[dict[str, Any]], int]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return [], 1
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != _EVENT_SCHEMA_VERSION:
+        return [], 1
+    raw_events = payload.get("events")
+    if not isinstance(raw_events, list):
+        return [], 1
+    events: list[dict[str, Any]] = []
+    previous = 0
+    for raw_event in raw_events[-_EVENT_LIMIT:]:
+        event = _safe_event(raw_event)
+        if event is None or event["sequence"] <= previous:
+            return [], 1
+        previous = event["sequence"]
+        events.append(event)
+    next_sequence = payload.get("next_sequence")
+    if (
+        not isinstance(next_sequence, int)
+        or isinstance(next_sequence, bool)
+        or next_sequence <= previous
+    ):
+        return [], 1
+    return events, next_sequence
 
 
 def _load_project(config_path: str | Path) -> ProjectConfig:
@@ -474,6 +639,10 @@ def _suite_snapshot(
     # Fable results stay arm-blind in the localhost response.  The reviewed
     # report, not per-arm trial telemetry, is the point where identity returns.
     public_results = [] if kind == "fable_ab" else scored[-_PUBLIC_RESULT_LIMIT:]
+    public_trials: list[dict[str, Any]] = []
+    trials_truncated = False
+    if runner_type == "command":
+        public_trials, trials_truncated = _planned_trials(trials, scored, job, suite_id)
     return {
         "id": suite_id,
         "kind": kind,
@@ -482,6 +651,11 @@ def _suite_snapshot(
         "message": message,
         "completed": completed,
         "total": total,
+        # Command-backed plans are safe to show before execution because this
+        # projection contains identity and observed lifecycle only. External
+        # blind-review arms stay withheld.
+        "trials": public_trials,
+        "trials_truncated": trials_truncated,
         "results": public_results,
         "results_truncated": len(scored) > len(public_results) and kind != "fable_ab",
         "results_withheld_for_blind_review": kind == "fable_ab" and bool(scored),
@@ -497,7 +671,9 @@ class EvaluationJobManager:
         self._config_path = Path(config_path).expanduser().resolve()
         config = _load_project(self._config_path)
         self._record_path = config.artifact_dir / "evaluation" / "current-job.json"
+        self._events_path = config.artifact_dir / "evaluation" / "events.json"
         self._worker: Thread | None = None
+        self._events, self._next_event_sequence = _read_event_record(self._events_path)
         self._job = _read_job_record(self._record_path) or _idle_job()
         if self._job["status"] in _LIVE_JOB_STATUSES and not project_is_busy(
             self._config_path
@@ -509,14 +685,42 @@ class EvaluationJobManager:
                 current_trial=None,
             )
             _write_job_record(self._record_path, self._job)
+            self._append_event_locked("failed")
 
     @property
     def record_path(self) -> Path:
         return self._record_path
 
+    @property
+    def events_path(self) -> Path:
+        return self._events_path
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return deepcopy(self._job)
+
+    def events(self, after_sequence: int = 0) -> dict[str, Any]:
+        """Return a cursor page from the bounded durable event history."""
+
+        if (
+            not isinstance(after_sequence, int)
+            or isinstance(after_sequence, bool)
+            or after_sequence < 0
+        ):
+            raise EvaluationServiceError("after_sequence must be a non-negative integer")
+        with self._lock:
+            oldest = self._events[0]["sequence"] if self._events else 0
+            latest = self._next_event_sequence - 1
+            return {
+                "events": deepcopy(
+                    [event for event in self._events if event["sequence"] > after_sequence]
+                ),
+                "oldest_sequence": oldest,
+                "latest_sequence": latest,
+                # A stale browser cursor can explicitly replace its local list
+                # instead of silently missing events trimmed by the bound.
+                "cursor_reset": bool(self._events and after_sequence < oldest - 1),
+            }
 
     def workspace(self) -> dict[str, Any]:
         """Combine the durable job with immutable artifacts; never mutate on GET."""
@@ -553,12 +757,56 @@ class EvaluationJobManager:
             "suites": suites,
         }
 
-    def _update(self, job_id: str, **values: Any) -> None:
+    def _append_event_locked(
+        self,
+        phase: str,
+        *,
+        trial: Mapping[str, Any] | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        if phase not in _EVENT_PHASES:
+            return
+        raw_event = {
+            "sequence": self._next_event_sequence,
+            "job_id": self._job.get("id"),
+            "plan_id": self._job.get("plan_id"),
+            "suite": self._job.get("suite"),
+            "phase": phase,
+            "message": self._job.get("message"),
+            "completed": self._job.get("completed"),
+            "total": self._job.get("total"),
+            "trial": dict(trial) if isinstance(trial, Mapping) else None,
+            "result": dict(result) if isinstance(result, Mapping) else None,
+        }
+        event = _safe_event(raw_event)
+        if event is None:
+            raise EvaluationServiceError("Evaluation produced an invalid public event.")
+        self._events.append(event)
+        if len(self._events) > _EVENT_LIMIT:
+            self._events = self._events[-_EVENT_LIMIT:]
+        self._next_event_sequence += 1
+        _write_event_record(self._events_path, self._events, self._next_event_sequence)
+
+    def _update(
+        self,
+        job_id: str,
+        *,
+        event_phase: str | None = None,
+        event_trial: Mapping[str, Any] | None = None,
+        event_result: Mapping[str, Any] | None = None,
+        **values: Any,
+    ) -> None:
         with self._lock:
             if self._job.get("id") != job_id:
                 return
             self._job.update(values)
             _write_job_record(self._record_path, self._job)
+            if event_phase is not None:
+                self._append_event_locked(
+                    event_phase,
+                    trial=event_trial,
+                    result=event_result,
+                )
 
     def plan(self) -> dict[str, Any]:
         """Freeze the configured proof matrix without starting any producer."""
@@ -619,6 +867,7 @@ class EvaluationJobManager:
                     "results_truncated": len(scored) > _PUBLIC_RESULT_LIMIT,
                 }
                 _write_job_record(self._record_path, self._job)
+                self._append_event_locked("queued")
                 worker = Thread(
                     target=self._run,
                     args=(job_id, suite_name, lease),
@@ -635,6 +884,7 @@ class EvaluationJobManager:
                         message="Evaluation could not start its local worker.",
                     )
                     _write_job_record(self._record_path, self._job)
+                    self._append_event_locked("failed")
                     self._worker = None
                     raise EvaluationServiceError(self._job["message"]) from error
             except Exception:
@@ -668,13 +918,36 @@ class EvaluationJobManager:
                 "total": total,
                 "current_trial": trial,
             }
+            event_result: Mapping[str, Any] | None = None
             if phase in {"trial_completed", "completed"}:
                 config = _load_project(self._config_path)
                 plan, run_dir = load_current_plan(config.data, config.root)
                 results = _suite_results(plan, run_dir, suite_id)
                 values["results"] = results[-_PUBLIC_RESULT_LIMIT:]
                 values["results_truncated"] = len(results) > _PUBLIC_RESULT_LIMIT
-            self._update(job_id, **values)
+                if phase == "trial_completed" and trial is not None:
+                    event_result = next(
+                        (
+                            result
+                            for result in results
+                            if result.get("trial_id") == trial["trial_id"]
+                        ),
+                        None,
+                    )
+            self._update(
+                job_id,
+                # The core's completed callback precedes this service's final
+                # scored-set validation. Publish completed only after that
+                # validation below, never optimistically here.
+                event_phase=(
+                    phase
+                    if phase in {"generating", "verifying", "trial_completed"}
+                    else None
+                ),
+                event_trial=trial,
+                event_result=event_result,
+                **values,
+            )
 
         try:
             with lease.activate("run"):
@@ -695,6 +968,7 @@ class EvaluationJobManager:
                         )
                     self._update(
                         job_id,
+                        event_phase="completed",
                         status="completed",
                         phase="completed",
                         message="The local benchmark completed.",
@@ -712,6 +986,7 @@ class EvaluationJobManager:
                     )
                     self._update(
                         job_id,
+                        event_phase="failed",
                         status="failed",
                         phase="failed",
                         message=_redact(public),
