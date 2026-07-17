@@ -216,6 +216,27 @@ class ProjectWorkspace:
                 self._active_id = project_id
             return self._record(project_id, config_path)
 
+    def discard_created_project(self, project_id: str, config_path: str | Path) -> None:
+        """Hide only the exact, inactive project created by a failed API call."""
+
+        with self._lock:
+            if project_id == _STARTUP_ID or self._active_id == project_id:
+                raise ConfigError("cannot discard the startup or active project")
+            expected = self._managed_config(project_id)
+            supplied = Path(config_path).expanduser().resolve()
+            if supplied != expected:
+                raise ConfigError("created project path does not match its identifier")
+
+            # Removing the one configuration is enough to make the failed
+            # project undiscoverable. rmdir is deliberately non-recursive: a
+            # lease scaffold or any unexpected user file is never destroyed.
+            if expected.is_file():
+                expected.unlink()
+            try:
+                expected.parent.rmdir()
+            except OSError:
+                pass
+
     def select_project(self, project_id: str) -> dict[str, Any]:
         """Select a validated record; long-job policy remains the API's job."""
 

@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +16,11 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.local_api import create_local_api_server  # noqa: E402
 from autotrainer.model_service import ModelSearchError  # noqa: E402
-from autotrainer.project_gate import project_run_gate  # noqa: E402
+from autotrainer.project_gate import (  # noqa: E402
+    acquire_project_lease,
+    ProjectBusyError,
+    project_run_gate,
+)
 
 
 class LocalApiTests(unittest.TestCase):
@@ -131,6 +135,82 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(result["error"]["code"], "project_busy")
         self.assertEqual(self.server.workspace.active_id, "startup")
+        self.assertEqual(
+            [item["id"] for item in self.server.workspace.list_projects()["projects"]],
+            ["startup"],
+        )
+
+    def test_project_creation_rolls_back_when_the_target_lease_is_unavailable(self) -> None:
+        marker = (
+            self.server.workspace.projects_root
+            / "lease-contended"
+            / "keep.txt"
+        )
+
+        def acquire_or_reject(path: str | Path):
+            if Path(path).resolve() == self.config_path.resolve():
+                return acquire_project_lease(path)
+            # Simulate an unexpected file appearing after creation. Rollback
+            # must hide the config without recursively deleting that file.
+            marker.write_text("preserve me", encoding="utf-8")
+            raise ProjectBusyError("target project is busy")
+
+        with patch(
+            "autotrainer.local_api.acquire_project_lease",
+            side_effect=acquire_or_reject,
+        ):
+            status, result = self.request(
+                "POST",
+                "/api/v1/projects",
+                {"name": "Lease Contended"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(result["error"]["code"], "project_busy")
+        self.assertTrue(marker.is_file())
+        self.assertFalse((marker.parent / "autotrainer.yaml").exists())
+        self.assertEqual(
+            [item["id"] for item in self.server.workspace.list_projects()["projects"]],
+            ["startup"],
+        )
+
+    def test_project_creation_rolls_back_after_partial_manager_construction(self) -> None:
+        original_managers = (
+            self.server.model_download,
+            self.server.training,
+            self.server.evaluation,
+            self.server.hosting,
+        )
+        partial_download = Mock()
+        with (
+            patch(
+                "autotrainer.local_api.ModelDownloadManager",
+                return_value=partial_download,
+            ),
+            patch(
+                "autotrainer.local_api.TrainingJobManager",
+                side_effect=RuntimeError("manager setup failed"),
+            ),
+        ):
+            status, result = self.request(
+                "POST",
+                "/api/v1/projects",
+                {"name": "Broken Context"},
+            )
+
+        self.assertEqual(status, 500)
+        self.assertEqual(result["error"]["code"], "internal_error")
+        partial_download.close.assert_called_once_with()
+        self.assertEqual(self.server.workspace.active_id, "startup")
+        self.assertEqual(
+            (
+                self.server.model_download,
+                self.server.training,
+                self.server.evaluation,
+                self.server.hosting,
+            ),
+            original_managers,
+        )
         self.assertEqual(
             [item["id"] for item in self.server.workspace.list_projects()["projects"]],
             ["startup"],

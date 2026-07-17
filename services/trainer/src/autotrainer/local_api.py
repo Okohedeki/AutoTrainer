@@ -7,6 +7,7 @@ of model, training, or evaluation policy and avoids hidden GUI-only state.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -200,17 +201,23 @@ class LocalApiServer(ThreadingHTTPServer):
     def _install_project_context(self, project_id: str, target: Path) -> dict[str, Any]:
         """Construct every manager before publishing a new active project."""
 
-        model_download = ModelDownloadManager(target)
-        training = TrainingJobManager(target)
-        evaluation = EvaluationJobManager(target)
-        hosting = HostingManager(target)
+        constructed: list[object] = []
         try:
+            model_download = ModelDownloadManager(target)
+            constructed.append(model_download)
+            training = TrainingJobManager(target)
+            constructed.append(training)
+            evaluation = EvaluationJobManager(target)
+            constructed.append(evaluation)
+            hosting = HostingManager(target)
+            constructed.append(hosting)
             selected = self.workspace.select_project(project_id)
         except Exception:
-            hosting.close()
-            evaluation.close()
-            training.close()
-            model_download.close()
+            # A constructor can fail after earlier managers opened resources.
+            # Close only those new managers; the current context stays intact.
+            for manager in reversed(constructed):
+                with suppress(Exception):
+                    manager.close()  # type: ignore[attr-defined]
             raise
         old_download, old_training, old_evaluation, old_hosting = (
             self.model_download,
@@ -224,10 +231,11 @@ class LocalApiServer(ThreadingHTTPServer):
             evaluation,
             hosting,
         )
-        old_hosting.close()
-        old_evaluation.close()
-        old_training.close()
-        old_download.close()
+        # The new context is already published. Cleanup failures in an idle
+        # old manager must not turn a successful switch into a failed POST.
+        for manager in (old_hosting, old_evaluation, old_training, old_download):
+            with suppress(Exception):
+                manager.close()
         return selected
 
     def create_project(self, name: str) -> dict[str, Any]:
@@ -237,6 +245,7 @@ class LocalApiServer(ThreadingHTTPServer):
             self._assert_context_idle()
             current_lease = acquire_project_lease(self.config_path)
             target_lease = None
+            created: dict[str, Any] | None = None
             try:
                 created = self.workspace.create_project(name)
                 target = self.workspace.resolve_project(str(created["id"]))
@@ -244,6 +253,15 @@ class LocalApiServer(ThreadingHTTPServer):
                 # as the active GUI context. No agent can mutate it mid-switch.
                 target_lease = acquire_project_lease(target)
                 return self._install_project_context(str(created["id"]), target)
+            except Exception:
+                if created is not None:
+                    # Roll back the exact inactive record created by this
+                    # request. Existing projects and unexpected files remain.
+                    self.workspace.discard_created_project(
+                        str(created["id"]),
+                        str(created["config_path"]),
+                    )
+                raise
             finally:
                 if target_lease is not None:
                     target_lease.release()
