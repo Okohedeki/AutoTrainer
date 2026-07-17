@@ -22,6 +22,7 @@ from .config import ConfigError
 from .device_gate import (
     DeviceLease,
     acquire_device_lease,
+    clear_cuda_memory,
     device_run_gate,
 )
 from .model_cache import ModelCacheError
@@ -750,8 +751,9 @@ class TrainingJobManager:
                         },
                     )
         finally:
-            # The training call has released its model objects before the
-            # shared device becomes available to another project.
+            # The training call has unwound its model and trainer references.
+            # Return cached CUDA blocks before another process claims GPU 0.
+            clear_cuda_memory()
             device_lease.release()
             lease.release()
 

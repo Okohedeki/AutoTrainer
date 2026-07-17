@@ -19,7 +19,12 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from .config import ConfigError, ProjectConfig, load_config
-from .device_gate import DeviceLease, acquire_device_lease, device_run_gate
+from .device_gate import (
+    DeviceLease,
+    acquire_device_lease,
+    clear_cuda_memory,
+    device_run_gate,
+)
 from .evaluation import (
     EvaluationError,
     EvaluationProgressCallback,
@@ -1021,6 +1026,9 @@ class EvaluationJobManager:
                         current_trial=None,
                     )
         finally:
+            # Producer/model locals have unwound at this boundary; clear any
+            # unused allocator blocks before publishing GPU 0 as available.
+            clear_cuda_memory()
             device_lease.release()
             lease.release()
 

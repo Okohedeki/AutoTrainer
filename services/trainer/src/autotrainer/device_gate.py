@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import gc
 import hashlib
 import os
 from pathlib import Path
@@ -35,6 +36,30 @@ _LOCK_ROOT = Path(tempfile.gettempdir()) / "autotrainer-gpu-leases" / _USER_SCOP
 
 class DeviceBusyError(ProjectBusyError):
     """Raised instead of oversubscribing the single V1 CUDA device."""
+
+
+def clear_cuda_memory() -> None:
+    """Return unused CUDA allocations without masking a completed job result.
+
+    Training dependencies are optional for setup-only installs, and a damaged
+    CUDA runtime must not strand the OS lease forever. Python references should
+    already have unwound before callers invoke this final best-effort cleanup.
+    """
+
+    try:
+        gc.collect()
+    except Exception:
+        # Garbage collection is advisory here; lease release remains mandatory.
+        pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        # Missing torch and broken CUDA drivers are reported by the job itself.
+        # Cleanup must never replace that useful terminal state or leak the lock.
+        pass
 
 
 def _device_name(value: str) -> str:
@@ -161,6 +186,9 @@ def device_run_gate(device: str = DEFAULT_DEVICE) -> Iterator[None]:
         with lease.activate():
             yield
     finally:
+        # The guarded call has unwound its model/trainer locals. Empty PyTorch's
+        # process cache before another process is allowed to claim GPU 0.
+        clear_cuda_memory()
         lease.release()
 
 
@@ -169,5 +197,6 @@ __all__ = [
     "DeviceBusyError",
     "DeviceLease",
     "acquire_device_lease",
+    "clear_cuda_memory",
     "device_run_gate",
 ]
