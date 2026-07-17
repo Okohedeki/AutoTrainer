@@ -722,6 +722,7 @@ def build_plan(
         )
         runner = _mapping(suite.get("runner"))
         runner_type = _string(runner.get("type"))
+        runner_blockers: list[str] = []
         if evaluation_requested:
             unknown_members = sorted(
                 _string(member) for member in members if _string(member) not in evaluation_arms
@@ -731,64 +732,83 @@ def build_plan(
                     f"suite {suite_id!r} references unknown arms: "
                     + ", ".join(unknown_members)
                 )
-            runner_producer = _string(runner.get("producer"))
-            runner_version = _string(runner.get("version"))
-            runner_fingerprint = _string(runner.get("orchestration_sha256"))
-            if not runner_producer:
-                evaluation_blockers.append(
-                    f"suite {suite_id!r} runner requires producer"
+            if runner_type == "builtin":
+                # The built-in runner identity is code-owned and frozen later;
+                # there are no executable paths or editable prompt hashes for
+                # the project author to fill in.
+                from .local_evaluation_runner import builtin_runner_identity
+
+                runner = {"type": "builtin", **builtin_runner_identity()}
+            else:
+                runner_producer = _string(runner.get("producer"))
+                runner_version = _string(runner.get("version"))
+                runner_fingerprint = _string(runner.get("orchestration_sha256"))
+                if not runner_producer:
+                    runner_blockers.append(
+                        f"suite {suite_id!r} runner requires producer"
+                    )
+                if not runner_version or runner_version.upper().startswith("REPLACE_"):
+                    runner_blockers.append(
+                        f"suite {suite_id!r} runner requires a concrete version"
+                    )
+                fingerprint_match = re.fullmatch(
+                    r"sha256:([0-9a-fA-F]{64})", runner_fingerprint
                 )
-            if not runner_version or runner_version.upper().startswith("REPLACE_"):
-                evaluation_blockers.append(
-                    f"suite {suite_id!r} runner requires a concrete version"
-                )
-            fingerprint_match = re.fullmatch(
-                r"sha256:([0-9a-fA-F]{64})", runner_fingerprint
-            )
-            if fingerprint_match is None or not set(fingerprint_match.group(1)) - {"0"}:
-                evaluation_blockers.append(
-                    f"suite {suite_id!r} runner requires a non-placeholder immutable orchestration_sha256"
-                )
+                if fingerprint_match is None or not set(fingerprint_match.group(1)) - {"0"}:
+                    runner_blockers.append(
+                        f"suite {suite_id!r} runner requires a non-placeholder immutable orchestration_sha256"
+                    )
             if runner_type == "command":
                 argv = runner.get("argv")
                 if not isinstance(argv, list) or not argv:
-                    evaluation_blockers.append(
+                    runner_blockers.append(
                         f"suite {suite_id!r} command runner has no argv"
                     )
                 else:
                     if any("REPLACE_WITH" in _string(part).upper() for part in argv):
-                        evaluation_blockers.append(
+                        runner_blockers.append(
                             f"suite {suite_id!r} command runner argv is still a placeholder"
                         )
                     if not any("{request}" in _string(part) for part in argv):
-                        evaluation_blockers.append(
+                        runner_blockers.append(
                             f"suite {suite_id!r} command runner argv requires {{request}}"
                         )
                     if not any("{result}" in _string(part) for part in argv):
-                        evaluation_blockers.append(
+                        runner_blockers.append(
                             f"suite {suite_id!r} command runner argv requires {{result}}"
                         )
             elif runner_type == "external":
                 if not _string(runner.get("result_schema")):
-                    evaluation_blockers.append(
+                    runner_blockers.append(
                         f"suite {suite_id!r} external runner requires result_schema"
                     )
-            else:
-                evaluation_blockers.append(
-                    f"suite {suite_id!r} runner must be command or external"
+            elif runner_type != "builtin":
+                runner_blockers.append(
+                    f"suite {suite_id!r} runner must be builtin, command, or external"
                 )
+            if runner_type == "external" and runner_blockers:
+                evaluation_warnings.append(
+                    f"suite {suite_id!r} is deferred until its external runner is pinned"
+                )
+            else:
+                evaluation_blockers.extend(runner_blockers)
         pair_count = evaluation_ready_tasks * repetitions_for_plan
         suite_plans[str(suite_id)] = {
             "kind": _string(suite.get("kind")) or None,
             "arms": members,
             "runner": dict(runner),
             "runner_status": (
-                "declared"
+                "ready_local"
+                if runner_type == "builtin"
+                else "declared"
                 if runner_type == "command"
+                else "deferred_configuration"
+                if runner_type == "external" and runner_blockers
                 else "awaiting_external_results"
                 if runner_type == "external"
                 else "invalid"
             ),
+            "blockers": runner_blockers,
             "pair_count": pair_count,
             "arm_run_count": pair_count * len(members),
         }

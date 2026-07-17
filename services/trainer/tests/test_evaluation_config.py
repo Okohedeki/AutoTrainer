@@ -25,9 +25,18 @@ def evaluation_config() -> dict:
     reference["id"] = "example/reference-9b"
     reference["revision"] = "b" * 40
     model_runner = payload["evaluation"]["suites"]["model_benchmark"]["runner"]
-    model_runner["version"] = "1.0.0"
-    model_runner["orchestration_sha256"] = "sha256:" + "c" * 64
-    model_runner["argv"][0] = "model-agent"
+    # Most validation cases below exercise the extension point for a custom
+    # command producer. New projects use the code-owned built-in runner.
+    model_runner.clear()
+    model_runner.update(
+        {
+            "type": "command",
+            "producer": "local-agent",
+            "version": "1.0.0",
+            "orchestration_sha256": "sha256:" + "c" * 64,
+            "argv": ["model-agent", "--request", "{request}", "--result", "{result}"],
+        }
+    )
     fable_runner = payload["evaluation"]["suites"]["fable_ab"]["runner"]
     fable_runner["version"] = "1.0.0"
     fable_runner["orchestration_sha256"] = "sha256:" + "d" * 64
@@ -105,6 +114,16 @@ class EvaluationConfigTests(unittest.TestCase):
             {"reference", "control", "candidate"},
         )
         self.assertEqual(set(evaluation["candidates"]), set(evaluation["arms"]))
+        self.assertEqual(
+            evaluation["suites"]["model_benchmark"]["runner"],
+            {"type": "builtin"},
+        )
+        reference = evaluation["arms"]["reference_9b"]["model"]
+        self.assertEqual(
+            reference["id"],
+            "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+        )
+        self.assertEqual(reference["revision"], "14a29bae5143091aeaf87ad37120de4cd57d592c")
 
     def test_rejects_seed_repetition_mismatch(self) -> None:
         payload = evaluation_config()
@@ -238,6 +257,33 @@ class EvaluationPlannerTests(unittest.TestCase):
             )
             self.assertFalse(
                 any("repository holdout" in item for item in evaluation["blockers"])
+            )
+
+    def test_default_fable_placeholders_are_deferred_without_blocking_local_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = evaluation_config()
+            payload["evaluation"]["suites"]["fable_ab"]["runner"] = dict(
+                default_config()["evaluation"]["suites"]["fable_ab"]["runner"]
+            )
+            write_compiled_evaluation(root)
+            write_adapter(root)
+
+            plan = build_plan(payload, root, evaluation_scan())
+
+            evaluation = plan["stages"]["evaluation"]
+            self.assertEqual(evaluation["status"], "inputs_ready")
+            self.assertEqual(
+                evaluation["suites"]["model_benchmark"]["runner_status"],
+                "declared",
+            )
+            self.assertEqual(
+                evaluation["suites"]["fable_ab"]["runner_status"],
+                "deferred_configuration",
+            )
+            self.assertTrue(evaluation["suites"]["fable_ab"]["blockers"])
+            self.assertFalse(
+                any("fable_ab" in item for item in evaluation["blockers"])
             )
 
     def test_repository_holdout_blocks_source_aliases_and_exact_commit_clones(self) -> None:

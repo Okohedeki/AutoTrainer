@@ -57,7 +57,6 @@ FAIRNESS_TRUE_FIELDS = (
     "same_sampling",
     "require_seed_control",
     "immutable_models_and_adapter",
-    "randomize_arm_order",
     "failures_score_zero",
 )
 
@@ -280,16 +279,31 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
         suite_arms[suite_id] = list(members)
         runner = _mapping(suite.get("runner"), f"evaluation.suites.{suite_id}.runner", errors)
         runner_type = runner.get("type")
-        if runner_type not in {"command", "external"}:
-            errors.append(f"evaluation.suites.{suite_id}.runner.type must be command or external")
+        if runner_type not in {"builtin", "command", "external"}:
+            errors.append(
+                f"evaluation.suites.{suite_id}.runner.type must be builtin, command, or external"
+            )
         runner_label = f"evaluation.suites.{suite_id}.runner"
-        if not str(runner.get("producer", "")).strip():
-            errors.append(f"{runner_label}.producer is required")
-        if not str(runner.get("version", "")).strip():
-            errors.append(f"{runner_label}.version is required")
-        orchestration_sha256 = str(runner.get("orchestration_sha256", "")).strip()
-        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", orchestration_sha256):
-            errors.append(f"{runner_label}.orchestration_sha256 must be sha256:<64 hex characters>")
+        if runner_type == "builtin":
+            # Built-in identity is derived from the installed code when the
+            # plan freezes. Users cannot accidentally claim a different prompt
+            # or producer version for the runner AutoTrainer actually invokes.
+            unknown = sorted(set(runner) - {"type"})
+            if unknown:
+                errors.append(
+                    f"{runner_label} builtin runner accepts only type; remove: "
+                    + ", ".join(unknown)
+                )
+        else:
+            if not str(runner.get("producer", "")).strip():
+                errors.append(f"{runner_label}.producer is required")
+            if not str(runner.get("version", "")).strip():
+                errors.append(f"{runner_label}.version is required")
+            orchestration_sha256 = str(runner.get("orchestration_sha256", "")).strip()
+            if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", orchestration_sha256):
+                errors.append(
+                    f"{runner_label}.orchestration_sha256 must be sha256:<64 hex characters>"
+                )
         if runner_type == "command":
             argv = runner.get("argv")
             if not isinstance(argv, list) or not argv or any(
@@ -316,8 +330,8 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     model_runner = _mapping(
         model_suite.get("runner"), "evaluation.suites.model_benchmark.runner", errors
     )
-    if model_runner.get("type") != "command":
-        errors.append("model_benchmark runner must use type: command")
+    if model_runner.get("type") not in {"builtin", "command"}:
+        errors.append("model_benchmark runner must use type: builtin or command")
 
     fable_members = suite_arms.get("fable_ab", [])
     fable_roles = {arm_roles.get(member) for member in fable_members}
@@ -342,6 +356,28 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     for key in FAIRNESS_TRUE_FIELDS:
         if fairness.get(key) is not True:
             errors.append(f"evaluation.fairness.{key} must be true")
+    policy_fields = {
+        "pair_position_policy",
+        "execution_order_policy",
+        "per_trial_arm_randomization",
+    }
+    legacy_policy = fairness.get("randomize_arm_order") is True
+    declared_policy = any(key in fairness for key in policy_fields)
+    if legacy_policy and declared_policy:
+        errors.append(
+            "evaluation.fairness cannot combine legacy randomize_arm_order with the V1 execution policy"
+        )
+    elif not legacy_policy:
+        if fairness.get("pair_position_policy") != "deterministic_counterbalance":
+            errors.append(
+                "evaluation.fairness.pair_position_policy must be deterministic_counterbalance"
+            )
+        if fairness.get("execution_order_policy") != "frozen_per_suite":
+            errors.append(
+                "evaluation.fairness.execution_order_policy must be frozen_per_suite"
+            )
+        if fairness.get("per_trial_arm_randomization") is not False:
+            errors.append("evaluation.fairness.per_trial_arm_randomization must be false")
     if fairness.get("allow_unplanned_reruns") is not False:
         errors.append("evaluation.fairness.allow_unplanned_reruns must be false")
 
@@ -614,6 +650,13 @@ def default_config(
 ) -> dict[str, Any]:
     """Return the documented one-RTX-4090 smoke recipe."""
 
+    # The reference arm is a product-level benchmark choice, not setup the
+    # user should have to rediscover in every new project. Keep it aligned with
+    # the same immutable catalog record used by the downloader and GUI.
+    from .models import MODEL_CATALOG
+
+    reference_model = MODEL_CATALOG["qwythos-9b-reference"]
+
     return {
         "schema_version": 1,
         "project": {"name": name, "seed": 42, "artifact_dir": ".autotrainer"},
@@ -710,13 +753,13 @@ def default_config(
             "candidates": ["reference_9b", "base_fable", "autotrainer"],
             "arms": {
                 "reference_9b": {
-                    "label": "Declared 9B reference",
+                    "label": "Qwythos 9B reference",
                     "role": "reference",
                     "parameter_class": "9b",
                     "model": {
                         "provider": "huggingface",
-                        "id": "REPLACE_WITH_REFERENCE_9B",
-                        "revision": "0" * 40,
+                        "id": reference_model["id"],
+                        "revision": reference_model["default_revision"],
                         "loader": "auto_text_causal_lm",
                         "trust_remote_code": False,
                         "dtype": "bfloat16",
@@ -746,17 +789,10 @@ def default_config(
                     "kind": "model_benchmark",
                     "arms": ["reference_9b", "autotrainer"],
                     "runner": {
-                        "type": "command",
-                        "producer": "local-model-agent",
-                        "version": "REPLACE_WITH_RUNNER_VERSION",
-                        "orchestration_sha256": "sha256:" + "0" * 64,
-                        "argv": [
-                            "REPLACE_WITH_MODEL_AGENT",
-                            "--request",
-                            "{request}",
-                            "--result",
-                            "{result}",
-                        ],
+                        # AutoTrainer owns the exact prompt and local 4-bit
+                        # loader. Its immutable identity is frozen into the
+                        # evaluation plan from the installed code.
+                        "type": "builtin",
                     },
                 },
                 "fable_ab": {
@@ -786,7 +822,11 @@ def default_config(
                 "same_sampling": True,
                 "require_seed_control": True,
                 "immutable_models_and_adapter": True,
-                "randomize_arm_order": True,
+                # Pair positions are counterbalanced for analysis, while the
+                # built-in runner groups 9B arms so only one occupies GPU 0.
+                "pair_position_policy": "deterministic_counterbalance",
+                "execution_order_policy": "frozen_per_suite",
+                "per_trial_arm_randomization": False,
                 "failures_score_zero": True,
                 "allow_unplanned_reruns": False,
             },

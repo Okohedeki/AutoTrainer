@@ -296,6 +296,15 @@
         }
       }
     },
+    "evaluation_builtin_runner": {
+      "$comment": "Identity is derived from installed AutoTrainer code when the plan is frozen.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "builtin" }
+      }
+    },
     "evaluation_external_runner": {
       "type": "object",
       "additionalProperties": false,
@@ -321,7 +330,12 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "runner": { "$ref": "#/$defs/evaluation_command_runner" }
+        "runner": {
+          "oneOf": [
+            { "$ref": "#/$defs/evaluation_builtin_runner" },
+            { "$ref": "#/$defs/evaluation_command_runner" }
+          ]
+        }
       }
     },
     "evaluation_fable_suite": {
@@ -359,7 +373,24 @@
     "evaluation_fairness": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["paired_by", "same_task_snapshot", "same_instruction", "same_tools_and_limits", "same_verifier", "same_runner_within_suite", "same_sampling", "require_seed_control", "immutable_models_and_adapter", "randomize_arm_order", "failures_score_zero", "allow_unplanned_reruns"],
+      "required": ["paired_by", "same_task_snapshot", "same_instruction", "same_tools_and_limits", "same_verifier", "same_runner_within_suite", "same_sampling", "require_seed_control", "immutable_models_and_adapter", "failures_score_zero", "allow_unplanned_reruns"],
+      "oneOf": [
+        {
+          "required": ["pair_position_policy", "execution_order_policy", "per_trial_arm_randomization"],
+          "not": { "required": ["randomize_arm_order"] }
+        },
+        {
+          "$comment": "Backward-compatible input; frozen plans convert this old claim to the truthful grouped V1 policy.",
+          "required": ["randomize_arm_order"],
+          "not": {
+            "anyOf": [
+              { "required": ["pair_position_policy"] },
+              { "required": ["execution_order_policy"] },
+              { "required": ["per_trial_arm_randomization"] }
+            ]
+          }
+        }
+      ],
       "properties": {
         "paired_by": {
           "type": "array",
@@ -381,6 +412,9 @@
         "require_seed_control": { "const": true },
         "immutable_models_and_adapter": { "const": true },
         "randomize_arm_order": { "const": true },
+        "pair_position_policy": { "const": "deterministic_counterbalance" },
+        "execution_order_policy": { "const": "frozen_per_suite" },
+        "per_trial_arm_randomization": { "const": false },
         "failures_score_zero": { "const": true },
         "allow_unplanned_reruns": { "const": false }
       }
