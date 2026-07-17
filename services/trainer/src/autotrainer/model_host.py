@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -24,6 +25,7 @@ from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
 from .config import ConfigError, load_config
+from .device_gate import DeviceLease, acquire_device_lease
 from .model_cache import inspect_model_cache
 from .project_gate import ProjectLease, acquire_project_lease
 
@@ -54,6 +56,10 @@ class HostSpec:
 
 class TextGenerator(Protocol):
     """Small seam that keeps HTTP validation testable without loading CUDA."""
+
+    def count_tokens(self, messages: list[dict[str, str]]) -> int:
+        """Return the exact chat-template input length for context budgeting."""
+        ...
 
     def generate(
         self,
@@ -192,6 +198,15 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
     class TransformersGenerator:
         """Thin synchronous generator guarded by the HTTP server's GPU lock."""
 
+        def count_tokens(self, messages: list[dict[str, str]]) -> int:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = tokenizer(prompt, return_tensors="pt")
+            return int(inputs["input_ids"].shape[-1])
+
         def generate(
             self,
             messages: list[dict[str, str]],
@@ -310,7 +325,7 @@ def _chat_request(payload: object, *, expected_model: str) -> dict[str, Any]:
 
 
 class ModelHostServer(ThreadingHTTPServer):
-    """HTTP host carrying a loaded model and its cross-process project lease."""
+    """HTTP host carrying one model plus project and physical-device leases."""
 
     daemon_threads = True
 
@@ -319,13 +334,15 @@ class ModelHostServer(ThreadingHTTPServer):
         address: tuple[str, int],
         spec: HostSpec,
         generator: TextGenerator,
-        lease: ProjectLease,
+        project_lease: ProjectLease,
+        device_lease: DeviceLease,
         control_token: str,
     ) -> None:
         super().__init__(address, ModelHostHandler)
         self.spec = spec
         self.generator = generator
-        self.project_lease = lease
+        self.project_lease = project_lease
+        self.device_lease = device_lease
         self.control_token = control_token
         self.generation_lock = threading.Lock()
 
@@ -333,7 +350,22 @@ class ModelHostServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
-            self.project_lease.release()
+            # Wait for the one in-flight generation, drop the final model
+            # reference, and clear the allocator before another project may
+            # acquire GPU 0. Releasing the file lock first would recreate the
+            # exact cross-project OOM race this lease prevents.
+            with self.generation_lock:
+                self.generator = None  # type: ignore[assignment]
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except (ImportError, OSError):
+                    pass
+                self.device_lease.release()
+                self.project_lease.release()
 
 
 class ModelHostHandler(BaseHTTPRequestHandler):
@@ -484,12 +516,23 @@ def create_model_host_server(
     if len(control_token) < 32:
         raise ModelHostError("a private control token is required")
     spec = resolve_host_spec(config_path, adapter)
-    lease = acquire_project_lease(spec.config_path)
+    project_lease = acquire_project_lease(spec.config_path)
+    device_lease = None
     try:
+        device_lease = acquire_device_lease()
         loaded = generator or _load_generator(spec)
-        return ModelHostServer((host, port), spec, loaded, lease, control_token)
+        return ModelHostServer(
+            (host, port),
+            spec,
+            loaded,
+            project_lease,
+            device_lease,
+            control_token,
+        )
     except Exception:
-        lease.release()
+        if device_lease is not None:
+            device_lease.release()
+        project_lease.release()
         raise
 
 

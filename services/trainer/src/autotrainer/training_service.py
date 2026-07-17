@@ -19,6 +19,11 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from .config import ConfigError
+from .device_gate import (
+    DeviceLease,
+    acquire_device_lease,
+    device_run_gate,
+)
 from .model_cache import ModelCacheError
 from .project_service import prepare_project, read_project_config
 from .project_gate import (
@@ -164,7 +169,10 @@ def run_project_training(
 ) -> dict[str, Any]:
     """Hold the project snapshot stable from Prepare through every stage."""
 
-    with project_run_gate(config_path):
+    # Project and device leases solve different races: the first freezes this
+    # project's inputs; the second prevents another project from loading a
+    # second 9B model onto the same physical GPU.
+    with project_run_gate(config_path), device_run_gate():
         return _run_project_training_owned(
             config_path,
             on_progress=on_progress,
@@ -605,6 +613,11 @@ class TrainingJobManager:
             # closes the short API window in which a setup request could have
             # changed YAML before the worker thread reached Prepare.
             lease = acquire_project_lease(self._config_path)
+            try:
+                device_lease = acquire_device_lease()
+            except Exception:
+                lease.release()
+                raise
             job_id = uuid4().hex
             previous_job = self._job
             previous_event_path = self._event_path
@@ -637,6 +650,7 @@ class TrainingJobManager:
                 self._event_path = previous_event_path
                 self._events = previous_events
                 self._next_event_sequence = previous_next_sequence
+                device_lease.release()
                 lease.release()
                 raise
 
@@ -645,7 +659,7 @@ class TrainingJobManager:
             # for the active adapter write instead of abandoning it mid-file.
             worker = Thread(
                 target=self._run,
-                args=(job_id, lease),
+                args=(job_id, lease, device_lease),
                 name=f"autotrainer-{job_id[:8]}",
                 daemon=False,
             )
@@ -667,11 +681,17 @@ class TrainingJobManager:
                     },
                 )
                 self._worker = None
+                device_lease.release()
                 lease.release()
                 raise TrainingServiceError(self._job["message"]) from error
         return self.snapshot()
 
-    def _run(self, job_id: str, lease: ProjectLease) -> None:
+    def _run(
+        self,
+        job_id: str,
+        lease: ProjectLease,
+        device_lease: DeviceLease,
+    ) -> None:
         def progress(stage: str, message: str) -> None:
             self._update(
                 job_id,
@@ -686,7 +706,7 @@ class TrainingJobManager:
         try:
             # The request thread reserved this lease before queueing. Context
             # activation transfers the narrow Prepare bypass to this worker.
-            with lease.activate("run"):
+            with lease.activate("run"), device_lease.activate():
                 try:
                     result = run_project_training(
                         self._config_path,
@@ -730,6 +750,9 @@ class TrainingJobManager:
                         },
                     )
         finally:
+            # The training call has released its model objects before the
+            # shared device becomes available to another project.
+            device_lease.release()
             lease.release()
 
     def close(self) -> None:

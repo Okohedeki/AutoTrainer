@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from .config import ConfigError, ProjectConfig, load_config
+from .device_gate import DeviceLease, acquire_device_lease, device_run_gate
 from .evaluation import (
     EvaluationError,
     EvaluationProgressCallback,
@@ -457,7 +458,7 @@ def _load_project(config_path: str | Path) -> ProjectConfig:
 def plan_project_evaluation(config_path: str | Path) -> dict[str, Any]:
     """Freeze a plan under the same project lease used by local training."""
 
-    with project_run_gate(config_path):
+    with project_run_gate(config_path), device_run_gate():
         config = _load_project(config_path)
         return write_evaluation_plan(config.data, config.root)
 
@@ -597,7 +598,13 @@ def _suite_snapshot(
 
     if total == 0:
         phase = "blocked"
-        message = "The frozen suite contains no trials. Freeze a valid evaluation plan."
+        blockers = suite.get("blockers", [])
+        if suite.get("runnable") is False and isinstance(blockers, list) and blockers:
+            message = "Deferred until configured: " + "; ".join(
+                str(item) for item in blockers
+            )
+        else:
+            message = "The frozen suite contains no trials. Freeze a valid evaluation plan."
     elif job.get("status") in _LIVE_JOB_STATUSES and job.get("suite") == suite_id:
         phase = str(job.get("phase"))
         message = str(job.get("message"))
@@ -634,24 +641,29 @@ def _suite_snapshot(
         message = f"{completed} of {total} local benchmark trials are complete; resume is available."
     else:
         phase = "ready"
-        message = "The frozen command-backed benchmark is ready to start."
+        message = "The frozen local benchmark is ready to start."
 
     # Fable results stay arm-blind in the localhost response.  The reviewed
     # report, not per-arm trial telemetry, is the point where identity returns.
     public_results = [] if kind == "fable_ab" else scored[-_PUBLIC_RESULT_LIMIT:]
     public_trials: list[dict[str, Any]] = []
     trials_truncated = False
-    if runner_type == "command":
+    if runner_type in {"builtin", "command"}:
         public_trials, trials_truncated = _planned_trials(trials, scored, job, suite_id)
     return {
         "id": suite_id,
         "kind": kind,
         "runner_type": runner_type,
+        "runnable": suite.get("runnable") is not False,
+        "blockers": list(suite.get("blockers", []))
+        if isinstance(suite.get("blockers"), list)
+        else [],
+        "execution_policy": suite.get("execution_policy"),
         "phase": phase,
         "message": message,
         "completed": completed,
         "total": total,
-        # Command-backed plans are safe to show before execution because this
+        # Local plans are safe to show before execution because this
         # projection contains identity and observed lifecycle only. External
         # blind-review arms stay withheld.
         "trials": public_trials,
@@ -825,7 +837,7 @@ class EvaluationJobManager:
         return self.workspace()
 
     def start(self, suite_id: str) -> dict[str, Any]:
-        """Queue only an explicit command runner; external suites cannot start here."""
+        """Queue a local built-in/command producer; external suites cannot start here."""
 
         suite_name = str(suite_id).strip()
         if not suite_name or not _SAFE_ID.fullmatch(suite_name):
@@ -834,6 +846,7 @@ class EvaluationJobManager:
             if self._job["status"] in _LIVE_JOB_STATUSES:
                 raise EvaluationServiceError("An evaluation job is already running.")
             lease = acquire_project_lease(self._config_path)
+            device_lease: DeviceLease | None = None
             try:
                 config = _load_project(self._config_path)
                 plan, run_dir = load_current_plan(config.data, config.root)
@@ -841,11 +854,18 @@ class EvaluationJobManager:
                 if not isinstance(suite, Mapping):
                     raise EvaluationServiceError(f"Unknown evaluation suite: {suite_name}")
                 runner = suite.get("runner", {})
-                if not isinstance(runner, Mapping) or runner.get("type") != "command":
+                if not isinstance(runner, Mapping) or runner.get("type") not in {
+                    "builtin",
+                    "command",
+                }:
                     raise EvaluationServiceError(
                         f"Suite {suite_name!r} is external. Export its frozen requests and "
                         "ingest the returned results; AutoTrainer will not pretend Fable started."
                     )
+                # Reserve the physical device before publishing `queued` so a
+                # different project cannot accept a second 9B job in the same
+                # browser/CLI race window.
+                device_lease = acquire_device_lease()
                 scored = _suite_results(plan, run_dir, suite_name)
                 total = sum(
                     1
@@ -870,7 +890,7 @@ class EvaluationJobManager:
                 self._append_event_locked("queued")
                 worker = Thread(
                     target=self._run,
-                    args=(job_id, suite_name, lease),
+                    args=(job_id, suite_name, lease, device_lease),
                     name=f"autotrainer-eval-{job_id[:8]}",
                     daemon=False,
                 )
@@ -889,11 +909,19 @@ class EvaluationJobManager:
                     raise EvaluationServiceError(self._job["message"]) from error
             except Exception:
                 if self._worker is None or not self._worker.is_alive():
+                    if device_lease is not None:
+                        device_lease.release()
                     lease.release()
                 raise
         return self.snapshot()
 
-    def _run(self, job_id: str, suite_id: str, lease: ProjectLease) -> None:
+    def _run(
+        self,
+        job_id: str,
+        suite_id: str,
+        lease: ProjectLease,
+        device_lease: DeviceLease,
+    ) -> None:
         def progress(event: Mapping[str, Any]) -> None:
             phase = str(event.get("phase", "running"))
             trial = _safe_trial(event.get("trial"))
@@ -950,7 +978,7 @@ class EvaluationJobManager:
             )
 
         try:
-            with lease.activate("run"):
+            with lease.activate("run"), device_lease.activate():
                 try:
                     result = run_project_evaluation(
                         self._config_path,
@@ -964,7 +992,7 @@ class EvaluationJobManager:
                     total = _safe_integer(result.get("total"))
                     if len(results) != total:
                         raise EvaluationServiceError(
-                            "The command runner returned without one trusted result per trial."
+                            "The local producer returned without one trusted result per trial."
                         )
                     self._update(
                         job_id,
@@ -993,6 +1021,7 @@ class EvaluationJobManager:
                         current_trial=None,
                     )
         finally:
+            device_lease.release()
             lease.release()
 
     def close(self) -> None:

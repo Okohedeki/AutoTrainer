@@ -35,7 +35,11 @@ from .model_service import (
 )
 from .model_download_service import ModelDownloadManager
 from .project_service import prepare_project
-from .project_gate import ProjectBusyError, assert_project_available
+from .project_gate import (
+    ProjectBusyError,
+    acquire_project_lease,
+    assert_project_available,
+)
 from .source_service import add_source, list_sources, remove_source
 from .training_service import TrainingJobManager
 from .workspace_service import ProjectWorkspace
@@ -177,62 +181,85 @@ class LocalApiServer(ThreadingHTTPServer):
 
         return self.workspace.active_config
 
+    def _assert_context_idle(self) -> None:
+        """Reject a context change before it can leave partial project state."""
+
+        # Managers acquire the cross-process lease before exposing a queued
+        # job. Their public states also close the short model-host startup
+        # window before the child process has fully published its lease.
+        if (
+            self.model_download.snapshot().get("status") in {"queued", "downloading"}
+            or self.training.snapshot().get("status") in {"queued", "running"}
+            or self.evaluation.snapshot().get("status") in {"queued", "running"}
+            or self.hosting.snapshot().get("status") in {"loading", "live"}
+        ):
+            raise ProjectBusyError(
+                "Stop the active project job or model host before switching projects."
+            )
+
+    def _install_project_context(self, project_id: str, target: Path) -> dict[str, Any]:
+        """Construct every manager before publishing a new active project."""
+
+        model_download = ModelDownloadManager(target)
+        training = TrainingJobManager(target)
+        evaluation = EvaluationJobManager(target)
+        hosting = HostingManager(target)
+        try:
+            selected = self.workspace.select_project(project_id)
+        except Exception:
+            hosting.close()
+            evaluation.close()
+            training.close()
+            model_download.close()
+            raise
+        old_download, old_training, old_evaluation, old_hosting = (
+            self.model_download,
+            self.training,
+            self.evaluation,
+            self.hosting,
+        )
+        self.model_download, self.training, self.evaluation, self.hosting = (
+            model_download,
+            training,
+            evaluation,
+            hosting,
+        )
+        old_hosting.close()
+        old_evaluation.close()
+        old_training.close()
+        old_download.close()
+        return selected
+
+    def create_project(self, name: str) -> dict[str, Any]:
+        """Create and activate a project as one lease-protected API action."""
+
+        with self.context_lock:
+            self._assert_context_idle()
+            current_lease = acquire_project_lease(self.config_path)
+            target_lease = None
+            try:
+                created = self.workspace.create_project(name)
+                target = self.workspace.resolve_project(str(created["id"]))
+                # The new direct child is locked before it becomes discoverable
+                # as the active GUI context. No agent can mutate it mid-switch.
+                target_lease = acquire_project_lease(target)
+                return self._install_project_context(str(created["id"]), target)
+            finally:
+                if target_lease is not None:
+                    target_lease.release()
+                current_lease.release()
+
     def select_project(self, project_id: str) -> dict[str, Any]:
         """Switch managers only after both project leases prove inactive."""
 
         with self.context_lock:
             target = self.workspace.resolve_project(project_id)
             current = self.config_path
-
-            # The managers acquire the cross-process lease before exposing a
-            # queued job. Checking their public states also closes the tiny
-            # window while a freshly spawned model host is acquiring its lease.
-            if (
-                self.model_download.snapshot().get("status")
-                in {"queued", "downloading"}
-                or self.training.snapshot().get("status") in {"queued", "running"}
-                or self.evaluation.snapshot().get("status") in {"queued", "running"}
-                or self.hosting.snapshot().get("status") in {"loading", "live"}
-            ):
-                raise ProjectBusyError(
-                    "Stop the active project job or model host before switching projects."
-                )
+            self._assert_context_idle()
             assert_project_available(current)
             if target != current:
                 assert_project_available(target)
-
-            # Construct the complete target context before changing the active
-            # pointer. A broken project therefore cannot strand the server
-            # between two configurations.
-            model_download = ModelDownloadManager(target)
-            training = TrainingJobManager(target)
-            evaluation = EvaluationJobManager(target)
-            hosting = HostingManager(target)
-            try:
-                selected = self.workspace.select_project(project_id)
-            except Exception:
-                hosting.close()
-                evaluation.close()
-                training.close()
-                model_download.close()
-                raise
-            old_download, old_training, old_evaluation, old_hosting = (
-                self.model_download,
-                self.training,
-                self.evaluation,
-                self.hosting,
-            )
-            self.model_download, self.training, self.evaluation, self.hosting = (
-                model_download,
-                training,
-                evaluation,
-                hosting,
-            )
-            old_hosting.close()
-            old_evaluation.close()
-            old_training.close()
-            old_download.close()
-            return selected
+            return self._install_project_context(project_id, target)
 
     def server_close(self) -> None:
         """Close the socket, then let an active non-daemon training write finish."""
@@ -520,7 +547,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     _require_keys(payload, allowed={"name"}, required={"name"})
                     self._send_json(
                         HTTPStatus.CREATED,
-                        self.server.workspace.create_project(
+                        self.server.create_project(
                             _required_text(payload, "name")
                         ),
                     )
@@ -660,21 +687,21 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         suites = workspace.get("suites")
                         if not isinstance(suites, list):
                             raise ConfigError(
-                                "evaluation plan returned no runnable command suite"
+                                "evaluation plan returned no runnable local suite"
                             )
                         suite = next(
                             (
                                 str(item.get("id", "")).strip()
                                 for item in suites
                                 if isinstance(item, Mapping)
-                                and item.get("runner_type") == "command"
+                                and item.get("runner_type") in {"builtin", "command"}
                                 and str(item.get("id", "")).strip()
                             ),
                             None,
                         )
                         if suite is None:
                             raise ConfigError(
-                                "evaluation plan returned no runnable command suite"
+                                "evaluation plan returned no runnable local suite"
                             )
                     self._send_json(
                         HTTPStatus.ACCEPTED,

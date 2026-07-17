@@ -65,20 +65,11 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(current["cache"]["status"], "revision_unresolved")
         self.assertEqual(current["download_job"]["status"], "idle")
 
-    def test_projects_can_be_created_listed_and_selected_without_browser_paths(self) -> None:
+    def test_projects_are_created_active_and_can_be_selected_without_browser_paths(self) -> None:
         status, initial = self.request("GET", "/api/v1/projects")
         self.assertEqual(status, 200)
         self.assertEqual(initial["active_id"], "startup")
         self.assertEqual([item["id"] for item in initial["projects"]], ["startup"])
-
-        status, created = self.request(
-            "POST",
-            "/api/v1/projects",
-            {"name": "Frontend Specialist"},
-        )
-        self.assertEqual(status, 201)
-        self.assertEqual(created["id"], "frontend-specialist")
-        self.assertFalse(created["active"])
 
         old_managers = (
             self.server.model_download,
@@ -86,14 +77,15 @@ class LocalApiTests(unittest.TestCase):
             self.server.evaluation,
             self.server.hosting,
         )
-        status, selected = self.request(
+        status, created = self.request(
             "POST",
-            "/api/v1/projects/select",
-            {"project_id": created["id"]},
+            "/api/v1/projects",
+            {"name": "Frontend Specialist"},
         )
-        self.assertEqual(status, 200)
-        self.assertTrue(selected["active"])
-        selected_config = Path(selected["config_path"]).resolve()
+        self.assertEqual(status, 201)
+        self.assertEqual(created["id"], "frontend-specialist")
+        self.assertTrue(created["active"])
+        selected_config = Path(created["config_path"]).resolve()
         self.assertEqual(self.server.config_path, selected_config)
         self.assertEqual(self.server.model_download._config_path, selected_config)
         self.assertEqual(self.server.training._config_path, selected_config)
@@ -119,24 +111,30 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(listed["active_id"], created["id"])
 
-    def test_project_switch_rejects_an_active_project_lease(self) -> None:
-        status, created = self.request(
+        status, selected = self.request(
             "POST",
-            "/api/v1/projects",
-            {"name": "Second Project"},
+            "/api/v1/projects/select",
+            {"project_id": "startup"},
         )
-        self.assertEqual(status, 201)
+        self.assertEqual(status, 200)
+        self.assertTrue(selected["active"])
+        self.assertEqual(self.server.workspace.active_id, "startup")
 
+    def test_project_creation_rejects_an_active_project_lease_without_a_ghost(self) -> None:
         with project_run_gate(self.config_path):
             status, result = self.request(
                 "POST",
-                "/api/v1/projects/select",
-                {"project_id": created["id"]},
+                "/api/v1/projects",
+                {"name": "Second Project"},
             )
 
         self.assertEqual(status, 409)
         self.assertEqual(result["error"]["code"], "project_busy")
         self.assertEqual(self.server.workspace.active_id, "startup")
+        self.assertEqual(
+            [item["id"] for item in self.server.workspace.list_projects()["projects"]],
+            ["startup"],
+        )
 
     def test_server_uses_a_safe_default_or_explicit_projects_root(self) -> None:
         self.assertEqual(
@@ -580,14 +578,14 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(rejected["error"]["code"], "invalid_request")
 
-    def test_evaluation_start_can_plan_and_choose_the_first_command_suite(self) -> None:
+    def test_evaluation_start_can_plan_and_choose_the_first_local_suite(self) -> None:
         planned = {
             "readiness": {"status": "ready", "blockers": []},
             "plan": {"plan_id": "sha256:" + "a" * 64},
             "job": {"status": "idle", "phase": "idle"},
             "suites": [
                 {"id": "fable_ab", "runner_type": "external"},
-                {"id": "model_benchmark", "runner_type": "command"},
+                {"id": "model_benchmark", "runner_type": "builtin"},
                 {"id": "secondary", "runner_type": "command"},
             ],
         }

@@ -37,16 +37,9 @@ def _project(root: Path) -> Path:
     reference = config["evaluation"]["arms"]["reference_9b"]["model"]
     reference["id"] = "Qwen/Qwen3.5-9B"
     reference["revision"] = REVISION
-    for suite in config["evaluation"]["suites"].values():
-        suite["runner"]["version"] = "1.0.0"
-        suite["runner"]["orchestration_sha256"] = ORCHESTRATION
-    config["evaluation"]["suites"]["model_benchmark"]["runner"]["argv"] = [
-        "model-agent",
-        "--request",
-        "{request}",
-        "--result",
-        "{result}",
-    ]
+    fable_runner = config["evaluation"]["suites"]["fable_ab"]["runner"]
+    fable_runner["version"] = "1.0.0"
+    fable_runner["orchestration_sha256"] = ORCHESTRATION
 
     adapter_value = config["evaluation"]["arms"]["autotrainer"]["adapter"]["path"]
     adapter = (root / adapter_value).resolve()

@@ -17,6 +17,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import default_config, load_config, write_config  # noqa: E402
 from autotrainer.cli import main  # noqa: E402
+from autotrainer.device_gate import DeviceBusyError  # noqa: E402
 from autotrainer.model_service import select_model  # noqa: E402
 from autotrainer.project_gate import ProjectBusyError  # noqa: E402
 from autotrainer.training_service import (  # noqa: E402
@@ -318,6 +319,7 @@ class TrainingServiceTests(unittest.TestCase):
                     )
             finally:
                 thread.call_args.kwargs["args"][1].release()
+                thread.call_args.kwargs["args"][2].release()
 
         page = manager.events(after=0)
         self.assertEqual(len(page["events"]), 3)
@@ -333,7 +335,7 @@ class TrainingServiceTests(unittest.TestCase):
             daemon = False
 
             def __init__(self, *, args: tuple[object, ...], **_values: object) -> None:
-                leases.append(args[1])
+                leases.extend((args[1], args[2]))
 
             def start(self) -> None:
                 return None
@@ -350,6 +352,40 @@ class TrainingServiceTests(unittest.TestCase):
                 select_model(self.config_path, "qwen3.5-9b-text")
         finally:
             leases[0].release()  # type: ignore[attr-defined]
+            leases[1].release()  # type: ignore[attr-defined]
+
+    def test_two_projects_cannot_queue_models_on_gpu_zero(self) -> None:
+        """A project-specific lease alone must not allow a second 9B load."""
+
+        second_root = self.root / "second-project"
+        second_root.mkdir()
+        second_config = second_root / "autotrainer.yaml"
+        write_config(second_config, default_config(name="second"), overwrite=False)
+        manager_one = TrainingJobManager(self.config_path)
+        manager_two = TrainingJobManager(second_config)
+        captured: list[tuple[object, ...]] = []
+
+        class DeferredThread:
+            daemon = False
+
+            def __init__(self, *, args: tuple[object, ...], **_values: object) -> None:
+                captured.append(args)
+
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+        with patch("autotrainer.training_service.Thread", DeferredThread):
+            manager_one.start()
+            try:
+                with self.assertRaisesRegex(DeviceBusyError, "GPU 0 is already in use"):
+                    manager_two.start()
+            finally:
+                # The deferred test worker never reaches its normal finally.
+                captured[0][2].release()  # type: ignore[attr-defined]
+                captured[0][1].release()  # type: ignore[attr-defined]
 
     def test_live_saved_job_becomes_interrupted_and_a_retry_can_start(self) -> None:
         record_path = self.root / ".autotrainer" / "training" / "current-job.json"
