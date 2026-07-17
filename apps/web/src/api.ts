@@ -35,10 +35,61 @@ export type ModelCacheState = {
   logical_bytes?: number;
 };
 
+export type ModelDownloadJob = {
+  id: string | null;
+  status: "idle" | "queued" | "downloading" | "running" | "completed" | "failed" | string;
+  message?: string;
+  model_id?: string;
+  revision?: string;
+  error?: string | null;
+};
+
+export type ModelStatus = {
+  cache: ModelCacheState;
+  download_job: ModelDownloadJob | null;
+};
+
+export type ReferenceModelStatus = {
+  id?: string;
+  model_id?: string;
+  revision?: string;
+  status?: string;
+  message?: string;
+  cache?: ModelCacheState;
+  download_job?: ModelDownloadJob | null;
+};
+
 export type ModelWorkspace = {
   models: Record<string, ModelCatalogRecord>;
   model: ProjectModel;
   cache: ModelCacheState;
+};
+
+export type ProjectRecord = {
+  id: string;
+  name: string;
+  config_path?: string;
+  active?: boolean;
+  managed?: boolean;
+  model?: { id: string; revision: string };
+};
+
+export type ProjectsWorkspace = {
+  active_id: string | null;
+  projects: ProjectRecord[];
+};
+
+export type ModelSearchResult = {
+  id: string;
+  revision?: string;
+  default_revision?: string;
+  pipeline_tag?: string | null;
+  downloads?: number;
+  likes?: number;
+  gated?: boolean | string;
+  compatibility: "supported" | "reference_only" | "unverified" | string;
+  profile?: string | null;
+  reason?: string;
 };
 
 // The normal source picker deals in product concepts, not YAML source kinds.
@@ -50,9 +101,27 @@ export type ProjectSource = {
   label: string;
   value: string;
   origin: "github" | "local";
-  purpose: "work" | "examples" | "tasks";
+  purpose?: "work" | "examples" | "tasks";
+  modes?: SourceMode[];
+  roles?: string[];
+  partition?: string;
+  filters?: { include: string[]; exclude: string[] };
+  license?: { spdx?: string; attribution?: string } | null;
+  next_action?: { title: string; detail: string };
   revision?: string;
-  status: "ready";
+  status: "ready" | "configured" | string;
+};
+
+export type SourceMode = "accepted_changes" | "practice_tasks" | "reference_only" | "evaluation_holdout";
+
+export type SourceInput = {
+  value: string;
+  modes?: SourceMode[];
+  revision?: string;
+  include?: string[];
+  exclude?: string[];
+  license_spdx?: string;
+  license_attribution?: string;
 };
 
 export type PreparationResult = {
@@ -112,6 +181,30 @@ export type TrainingJob = {
   } | null;
 };
 
+export type TrainingEvent = {
+  sequence: number;
+  job_id?: string | null;
+  type: string;
+  stage?: "prepare" | "sft" | "grpo" | string | null;
+  step?: number;
+  epoch?: number;
+  task_id?: string;
+  reward?: number;
+  message?: string;
+  metrics?: Record<string, number | boolean | string | null>;
+  rubric?: Record<string, number>;
+  hard_gate_passed?: boolean;
+  gate_reason?: string | null;
+};
+
+export type TrainingEventPage = {
+  job_id: string | null;
+  cursor: number;
+  events: TrainingEvent[];
+  truncated: boolean;
+  has_more: boolean;
+};
+
 export type BackendHealth = {
   status: "ok";
   config: string;
@@ -123,6 +216,7 @@ export type EvaluationTrial = {
   arm_id: string;
   repetition: number;
   seed: number;
+  status?: string;
 };
 
 export type EvaluationResult = EvaluationTrial & {
@@ -143,6 +237,7 @@ export type EvaluationJob = {
   completed: number;
   total: number;
   current_trial: EvaluationTrial | null;
+  planned_trials?: EvaluationTrial[];
   results: EvaluationResult[];
   results_truncated: boolean;
 };
@@ -150,12 +245,14 @@ export type EvaluationJob = {
 export type EvaluationSuite = {
   id: string;
   kind: string;
-  runner_type: "command" | "external";
+  runner_type: "builtin" | "command" | "external";
   phase: string;
   message: string;
   completed: number;
   total: number;
   results: EvaluationResult[];
+  trials?: EvaluationTrial[];
+  trials_truncated?: boolean;
   results_truncated: boolean;
   results_withheld_for_blind_review: boolean;
   review: {
@@ -178,9 +275,60 @@ export type EvaluationWorkspace = {
     task_count: number;
     repetitions: number;
     seeds: number[];
+    trials?: EvaluationTrial[];
   } | null;
   job: EvaluationJob;
   suites: EvaluationSuite[];
+};
+
+export type EvaluationEvent = {
+  sequence: number;
+  type?: string;
+  job_id?: string;
+  plan_id?: string;
+  suite?: string;
+  phase?: string;
+  message?: string;
+  trial?: EvaluationTrial | null;
+  result?: EvaluationResult | null;
+  rubric?: {
+    hard_gate_passed: boolean;
+    reward: number;
+    components: Record<string, number>;
+  } | null;
+  trial_id?: string;
+  task_id?: string;
+  arm_id?: string;
+  reward?: number;
+  hard_gate_passed?: boolean;
+  gate_reason?: string | null;
+  components?: Record<string, number>;
+};
+
+export type EvaluationEventPage = {
+  events: EvaluationEvent[];
+  oldest_sequence: number | null;
+  latest_sequence: number | null;
+  cursor_reset: boolean;
+};
+
+export type HostingStatus = {
+  status: "not_ready" | "ready" | "loading" | "live" | "stopped" | "failed" | string;
+  message: string;
+  endpoint: string | null;
+  model?: string | null;
+  base_model?: string | null;
+  revision?: string | null;
+  adapter?: string | null;
+  pid?: number | null;
+};
+
+export type HostingTestResult = {
+  response?: string;
+  content?: string;
+  text?: string;
+  model?: string;
+  [key: string]: unknown;
 };
 
 type ApiErrorBody = { error?: { code?: string; message?: string } };
@@ -213,6 +361,21 @@ export async function getBackendHealth(signal?: AbortSignal): Promise<BackendHea
   return request("/api/v1/health", { signal });
 }
 
+export async function getProjects(signal?: AbortSignal): Promise<ProjectsWorkspace> {
+  return request("/api/v1/projects", { signal });
+}
+
+export async function createProject(name: string): Promise<ProjectRecord> {
+  return request("/api/v1/projects", { method: "POST", body: JSON.stringify({ name }) });
+}
+
+export async function selectProject(projectId: string): Promise<unknown> {
+  return request("/api/v1/projects/select", {
+    method: "POST",
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
 export async function getModelWorkspace(signal?: AbortSignal): Promise<ModelWorkspace> {
   const [catalog, current] = await Promise.all([
     request<{ models: Record<string, ModelCatalogRecord> }>("/api/v1/models", { signal }),
@@ -221,16 +384,39 @@ export async function getModelWorkspace(signal?: AbortSignal): Promise<ModelWork
   return { models: catalog.models, model: current.model, cache: current.cache };
 }
 
+export async function searchHuggingFaceModels(query: string, limit = 12, signal?: AbortSignal): Promise<ModelSearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const result = await request<{ models: ModelSearchResult[] }>(`/api/v1/models/search?${params}`, { signal });
+  return result.models;
+}
+
 export async function selectProjectModel(input: {
   model: string;
   revision: string;
-  cache_dir: string;
 }): Promise<{ model: ProjectModel; cache: ModelCacheState }> {
   return request("/api/v1/model/select", { method: "POST", body: JSON.stringify(input) });
 }
 
-export async function downloadProjectModel(): Promise<ModelCacheState> {
+export async function downloadProjectModel(): Promise<ModelDownloadJob> {
   return request("/api/v1/model/download", { method: "POST", body: "{}" });
+}
+
+export async function getModelStatus(signal?: AbortSignal): Promise<ModelStatus> {
+  const result = await request<ModelStatus & ModelCacheState>("/api/v1/model/status", { signal });
+  // Early backends returned cache fields at the top level. Keeping this small
+  // fallback makes a reconnect safe during a backend/frontend rolling update.
+  return {
+    cache: result.cache ?? result,
+    download_job: result.download_job ?? null,
+  };
+}
+
+export async function getReferenceModel(signal?: AbortSignal): Promise<ReferenceModelStatus> {
+  return request("/api/v1/reference-model", { signal });
+}
+
+export async function downloadReferenceModel(): Promise<ModelDownloadJob> {
+  return request("/api/v1/reference-model/download", { method: "POST", body: "{}" });
 }
 
 export async function getProjectSources(signal?: AbortSignal): Promise<ProjectSource[]> {
@@ -238,10 +424,10 @@ export async function getProjectSources(signal?: AbortSignal): Promise<ProjectSo
   return result.sources;
 }
 
-export async function addProjectSource(value: string): Promise<ProjectSource[]> {
+export async function addProjectSource(input: SourceInput): Promise<ProjectSource[]> {
   const result = await request<{ sources: ProjectSource[] }>("/api/v1/sources", {
     method: "POST",
-    body: JSON.stringify({ value }),
+    body: JSON.stringify(input),
   });
   return result.sources;
 }
@@ -282,6 +468,10 @@ export async function startTraining(): Promise<TrainingJob> {
   return request("/api/v1/training/start", { method: "POST", body: "{}" });
 }
 
+export async function getTrainingEvents(after = 0, signal?: AbortSignal): Promise<TrainingEventPage> {
+  return request(`/api/v1/training/events?after=${encodeURIComponent(after)}`, { signal });
+}
+
 export async function getEvaluationWorkspace(signal?: AbortSignal): Promise<EvaluationWorkspace> {
   return request("/api/v1/evaluation", { signal });
 }
@@ -290,9 +480,36 @@ export async function planEvaluation(): Promise<EvaluationWorkspace> {
   return request("/api/v1/evaluation/plan", { method: "POST", body: "{}" });
 }
 
-export async function startEvaluation(suite: string): Promise<EvaluationJob> {
+export async function startEvaluation(): Promise<EvaluationJob> {
   return request("/api/v1/evaluation/start", {
     method: "POST",
-    body: JSON.stringify({ suite }),
+    body: "{}",
+  });
+}
+
+
+export async function getEvaluationEvents(after = 0, signal?: AbortSignal): Promise<EvaluationEventPage> {
+  return request(`/api/v1/evaluation/events?after=${encodeURIComponent(after)}`, { signal });
+}
+
+export async function getHostingStatus(signal?: AbortSignal): Promise<HostingStatus> {
+  return request("/api/v1/hosting", { signal });
+}
+
+export async function startHosting(adapter: string): Promise<HostingStatus> {
+  return request("/api/v1/hosting/start", {
+    method: "POST",
+    body: JSON.stringify({ adapter }),
+  });
+}
+
+export async function stopHosting(): Promise<HostingStatus> {
+  return request("/api/v1/hosting/stop", { method: "POST", body: "{}" });
+}
+
+export async function testHosting(prompt: string): Promise<HostingTestResult> {
+  return request("/api/v1/hosting/test", {
+    method: "POST",
+    body: JSON.stringify({ prompt }),
   });
 }

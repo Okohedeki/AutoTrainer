@@ -1,57 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getBackendHealth, getTrainingJob, type BackendHealth } from "./api";
+import {
+  getBackendHealth,
+  getProjects,
+  getTrainingJob,
+  type BackendHealth,
+  type ProjectsWorkspace,
+} from "./api";
 import EvaluationMonitorPanel from "./EvaluationMonitorPanel";
 import HistoryReviewPanel from "./HistoryReviewPanel";
 import ModelSetupPanel from "./ModelSetupPanel";
-import PreparePanel from "./PreparePanel";
+import ProjectsPanel from "./ProjectsPanel";
+import ServePanel from "./ServePanel";
 import SourceSetupPanel from "./SourceSetupPanel";
 import TrainingMonitorPanel from "./TrainingMonitorPanel";
 
-const WALKTHROUGH_STORAGE_KEY = "autotrainer.walkthrough.v2";
+const WALKTHROUGH_STORAGE_KEY = "autotrainer.walkthrough.v3";
 
-type ViewId = "setup" | "training" | "evaluation";
-type WalkthroughStep = { target: string; label: string; title: string; body: string };
+type ViewId = "projects" | "data" | "train" | "evaluate" | "serve";
+type WalkthroughStep = { view: ViewId; target: string; label: string; title: string; body: string };
 
-// The walkthrough points at real controls in the operating console. It does
-// not create a separate demo path or describe features that are not connected.
+// The first run follows the real product lifecycle. Moving between screens is
+// part of the walkthrough, so every callout points at an operational control.
 const walkthroughSteps: WalkthroughStep[] = [
-  {
-    target: '[data-tour="model"]',
-    label: "1 of 3",
-    title: "Choose the model",
-    body: "Pick a small model that fits your machine. AutoTrainer downloads the exact version it will use.",
-  },
-  {
-    target: '[data-tour="sources"]',
-    label: "2 of 3",
-    title: "Add the work",
-    body: "Paste a GitHub repository or a local path. Add accepted examples or practice tasks when you have them.",
-  },
-  {
-    target: '[data-tour="prepare"]',
-    label: "3 of 3",
-    title: "Prepare training",
-    body: "One check finds what is ready, what is missing, and the useful next step. Training never starts by accident.",
-  },
+  { view: "projects", target: '[data-tour="projects"]', label: "1 of 5", title: "One specialist per project", body: "Create a project for the kind of work your local model should master. Each project keeps its own data, runs, proof, and endpoint." },
+  { view: "data", target: '[data-tour="model"]', label: "2 of 5", title: "Define the learning material", body: "Choose a supported Hugging Face model, download its pinned revision, then say exactly how each repository may be used." },
+  { view: "train", target: '[data-tour="train"]', label: "3 of 5", title: "Train on one GPU", body: "Start the run here. Watch real loss, reward, and rubric signals as the local trainer records them." },
+  { view: "evaluate", target: '[data-tour="evaluate"]', label: "4 of 5", title: "Prove the frozen model", body: "Evaluation does not train. Watch each held-out trial move through generation, trusted checks, and scoring." },
+  { view: "serve", target: '[data-tour="serve"]', label: "5 of 5", title: "Call your specialist", body: "Load the completed adapter behind a local OpenAI-compatible endpoint and send a real test request." },
 ];
 
-function Walkthrough({
-  stepIndex,
-  onBack,
-  onNext,
-  onClose,
-}: {
-  stepIndex: number;
-  onBack: () => void;
-  onNext: () => void;
-  onClose: () => void;
-}) {
+function Walkthrough({ stepIndex, onBack, onNext, onClose }: { stepIndex: number; onBack: () => void; onNext: () => void; onClose: () => void }) {
   const dialogRef = useRef<HTMLElement>(null);
   const step = walkthroughSteps[stepIndex];
   const finalStep = stepIndex === walkthroughSteps.length - 1;
 
   useEffect(() => {
-    document.querySelector<HTMLElement>(step.target)?.scrollIntoView({ block: "center" });
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>(step.target)?.scrollIntoView({ block: "center" }));
     dialogRef.current?.querySelector<HTMLElement>("button")?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -69,10 +53,7 @@ function Walkthrough({
         <p id="walkthrough-body">{step.body}</p>
         <div className="walkthrough-actions">
           <button className="text-button" type="button" onClick={onClose}>Skip</button>
-          <div>
-            {stepIndex > 0 && <button className="secondary-button" type="button" onClick={onBack}>Back</button>}
-            <button className="primary-button" type="button" onClick={onNext}>{finalStep ? "Start setup" : "Next"}</button>
-          </div>
+          <div>{stepIndex > 0 && <button className="secondary-button" type="button" onClick={onBack}>Back</button>}<button className="primary-button" type="button" onClick={onNext}>{finalStep ? "Open AutoTrainer" : "Next"}</button></div>
         </div>
       </aside>
     </div>
@@ -82,11 +63,13 @@ function Walkthrough({
 export default function App() {
   const restartButtonRef = useRef<HTMLButtonElement>(null);
   const pageTitleRef = useRef<HTMLHeadingElement>(null);
-  const [activeView, setActiveView] = useState<ViewId>("setup");
+  const [activeView, setActiveView] = useState<ViewId>("projects");
   const [health, setHealth] = useState<BackendHealth | null>(null);
+  const [projects, setProjects] = useState<ProjectsWorkspace | null>(null);
   const [backendConnected, setBackendConnected] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [projectRevision, setProjectRevision] = useState(0);
+  const [projectScopeRevision, setProjectScopeRevision] = useState(0);
   const [trainingActive, setTrainingActive] = useState(false);
   const [walkthroughStep, setWalkthroughStep] = useState<number | null>(() => {
     try {
@@ -102,19 +85,18 @@ export default function App() {
     let timer = 0;
     const refresh = async () => {
       try {
-        const nextHealth = await getBackendHealth();
+        const [nextHealth, nextProjects, job] = await Promise.all([
+          getBackendHealth(),
+          getProjects().catch(() => null),
+          getTrainingJob().catch(() => null),
+        ]);
         if (stopped) return;
         setHealth(nextHealth);
+        if (nextProjects) setProjects(nextProjects);
+        if (job) setTrainingActive(job.status === "queued" || job.status === "running");
         setBackendConnected(true);
       } catch {
         if (!stopped) setBackendConnected(false);
-      }
-      try {
-        const job = await getTrainingJob();
-        if (!stopped) setTrainingActive(job.status === "queued" || job.status === "running");
-      } catch {
-        // A job-record error does not mean the health endpoint is offline.
-        // The dedicated training monitor surfaces its own retrieval failures.
       } finally {
         if (!stopped) timer = window.setTimeout(() => void refresh(), 2_000);
       }
@@ -126,42 +108,50 @@ export default function App() {
     };
   }, []);
 
+  const activeProject = projects?.projects.find((project) => project.id === projects.active_id);
   const projectName = useMemo(() => {
+    if (activeProject?.name) return activeProject.name;
     const parts = health?.config.replaceAll("\\", "/").split("/") ?? [];
     return parts.at(-2) || "Local project";
-  }, [health]);
+  }, [activeProject?.name, health]);
 
   const rememberWalkthrough = useCallback(() => {
     try {
       window.localStorage.setItem(WALKTHROUGH_STORAGE_KEY, "complete");
     } catch {
-      // Locked-down browsers may not retain completion; setup still works.
+      // Setup remains usable when a locked-down browser cannot save completion.
     }
   }, []);
-
   const closeWalkthrough = useCallback(() => {
     rememberWalkthrough();
     setWalkthroughStep(null);
     window.requestAnimationFrame(() => restartButtonRef.current?.focus());
   }, [rememberWalkthrough]);
-
   const nextWalkthroughStep = useCallback(() => {
     if (walkthroughStep === null) return;
-    if (walkthroughStep === walkthroughSteps.length - 1) {
-      closeWalkthrough();
-      return;
-    }
+    if (walkthroughStep === walkthroughSteps.length - 1) return closeWalkthrough();
     setWalkthroughStep(walkthroughStep + 1);
   }, [closeWalkthrough, walkthroughStep]);
+
+  useEffect(() => {
+    if (walkthroughStep !== null) setActiveView(walkthroughSteps[walkthroughStep].view);
+  }, [walkthroughStep]);
 
   const sourcesChanged = useCallback(() => {
     setSourceRevision((value) => value + 1);
     setProjectRevision((value) => value + 1);
   }, []);
+  const projectChanged = useCallback(() => setProjectRevision((value) => value + 1), []);
 
-  const projectChanged = useCallback(() => {
-    setProjectRevision((value) => value + 1);
-  }, []);
+  const projectsChanged = useCallback((next: ProjectsWorkspace) => {
+    if (projects?.active_id !== next.active_id) {
+      setProjectScopeRevision((value) => value + 1);
+      setSourceRevision((value) => value + 1);
+      setProjectRevision((value) => value + 1);
+      setActiveView("data");
+    }
+    setProjects(next);
+  }, [projects?.active_id]);
 
   const openView = (view: ViewId, focusTitle = false) => {
     setActiveView(view);
@@ -170,102 +160,59 @@ export default function App() {
   };
 
   const viewCopy: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
-    setup: {
-      eyebrow: "Project setup",
-      title: "Build the training run",
-      description: "Choose the exact model, add your work, review useful examples, and prove this machine is ready.",
-    },
-    training: {
-      eyebrow: "Local execution",
-      title: "Training run",
-      description: "Watch the durable local job record, completed stages, real trainer metrics, and output paths.",
-    },
-    evaluation: {
-      eyebrow: "Held-out proof",
-      title: "Evaluation",
-      description: "Watch frozen trials move through model generation, trusted local verification, and scored results.",
-    },
+    projects: { eyebrow: "Local workspaces", title: "Projects", description: "Create one specialist at a time. Its model, data, training evidence, evaluations, and endpoint stay together." },
+    data: { eyebrow: "Define the work", title: "Data", description: "Choose the exact base model and say what every GitHub repository or local file contributes." },
+    train: { eyebrow: "Change the adapter", title: "Train", description: "Run the complete local training path and watch its real loss, reward, rubric, and durable events." },
+    evaluate: { eyebrow: "Freeze and measure", title: "Evaluate", description: "Generate held-out work, verify it locally, and watch trusted scores arrive. No weights change here." },
+    serve: { eyebrow: "Use the result", title: "Serve", description: "Make the completed adapter callable through a local OpenAI-compatible endpoint." },
   };
+  const nav: Array<{ id: ViewId; label: string }> = [
+    { id: "projects", label: "Projects" }, { id: "data", label: "Data" }, { id: "train", label: "Train" }, { id: "evaluate", label: "Evaluate" }, { id: "serve", label: "Serve" },
+  ];
 
   return (
     <>
       <div className="console-shell" inert={walkthroughOpen ? true : undefined}>
         <aside className="sidebar">
-          <div className="brand-row">
-            <span className="brand-mark" aria-hidden="true">A</span>
-            <div><strong>AutoTrainer</strong><small>Local training console</small></div>
-          </div>
-
-          <div className="project-context">
-            <span className="project-avatar" aria-hidden="true">{projectName.slice(0, 2).toUpperCase()}</span>
-            <div><strong>{projectName}</strong><small>autotrainer.yaml</small></div>
-            <span className="project-state">Local</span>
-          </div>
-
-          <nav className="primary-nav" aria-label="Project navigation">
-            <button className={activeView === "setup" ? "active" : ""} type="button" onClick={() => openView("setup")} aria-current={activeView === "setup" ? "page" : undefined}>
-              <span className="nav-icon" aria-hidden="true">01</span><span className="nav-label">Setup</span>
-            </button>
-            <button className={activeView === "training" ? "active" : ""} type="button" onClick={() => openView("training")} aria-current={activeView === "training" ? "page" : undefined}>
-              <span className="nav-icon" aria-hidden="true">02</span><span className="nav-label">Training</span>{trainingActive && <small>live</small>}
-            </button>
-            <button className={activeView === "evaluation" ? "active" : ""} type="button" onClick={() => openView("evaluation")} aria-current={activeView === "evaluation" ? "page" : undefined}>
-              <span className="nav-icon" aria-hidden="true">03</span><span className="nav-label">Evaluation</span>
-            </button>
+          <div className="brand-row"><span className="brand-mark" aria-hidden="true">A</span><div><strong>AutoTrainer</strong><small>Local specialist console</small></div></div>
+          <button className="project-context" type="button" onClick={() => openView("projects")}>
+            <span className="project-avatar" aria-hidden="true">{projectName.slice(0, 2).toUpperCase()}</span><span><strong>{projectName}</strong><small>{activeProject?.config_path || "autotrainer.yaml"}</small></span><span className="project-state">Local</span>
+          </button>
+          <nav className="primary-nav" aria-label="Project lifecycle">
+            {nav.map((item, index) => <button key={item.id} className={activeView === item.id ? "active" : ""} type="button" onClick={() => openView(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><span className="nav-label">{item.label}</span>{item.id === "train" && trainingActive && <small>live</small>}</button>)}
           </nav>
-
-          <div className="sidebar-runtime">
-            <div><span className={`health-dot ${backendConnected ? "good" : "danger"}`} aria-hidden="true" /><strong>Local backend</strong></div>
-            <p>{backendConnected ? "Connected on this machine" : "Not connected"}</p>
-          </div>
+          <div className="sidebar-runtime"><div><span className={`health-dot ${backendConnected ? "good" : "danger"}`} aria-hidden="true" /><strong>Local backend</strong></div><p>{backendConnected ? "Connected on this machine" : "Not connected"}</p></div>
         </aside>
 
         <div className="console-main">
           <header className="topbar">
-            <div className="breadcrumbs"><span>Current project</span><b>/</b><strong>{projectName}</strong><span className={`status-chip ${backendConnected ? "good" : "danger"}`}>{backendConnected ? "connected" : "offline"}</span></div>
-            <div className="topbar-actions">
-              {health?.config && <code className="config-source">{health.config}</code>}
-              <button ref={restartButtonRef} className="walkthrough-restart" type="button" onClick={() => { setActiveView("setup"); setWalkthroughStep(0); }}>Walkthrough</button>
-            </div>
+            <div className="breadcrumbs"><span>{projectName}</span><b>/</b><strong>{viewCopy[activeView].title}</strong><span className={`status-chip ${backendConnected ? "good" : "danger"}`}>{backendConnected ? "connected" : "offline"}</span></div>
+            <div className="topbar-actions"><button className="secondary-button new-project-button" type="button" onClick={() => openView("projects")}>New project</button><button ref={restartButtonRef} className="walkthrough-restart" type="button" onClick={() => setWalkthroughStep(0)}>Walkthrough</button></div>
           </header>
 
           <main className="page-content">
-            <header className="page-heading">
-              <div>
-                <p className="eyebrow">{viewCopy[activeView].eyebrow}</p>
-                <div className="title-row"><h1 ref={pageTitleRef} tabIndex={-1}>{viewCopy[activeView].title}</h1>{activeView === "training" && trainingActive && <span className="status-chip info">running</span>}</div>
-                <p className="page-description">{viewCopy[activeView].description}</p>
-              </div>
-            </header>
+            <header className="page-heading"><div><p className="eyebrow">{viewCopy[activeView].eyebrow}</p><div className="title-row"><h1 ref={pageTitleRef} tabIndex={-1}>{viewCopy[activeView].title}</h1>{activeView === "train" && trainingActive && <span className="status-chip info">running</span>}</div><p className="page-description">{viewCopy[activeView].description}</p></div></header>
 
-            {activeView === "setup" ? (
-              <>
-                <div className="workspace-grid" aria-label="Training setup">
-                  <div className="workspace-main">
-                    <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
-                    <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
-                  </div>
-                  <PreparePanel revision={projectRevision} onTrainingActiveChange={setTrainingActive} />
-                </div>
+            {activeView === "projects" ? (
+              <div data-tour="projects"><ProjectsPanel workspace={projects} disabled={trainingActive} onWorkspaceChanged={projectsChanged} /></div>
+            ) : activeView === "data" ? (
+              <div className="data-workspace" key={`data-${projects?.active_id}-${projectScopeRevision}`}>
+                <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
+                <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
                 <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} disabled={trainingActive} />
-              </>
-            ) : activeView === "training" ? (
-              <TrainingMonitorPanel onOpenSetup={() => openView("setup", true)} />
+              </div>
+            ) : activeView === "train" ? (
+              <TrainingMonitorPanel key={`train-${projects?.active_id}-${projectScopeRevision}`} revision={projectRevision} onOpenData={() => openView("data", true)} onTrainingActiveChange={setTrainingActive} />
+            ) : activeView === "evaluate" ? (
+              <EvaluationMonitorPanel key={`evaluate-${projects?.active_id}-${projectScopeRevision}`} onOpenData={() => openView("data", true)} />
             ) : (
-              <EvaluationMonitorPanel onOpenSetup={() => openView("setup", true)} />
+              <ServePanel key={`serve-${projects?.active_id}-${projectScopeRevision}`} />
             )}
           </main>
         </div>
       </div>
 
-      {walkthroughStep !== null && (
-        <Walkthrough
-          stepIndex={walkthroughStep}
-          onBack={() => setWalkthroughStep((current) => Math.max(0, (current ?? 1) - 1))}
-          onNext={nextWalkthroughStep}
-          onClose={closeWalkthrough}
-        />
-      )}
+      {walkthroughStep !== null && <Walkthrough stepIndex={walkthroughStep} onBack={() => setWalkthroughStep((current) => Math.max(0, (current ?? 1) - 1))} onNext={nextWalkthroughStep} onClose={closeWalkthrough} />}
     </>
   );
 }

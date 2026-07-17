@@ -8,188 +8,163 @@ async function source(path) {
   return readFile(new URL(path, root), "utf8");
 }
 
-test("build emits the focused AutoTrainer application", async () => {
+test("build emits the AutoTrainer console", async () => {
   const indexUrl = new URL("dist/index.html", root);
   await access(indexUrl);
   const html = await readFile(indexUrl, "utf8");
-  assert.match(html, /<title>AutoTrainer · Train a local specialist<\/title>/);
+  assert.match(html, /<title>AutoTrainer - Train a local specialist<\/title>/);
   assert.match(html, /<div id="root"><\/div>/);
-
   const assets = await readdir(new URL("dist/assets/", root));
   assert.ok(assets.some((name) => name.endsWith(".js")));
   assert.ok(assets.some((name) => name.endsWith(".css")));
 });
 
-test("the page is an operating console around the focused setup flow", async () => {
+test("the operating console follows Projects, Data, Train, Evaluate, Serve", async () => {
   const app = await source("src/App.tsx");
-  assert.match(app, /className="console-shell"/);
-  assert.match(app, /className="sidebar"/);
-  assert.match(app, />Setup</);
-  assert.match(app, />Training</);
-  assert.match(app, />Evaluation</);
-  assert.match(app, /Build the training run/);
-  assert.match(app, /<ModelSetupPanel(?:\s+[^>]*)?\s*\/>/);
-  assert.match(app, /<SourceSetupPanel(?:\s+[^>]*)?\s*\/>/);
-  assert.match(app, /<HistoryReviewPanel[\s\S]*?\/>/);
-  assert.match(app, /<PreparePanel(?:\s+[^>]*)?\s*\/>/);
+  assert.match(app, /type ViewId = "projects" \| "data" \| "train" \| "evaluate" \| "serve"/);
+  for (const label of ["Projects", "Data", "Train", "Evaluate", "Serve"]) assert.match(app, new RegExp(`label: "${label}"`));
+  assert.match(app, /<ProjectsPanel/);
+  assert.match(app, /<ModelSetupPanel/);
+  assert.match(app, /<SourceSetupPanel/);
+  assert.match(app, /<HistoryReviewPanel/);
   assert.match(app, /<TrainingMonitorPanel/);
   assert.match(app, /<EvaluationMonitorPanel/);
-  assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<HistoryReviewPanel"));
-  assert.match(app, /aria-label="Training setup"/);
-  assert.match(app, /disabled={trainingActive}/);
-  assert.match(app, /onTrainingActiveChange={setTrainingActive}/);
-  assert.doesNotMatch(app, /className="hero"|proof-note|site-footer|CommandDrawer/);
-  await assert.rejects(access(new URL("src/data.ts", root)));
+  assert.match(app, /<ServePanel/);
+  assert.doesNotMatch(app, /<PreparePanel/);
+  assert.doesNotMatch(app, /className="hero"|site-footer|CommandDrawer/);
 });
 
-test("evaluation shows only durable plan, trial, and trusted score state", async () => {
-  const panel = await source("src/EvaluationMonitorPanel.tsx");
+test("projects can be created and switched through durable backend state", async () => {
+  const panel = await source("src/ProjectsPanel.tsx");
   const api = await source("src/api.ts");
-  assert.match(api, /export type EvaluationWorkspace/);
-  assert.match(api, /request\("\/api\/v1\/evaluation", \{ signal \}\)/);
-  assert.match(api, /request\("\/api\/v1\/evaluation\/plan"/);
-  assert.match(api, /request\("\/api\/v1\/evaluation\/start"/);
-  assert.match(panel, /await getEvaluationWorkspace/);
-  assert.match(panel, /window\.setTimeout/);
-  assert.match(panel, /current_trial/);
-  assert.match(panel, /trusted local verifier/);
-  assert.match(panel, /No simulated run/);
-  assert.match(panel, /startEvaluation\("model_benchmark"\)/);
-  assert.doesNotMatch(panel, /Math\.random|type="range"|fake|mock/i);
+  const createHandler = panel.slice(panel.indexOf("const create"), panel.indexOf("const choose"));
+  assert.match(api, /request\("\/api\/v1\/projects", \{ signal \}\)/);
+  assert.match(api, /body: JSON\.stringify\(\{ name \}\)/);
+  assert.match(api, /"\/api\/v1\/projects\/select"/);
+  assert.match(api, /project_id: projectId/);
+  assert.match(panel, /Create a project/);
+  assert.match(panel, /await createProject/);
+  assert.match(panel, /await selectProject/);
+  assert.doesNotMatch(createHandler, /selectProject/);
+  assert.match(createHandler, /await refresh/);
+  assert.match(panel, /Finish the active GPU job/);
 });
 
-test("model selection and download use the real shared lifecycle", async () => {
+test("model search distinguishes training support and observes background downloads", async () => {
   const panel = await source("src/ModelSetupPanel.tsx");
   const api = await source("src/api.ts");
-  const vite = await source("vite.config.ts");
-  assert.match(panel, /<h2 id="model-heading">Choose model<\/h2>/);
-  assert.match(panel, /Select & download/);
-  assert.match(panel, /await selectProjectModel/);
-  assert.match(panel, /await downloadProjectModel/);
-  assert.match(panel, /<details className="advanced-options">/);
-  assert.match(panel, /<summary>Advanced<\/summary>/);
-  assert.match(panel, /Save settings/);
-  assert.match(api, /\/api\/v1\/model\/select/);
-  assert.match(api, /\/api\/v1\/model\/download/);
-  assert.match(vite, /127\.0\.0\.1:8765/);
+  assert.match(api, /\/api\/v1\/models\/search\?\$\{params\}/);
+  assert.match(api, /\/api\/v1\/model\/status/);
+  assert.match(api, /\/api\/v1\/reference-model/);
+  assert.match(api, /\/api\/v1\/reference-model\/download/);
+  assert.match(panel, /searchHuggingFaceModels/);
+  assert.match(panel, /searchOpen/);
+  assert.match(panel, /setSearchOpen\(false\)/);
+  assert.match(panel, /searchOpen && query\.trim\(\)/);
+  assert.match(panel, /result\.compatibility !== "supported"/);
+  assert.match(panel, /Not verified for V1 training/);
+  assert.match(panel, /downloadJob\?\.status/);
+  assert.match(panel, /Download queued/);
+  assert.match(panel, /Benchmark reference/);
+  assert.match(panel, /It cannot become the training base/);
+  assert.doesNotMatch(panel, /Math\.random|\bETA\b/i);
 });
 
-test("work is added and removed through the real source contract", async () => {
+test("repository input requires explicit purpose and keeps advanced scope", async () => {
   const panel = await source("src/SourceSetupPanel.tsx");
   const api = await source("src/api.ts");
-  assert.match(panel, /<h2 id="source-setup-heading">Add your work<\/h2>/);
+  for (const mode of ["accepted_changes", "practice_tasks", "reference_only", "evaluation_holdout"]) {
+    assert.match(panel, new RegExp(mode));
+  }
   assert.match(panel, /GitHub URL or local path/);
-  assert.match(panel, /await addProjectSource/);
-  assert.match(panel, /await removeProjectSource/);
-  assert.match(panel, /aria-label={`Remove \${source\.label}`}/);
-  assert.match(api, /GET|ProjectSource/);
-  assert.match(api, /\/api\/v1\/sources/);
-  assert.match(api, /method: "DELETE"/);
-  assert.match(panel, /onSourcesChanged\?\.\(\)/);
+  assert.match(panel, /include: splitPatterns\(include\)/);
+  assert.match(panel, /exclude: splitPatterns\(exclude\)/);
+  assert.match(panel, /license_spdx/);
+  assert.match(panel, /license_attribution/);
+  assert.match(panel, /hasIntrinsicPurpose/);
+  assert.match(panel, /disabled={connected !== true/);
+  assert.match(panel, /Loading existing sources/);
+  assert.match(api, /modes\?: SourceMode\[\]/);
+  assert.match(api, /body: JSON\.stringify\(input\)/);
 });
 
-test("reviewed history approves one real change at a time", async () => {
-  const panel = await source("src/HistoryReviewPanel.tsx");
+test("Train owns one-click start plus real loss, reward, rubric, and event telemetry", async () => {
+  const panel = await source("src/TrainingMonitorPanel.tsx");
   const api = await source("src/api.ts");
-  assert.match(panel, /workspace\?\.candidates\[0\]/);
-  assert.match(panel, /\[refreshKey\]/);
-  assert.doesNotMatch(panel, /workspace\?\.candidates\.map|workspace\.candidates\.map/);
-  assert.match(panel, /<textarea/);
-  assert.match(panel, /<pre className="history-diff"/);
-  assert.match(panel, /type="checkbox"/);
-  assert.match(panel, /I have the right to use this change for training/);
-  assert.match(panel, /Approve example/);
-  assert.match(panel, />\s*Skip\s*</);
-  assert.match(panel, /review\("approved"\)/);
-  assert.match(panel, /review\("rejected"\)/);
-  assert.match(
-    panel,
-    /!candidate && workspace\.summary\.approved_count === 0 && workspace\.summary\.stale_review_count === 0/,
-  );
-  assert.doesNotMatch(panel, /role="dialog"|modal|bulk|ranking|filter/i);
-  assert.match(api, /\/api\/v1\/history/);
-  assert.match(api, /\/api\/v1\/history\/review/);
-  assert.match(api, /\/api\/v1\/history\/retire-stale/);
-  assert.match(api, /rights_confirmed\?: boolean/);
-  assert.match(panel, /Retire old approval/);
-  assert.match(panel, /retireStaleHistoryReviews/);
-});
-
-test("one preparation action returns an honest next step", async () => {
-  const panel = await source("src/PreparePanel.tsx");
-  const app = await source("src/App.tsx");
-  const api = await source("src/api.ts");
-  assert.match(panel, /<h2 id="prepare-heading">Prepare training<\/h2>/);
-  assert.match(panel, /await prepareProject/);
-  assert.match(panel, /Teach from accepted work/);
-  assert.match(panel, /Practice against tests/);
-  assert.match(panel, /Action needed/);
-  assert.match(panel, /Do this next/);
-  assert.match(api, /\/api\/v1\/prepare/);
-  assert.match(panel, /\[revision\]/);
-  assert.match(panel, /setResult\(null\)/);
-  assert.match(app, /onModelChanged={projectChanged}/);
-  assert.match(app, /onHistoryChanged={projectChanged}/);
-  assert.match(app, /<PreparePanel revision={projectRevision}/);
-});
-
-test("training starts only after readiness and follows the real job record", async () => {
-  const panel = await source("src/PreparePanel.tsx");
-  const monitor = await source("src/TrainingMonitorPanel.tsx");
-  const api = await source("src/api.ts");
-  assert.match(api, /export type TrainingJob/);
-  assert.match(api, /status: "idle" \| "queued" \| "running" \| "completed" \| "failed" \| "interrupted"/);
-  assert.match(api, /request\("\/api\/v1\/training", \{ signal \}\)/);
-  assert.match(api, /request\("\/api\/v1\/training\/start", \{ method: "POST", body: "\{\}" \}\)/);
-  assert.match(panel, /result\.status === "ready"/);
+  assert.match(panel, />Start training</);
+  assert.match(panel, /Check readiness/);
   assert.match(panel, /await startTraining\(\)/);
-  assert.match(panel, /window\.setTimeout/);
-  assert.match(panel, /2_000/);
-  assert.match(panel, /\)\}\s*\{showTrainingControl && \(/);
-  assert.match(panel, /Teaching from examples/);
-  assert.match(panel, /Practicing against tests/);
-  assert.match(panel, /trainingJob\.message/);
-  assert.match(panel, /Training output ready/);
-  assert.match(panel, /trainingJob\?\.result\?\.stages/);
-  assert.match(panel, /Training was interrupted/);
-  assert.match(panel, /Train again/);
-  assert.match(panel, /Retry training/);
-  assert.doesNotMatch(panel, /type="range"|percentage|progress bar|view logs|learning rate|rank|alpha/i);
-  assert.match(monitor, /await|then\(\(next\)|getTrainingJob/);
-  assert.match(monitor, /window\.setTimeout/);
-  assert.match(monitor, /job\?\.result\?\.stages|job\.result\?\.stages/);
-  assert.match(monitor, /Nothing fabricated/);
-  assert.doesNotMatch(monitor, /type="range"|Math\.random/);
+  assert.match(panel, /await prepareProject\(\)/);
+  assert.match(api, /\/api\/v1\/training\/events\?after=/);
+  assert.match(panel, /getTrainingEvents\(cursorRef\.current/);
+  assert.match(panel, /jobRolledOver/);
+  assert.match(panel, /getTrainingEvents\(0, controller\.signal\)/);
+  assert.match(panel, /event\.hard_gate_passed === false/);
+  assert.match(panel, /Teaching loss/);
+  assert.match(panel, /Practice reward and rubric/);
+  for (const key of ["design_rules", "patch_quality", "regression_safety", "responsive_rules", "task_tests"]) assert.match(panel, new RegExp(key));
+  assert.match(panel, /No training events yet/);
+  assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b/i);
 });
 
-test("the first run has exactly three accessible walkthrough steps", async () => {
+test("Evaluate freezes weights, runs once, and renders real trial and verifier evidence", async () => {
+  const panel = await source("src/EvaluationMonitorPanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(panel, /Weights are frozen\. Nothing learns here\./);
+  assert.match(panel, /Run held-out evaluation/);
+  assert.match(panel, /await startEvaluation\(\)/);
+  assert.match(api, /body: "\{\}"/);
+  assert.match(api, /\/api\/v1\/evaluation\/events\?after=/);
+  assert.match(panel, /benchmark\?\.trials/);
+  assert.match(panel, /Planned trial matrix/);
+  assert.match(panel, /Reward and verified success/);
+  assert.match(panel, /Rubric components/);
+  assert.match(panel, /Live verification/);
+  assert.match(panel, /planIdRef/);
+  assert.match(panel, /page\.cursor_reset \|\| planRolledOver/);
+  assert.match(panel, /hardGatePassed === false/);
+  assert.match(panel, /resultsTruncated/);
+  assert.match(panel, /trialsTruncated/);
+  assert.match(panel, /visible-window means rather than whole-run means/);
+  assert.doesNotMatch(panel, /planEvaluation|Math\.random|type="range"|token counter|\bETA\b/i);
+});
+
+test("Serve manages a real local OpenAI-compatible host and test request", async () => {
+  const panel = await source("src/ServePanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(api, /\/api\/v1\/hosting\/start/);
+  assert.match(api, /\/api\/v1\/hosting\/stop/);
+  assert.match(api, /\/api\/v1\/hosting\/test/);
+  assert.match(panel, /Start local endpoint/);
+  assert.match(panel, /OpenAI-compatible endpoint/);
+  assert.match(panel, /chat\/completions/);
+  assert.match(panel, /Copy curl/);
+  assert.match(panel, /Send test request/);
+  assert.match(panel, /No response yet/);
+  assert.match(panel, /adapterChoiceTouched/);
+  assert.match(panel, /Backend resolved output/);
+  assert.match(panel, /Loaded output/);
+});
+
+test("the first run walkthrough covers all five real lifecycle screens", async () => {
   const app = await source("src/App.tsx");
   const walkthrough = app.slice(app.indexOf("const walkthroughSteps"), app.indexOf("function Walkthrough"));
-  assert.equal(walkthrough.match(/title: "/g)?.length, 3);
-  assert.match(app, /autotrainer\.walkthrough\.v2/);
-  assert.match(app, /data-tour="model"/);
-  assert.match(app, /data-tour="sources"/);
-  assert.match(app, /data-tour="prepare"/);
+  assert.equal(walkthrough.match(/title: "/g)?.length, 5);
+  for (const target of ["projects", "model", "train", "evaluate", "serve"]) assert.match(app, new RegExp(`data-tour="${target}"`));
+  assert.match(app, /autotrainer\.walkthrough\.v3/);
   assert.match(app, /role="dialog"/);
   assert.match(app, /aria-modal="true"/);
   assert.match(app, /event\.key === "Escape"/);
-  assert.match(app, /inert={walkthroughOpen \? true : undefined}/);
-  assert.match(app, /Walkthrough/);
   assert.match(app, /window\.localStorage\.setItem/);
 });
 
-test("normal UI stays plain, truthful, and free of research jargon", async () => {
+test("charts render observed values and truthful empty states", async () => {
+  const chart = await source("src/TelemetryChart.tsx");
   const visibleUi = await Promise.all([
-    source("src/App.tsx"),
-    source("src/ModelSetupPanel.tsx"),
-    source("src/SourceSetupPanel.tsx"),
-    source("src/HistoryReviewPanel.tsx"),
-    source("src/PreparePanel.tsx"),
-    source("src/TrainingMonitorPanel.tsx"),
-    source("index.html"),
+    source("src/App.tsx"), source("src/TrainingMonitorPanel.tsx"), source("src/EvaluationMonitorPanel.tsx"), source("src/ServePanel.tsx"),
   ]).then((files) => files.join("\n"));
-
-  assert.doesNotMatch(visibleUi, /QLoRA|GRPO|Fable|control plane|training lab/);
-  assert.doesNotMatch(visibleUi, /status:\s*["']running["']|training started|job queued/i);
-  assert.match(visibleUi, /Training never starts by accident/);
+  assert.match(chart, /plots only observed backend values/);
+  assert.match(chart, /Waiting for observed values/);
+  assert.match(chart, /item\.points\.map/);
+  assert.doesNotMatch(visibleUi, /Math\.random|fake data|demo values|token counter|estimated time/i);
 });
