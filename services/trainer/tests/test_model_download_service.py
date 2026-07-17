@@ -77,6 +77,28 @@ class ModelDownloadServiceTests(unittest.TestCase):
             release.set()
             manager.close()
 
+    def test_reference_download_uses_pinned_catalog_profile(self) -> None:
+        manager = ModelDownloadManager(self.config_path)
+        completed = {
+            "status": "downloaded",
+            "model_id": "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+            "revision": "14a29bae5143091aeaf87ad37120de4cd57d592c",
+        }
+        with patch(
+            "autotrainer.model_download_service.materialize_reference_model_owned",
+            return_value=completed,
+        ) as download:
+            queued = manager.start_reference()
+            manager.close()
+
+        self.assertEqual(queued["kind"], "reference")
+        self.assertEqual(
+            queued["model_id"],
+            "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+        )
+        download.assert_called_once_with(self.config_path.resolve(), "qwythos-9b-reference")
+        self.assertEqual(manager.snapshot()["status"], "completed")
+
     def test_public_failure_is_terminal_and_does_not_store_exception_chain(self) -> None:
         manager = ModelDownloadManager(self.config_path)
         with patch(

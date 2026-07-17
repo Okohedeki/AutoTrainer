@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from .config import ConfigError, load_config, project_config_mutation, write_config
 from .locking import _resolve_huggingface_revision
+from .models import MODEL_CATALOG
 from .project_gate import project_mutation_gate
 
 
@@ -42,6 +43,10 @@ def _hub_functions() -> tuple[Any, Any]:
 
 def _receipt_path(artifact_dir: Path) -> Path:
     return artifact_dir / "models" / "current.json"
+
+
+def _reference_receipt_path(artifact_dir: Path, alias: str) -> Path:
+    return artifact_dir / "models" / "references" / f"{alias}.json"
 
 
 def _configured_cache_dir(config: Any) -> Path:
@@ -70,6 +75,154 @@ def _write_receipt(artifact_dir: Path, payload: Mapping[str, Any]) -> Path:
     )
     temporary.replace(destination)
     return destination
+
+
+def _reference_profile(model_name: str) -> tuple[str, dict[str, Any]]:
+    """Resolve only catalogued benchmark references, never arbitrary disk pulls."""
+
+    if model_name in MODEL_CATALOG:
+        alias = model_name
+    else:
+        alias = next(
+            (
+                key
+                for key, details in MODEL_CATALOG.items()
+                if details.get("id") == model_name
+            ),
+            "",
+        )
+    profile = MODEL_CATALOG.get(alias)
+    if not alias or not profile or profile.get("purpose") != "benchmark_reference":
+        raise ConfigError("model is not a catalogued V1 benchmark reference")
+    revision = str(profile.get("default_revision", ""))
+    if IMMUTABLE_REVISION.fullmatch(revision) is None:
+        raise ConfigError("benchmark reference must have an immutable catalog revision")
+    return alias, dict(profile)
+
+
+def inspect_reference_model(
+    config_path: str | Path,
+    model_name: str = "qwythos-9b-reference",
+) -> dict[str, Any]:
+    """Inspect the pinned benchmark snapshot without making a network request."""
+
+    config = load_config(config_path)
+    alias, profile = _reference_profile(model_name)
+    model_id = str(profile["id"])
+    revision = str(profile["default_revision"]).lower()
+    cache_dir = _configured_cache_dir(config)
+    result: dict[str, Any] = {
+        "alias": alias,
+        "model_id": model_id,
+        "revision": revision,
+        "status": "not_downloaded",
+        "snapshot_path": None,
+        "cache_dir": str(cache_dir),
+        "receipt": None,
+    }
+    receipt_path = _reference_receipt_path(config.artifact_dir, alias)
+    receipt = _read_json_receipt(receipt_path)
+    if (
+        receipt
+        and receipt.get("model_id") == model_id
+        and receipt.get("revision") == revision
+        and Path(str(receipt.get("snapshot_path", ""))).is_dir()
+        and Path(str(receipt.get("cache_dir", ""))).expanduser().resolve()
+        == cache_dir.resolve()
+    ):
+        result.update(
+            status="downloaded",
+            snapshot_path=receipt["snapshot_path"],
+            receipt=str(receipt_path),
+            file_count=receipt.get("file_count"),
+            logical_bytes=receipt.get("logical_bytes"),
+        )
+        return result
+    try:
+        snapshot_download, _scan_cache_dir = _hub_functions()
+        snapshot = Path(
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                cache_dir=cache_dir,
+                local_files_only=True,
+            )
+        ).resolve()
+    except Exception:
+        return result
+    file_count, logical_bytes = _snapshot_size(snapshot)
+    result.update(
+        status="cached_unverified",
+        snapshot_path=str(snapshot),
+        file_count=file_count,
+        logical_bytes=logical_bytes,
+    )
+    return result
+
+
+def _read_json_receipt(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def materialize_reference_model_owned(
+    config_path: str | Path,
+    model_name: str = "qwythos-9b-reference",
+) -> dict[str, Any]:
+    """Download one catalogued reference while the caller owns the project."""
+
+    config = load_config(config_path)
+    alias, profile = _reference_profile(model_name)
+    model_id = str(profile["id"])
+    revision = str(profile["default_revision"]).lower()
+    snapshot_download, _scan_cache_dir = _hub_functions()
+    cache_dir = _configured_cache_dir(config)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot = Path(
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                cache_dir=cache_dir,
+                token=os.environ.get("HF_TOKEN") or None,
+            )
+        ).resolve()
+    except Exception as error:
+        raise ModelCacheError(
+            "cannot download the pinned benchmark reference; check disk space, "
+            "network access, model access, and Hugging Face login"
+        ) from error
+    file_count, logical_bytes = _snapshot_size(snapshot)
+    receipt = {
+        "schema_version": 1,
+        "alias": alias,
+        "model_id": model_id,
+        "revision": revision,
+        "snapshot_path": str(snapshot),
+        "cache_dir": str(cache_dir.resolve()),
+        "file_count": file_count,
+        "logical_bytes": logical_bytes,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    destination = _reference_receipt_path(config.artifact_dir, alias)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(destination)
+    return {"status": "downloaded", **receipt, "receipt": str(destination)}
+
+
+def materialize_reference_model(
+    config_path: str | Path,
+    model_name: str = "qwythos-9b-reference",
+) -> dict[str, Any]:
+    """Synchronously cache a benchmark reference for agent CLI callers."""
+
+    with project_mutation_gate(config_path):
+        return materialize_reference_model_owned(config_path, model_name)
 
 
 def _snapshot_size(snapshot_path: Path) -> tuple[int, int]:
@@ -283,7 +436,10 @@ def require_materialized_model(model: Mapping[str, Any]) -> None:
 __all__ = [
     "ModelCacheError",
     "inspect_model_cache",
+    "inspect_reference_model",
     "materialize_model",
     "materialize_model_owned",
+    "materialize_reference_model",
+    "materialize_reference_model_owned",
     "require_materialized_model",
 ]

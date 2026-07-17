@@ -19,7 +19,11 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from .config import ConfigError, load_config
-from .model_cache import ModelCacheError, materialize_model_owned
+from .model_cache import (
+    ModelCacheError,
+    materialize_model_owned,
+    materialize_reference_model_owned,
+)
 from .project_gate import ProjectLease, acquire_project_lease
 
 
@@ -41,6 +45,7 @@ def _idle() -> dict[str, Any]:
         "model_id": None,
         "revision": None,
         "result": None,
+        "kind": None,
     }
 
 
@@ -81,6 +86,7 @@ def _normalize(value: object) -> dict[str, Any] | None:
         "model_id": model_id[:500],
         "revision": revision[:128],
         "result": _safe_result(value.get("result")),
+        "kind": str(value.get("kind", "project")),
     }
 
 
@@ -139,12 +145,36 @@ class ModelDownloadManager:
     def start(self) -> dict[str, Any]:
         """Reserve the project immediately, then return a queued receipt."""
 
+        return self._start(kind="project", model_name=None)
+
+    def start_reference(
+        self, model_name: str = "qwythos-9b-reference"
+    ) -> dict[str, Any]:
+        """Queue the one catalogued V1 benchmark reference in the shared cache."""
+
+        from .models import resolve_model
+
+        profile = resolve_model(model_name)
+        if profile.get("purpose") != "benchmark_reference":
+            raise ModelDownloadError("model is not a catalogued V1 benchmark reference")
+        return self._start(kind="reference", model_name=model_name)
+
+    def _start(self, *, kind: str, model_name: str | None) -> dict[str, Any]:
+        """Reserve the project and dispatch one selected or reference transfer."""
+
         with self._lock:
             if self._job["status"] in _LIVE:
                 raise ModelDownloadError("A model download is already active for this project.")
             config = load_config(self._config_path)
-            model_id = str(config.model.get("id", "")).strip()
-            revision = str(config.model.get("revision", "")).strip()
+            if kind == "reference":
+                from .models import resolve_model
+
+                profile = resolve_model(str(model_name))
+                model_id = str(profile.get("id", "")).strip()
+                revision = str(profile.get("default_revision", "")).strip()
+            else:
+                model_id = str(config.model.get("id", "")).strip()
+                revision = str(config.model.get("revision", "")).strip()
             if not model_id or not revision:
                 raise ModelDownloadError("Select a Hugging Face model and revision before downloading.")
             lease = acquire_project_lease(self._config_path)
@@ -157,12 +187,13 @@ class ModelDownloadManager:
                 "model_id": model_id,
                 "revision": revision,
                 "result": None,
+                "kind": kind,
             }
             try:
                 _write(self._record_path, self._job)
                 worker = Thread(
                     target=self._run,
-                    args=(job_id, lease),
+                    args=(job_id, lease, kind, model_name),
                     name=f"autotrainer-model-download-{job_id[:8]}",
                     daemon=False,
                 )
@@ -182,7 +213,13 @@ class ModelDownloadManager:
             self._job.update(values)
             _write(self._record_path, self._job)
 
-    def _run(self, job_id: str, lease: ProjectLease) -> None:
+    def _run(
+        self,
+        job_id: str,
+        lease: ProjectLease,
+        kind: str,
+        model_name: str | None,
+    ) -> None:
         try:
             with lease.activate("run"):
                 self._update(
@@ -194,7 +231,14 @@ class ModelDownloadManager:
                     ),
                 )
                 try:
-                    result = materialize_model_owned(self._config_path)
+                    result = (
+                        materialize_reference_model_owned(
+                            self._config_path,
+                            str(model_name or "qwythos-9b-reference"),
+                        )
+                        if kind == "reference"
+                        else materialize_model_owned(self._config_path)
+                    )
                 except ConfigError as error:
                     message = str(error).replace("\r", " ").replace("\n", " ")[:1_000]
                     self._update(
