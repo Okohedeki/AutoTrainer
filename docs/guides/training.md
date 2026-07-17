@@ -1,256 +1,180 @@
 # Training
 
-AutoTrainer's V1 training surface is intentionally narrow, but its learning
-path is conditional:
+AutoTrainer V1 trains a QLoRA adapter around one supported 9B text model. SFT and GRPO are conditional stages, not a requirement to run two algorithms on every project.
 
 ```text
-supported 9B text causal LM + 4-bit QLoRA
-        |
-        +-- accepted examples only --> SFT
-        +-- executable tasks only --> GRPO practice
-        +-- both signals -----------> SFT, then GRPO on the same adapter
-        |
-declared 9B reference vs trained candidate comparison
+accepted examples only -> QLoRA SFT
+executable tasks only  -> QLoRA GRPO
+both signals           -> SFT, then GRPO continues the SFT adapter
 ```
 
-The frozen base weights are not rewritten. QLoRA creates or updates a PEFT
-adapter in every path. SFT teaches from accepted responses. GRPO practices
-against executable rewards; after SFT it continues the same adapter, while a
-practice-only project starts a fresh QLoRA adapter from the selected base.
+The base weights remain frozen in every path.
 
-## Before using the GPU
+## Prepare before loading weights
 
-Run the shared preparation stage first:
+The GUI performs preparation as part of **Start training**. Agents can inspect it separately:
 
 ```bash
 autotrainer prepare --config autotrainer.yaml
 autotrainer train auto --config autotrainer.yaml
 ```
 
-`prepare` performs validation, source scanning, compilation, recipe resolution,
-and local runtime checks without loading model weights. `train auto` repeats
-preparation before starting, so the GUI and CLI cannot launch from a stale Ready
-result. Evaluation-only blockers do not prevent a useful training run. Resolve
-them before `evaluate plan --write`.
+Preparation:
 
-At minimum, the preparation report should show:
+- validates YAML, paths, source intent, and recipes;
+- scans and locks repositories;
+- compiles explicit SFT and task JSONL;
+- verifies the recorded Hugging Face snapshot;
+- selects teach, practice, or both;
+- checks Python, CUDA/GPU, training packages, and the container runtime;
+- does not load model weights.
 
-- The exact model ID and immutable revision.
-- A CUDA-capable GPU and compatible package matrix.
-- At least one learning signal: a valid text-only SFT dataset, valid training
-  task manifests, or both.
-- For a practice path, a Docker or Podman runtime capable of network isolation.
-- Resolvable repository locks and working directories.
-- For a practice path, verifier bundles outside editable workspaces.
+`train auto` repeats preparation so a stale Ready result cannot start a changed project.
 
-Final evaluation additionally requires a held-out task set at
-`evaluation.dataset`, distinct from `grpo.eval_dataset`, and no detected
-train/evaluation group collision.
+## Compiled inputs
 
-The included example has a small evaluation fixture in a separate directory for exercising the contract. Its starting project is still part of the same AutoTrainer Git repository as the training fixture, so the planner correctly rejects it as a repository holdout. Add multiple genuinely independent held-out repository families and pin the real evaluation runners before claiming an improvement.
-
-## Compiled trainer inputs
-
-Authored inputs are declared in `sources`; trainers read compiled files:
+Trainers read generated files, not arbitrary repository trees:
 
 ```yaml
 sft:
-  dataset: ./.autotrainer/compiled/sft/train.jsonl
+  dataset: .autotrainer/compiled/sft/train.jsonl
 
 grpo:
-  dataset: ./.autotrainer/compiled/rl/train.jsonl
-  # Optional training-loop validation. Keep it separate from the final proof set.
-  eval_dataset: ./data/rl-validation.jsonl
+  dataset: .autotrainer/compiled/rl/train.jsonl
+  # Optional training feedback; never reuse the final benchmark.
+  # eval_dataset: ./data/rl-validation.jsonl
 
 evaluation:
-  dataset: ./.autotrainer/compiled/rl/evaluation.jsonl
+  dataset: .autotrainer/compiled/rl/evaluation.jsonl
 ```
 
-Compilation is the boundary where source paths and mutable revisions become locked provenance. It also prevents a trainer from silently sweeping every file in a repository into a dataset. `evaluation.dataset` contains held-out task-pack records for the final two-suite proof. `grpo.eval_dataset` is optional trainer feedback and must be a different file; do not let final benchmark tasks affect optimization or checkpoint selection.
+Review the compiled rows and compile report before a costly run. SFT rows are text conversations. GRPO rows carry the conversational prompt, task manifest, locked source identity, and sandbox settings. Final evaluation tasks stay outside optimization and checkpoint selection.
 
-Inspect the JSONL before training. SFT source files may use a complete
-`messages` conversation or prompt/completion text, but compilation normalizes
-every trainer row to conversational `prompt` and `completion` message lists.
-Each GRPO or evaluation-task line contains a conversational `prompt`,
-`task_id`, the validated manifest, resolved source path/revision, and sandbox
-settings.
-
-## QLoRA supervised tuning
-
-The normal GUI/agent path selects this stage through `train auto`. To run only
-the supervised stage for a controlled experiment:
+## SFT
 
 ```bash
+autotrainer train sft --dry-run --config autotrainer.yaml
 autotrainer train sft --config autotrainer.yaml
 ```
 
-The base-model loader owns 4-bit quantization:
+The supported loader uses 4-bit NF4 base weights, BF16 compute, gradient checkpointing, and a PEFT adapter. Completion-only and assistant-only loss keep instructions and tool observations as context rather than targets.
 
-```yaml
-model:
-  quantization:
-    method: bitsandbytes-4bit
-    quant_type: nf4
-    double_quant: true
-    compute_dtype: bfloat16
-```
+SFT is useful when accepted examples show the behavior directly. It can also warm-start GRPO so verifier-backed rollouts receive varied, informative rewards. It is not proof that the specialist improved on held-out work.
 
-The trainable adapter configuration is:
+The completed output contains `adapter_config.json` and adapter weights under `sft.output_dir`.
 
-```yaml
-qlora:
-  rank: 32
-  alpha: 32
-  dropout: 0.0
-  bias: none
-  target_modules: all-linear
-```
-
-The supervised stage uses assistant-only, completion-only loss. The prompt and tool observations provide context; accepted assistant behavior is the target. The example uses batch size one, gradient accumulation, gradient checkpointing, BF16, and a 2,048-token maximum as conservative starting values for a 9B model.
-
-SFT is a warm start, not the final proof. Its purpose is to make useful behavior frequent enough that multiple GRPO rollouts receive different, informative rewards. If every rollout receives zero, increasing RL steps will not manufacture a learning signal.
-
-### SFT output
-
-The selected SFT checkpoint contains standard PEFT artifacts, including
-`adapter_config.json` and adapter weights. `train auto` wires the SFT output to
-the following GRPO stage without rewriting YAML. For a manual `train rl` run,
-point `grpo.start_from` at that adapter:
-
-```yaml
-grpo:
-  start_from: ./.autotrainer/runs/sft
-```
-
-The reference runner saves the final SFT adapter at `sft.output_dir`. Retain periodic checkpoints, select the adapter under test explicitly in `evaluation.arms`, and record why it was chosen; V1 evaluation does not search training checkpoints automatically.
-
-## GRPO reinforcement learning
-
-The normal GUI/agent path selects this stage through `train auto`. To run only
-the practice stage for a controlled experiment, validate the adapter and
-environment again, then run:
+## GRPO
 
 ```bash
-autotrainer validate --config autotrainer.yaml
-autotrainer doctor --config autotrainer.yaml
+autotrainer train rl --dry-run --config autotrainer.yaml
 autotrainer train rl --config autotrainer.yaml
 ```
 
-The command is named `train rl`; its algorithm configuration lives under `grpo`.
+The command is `train rl`; the selected V1 algorithm is configured under `grpo`.
 
-For each dataset row, the frontend environment:
+For each row, the environment:
 
-1. Resolves the task manifest and its locked repository source.
-2. Materializes a disposable checkout.
-3. Uses the task’s `workingDirectory` inside that checkout.
-4. Mounts the verifier bundle outside the editable repository.
-5. Starts the container with no external network.
-6. Exposes bounded `list_files`, `read_file`, `search_code`, `apply_patch`, and `run_check` tools.
-7. Enforces model token, tool-call, command, and episode limits.
-8. Runs trusted verification and reads the structured report.
-9. Persists raw reward signals and destroys the workspace.
+1. materializes a disposable checkout of the locked starting revision;
+2. keeps the hidden verifier outside the editable tree;
+3. starts a network-disabled Docker/Podman container;
+4. exposes bounded `list_files`, `read_file`, `search_code`, `apply_patch`, and named `run_check` tools;
+5. enforces generation, tool, process, output, and wall-time limits;
+6. runs trusted build/regression/hidden checks;
+7. records raw reward components and destroys the workspace.
 
-The policy can run only named checks. It does not receive the hidden verifier or an unrestricted host terminal.
+The policy never receives an unrestricted host terminal or the verifier bundle.
 
-### Reward gates and signals
+### Reward gates
 
-Build and regression safety are hard gates. A rollout receives total reward zero when the build fails or the regression pass rate is below one.
-
-For a passing rollout, the initial weights are:
+Build failure or a regression rate below one forces reward to zero. A passing rollout uses the task's declared components; the reference weights are:
 
 | Signal | Weight |
 |---|---:|
 | Hidden task tests | 35% |
 | Regression safety | 20% |
 | Responsive rules | 20% |
-| Design-system rules | 15% |
-| Accessibility and patch quality | 10% |
+| Design rules | 15% |
+| Patch/accessibility quality | 10% |
 
-The task manifest calls the final signal `patchQuality`; a verifier may combine auditable accessibility and focused-patch checks within it. Store its components separately when possible.
+Keep component values in artifacts. A single scalar without its verifier evidence is not auditable.
 
-The verifier report contains:
+### Continue the SFT adapter
 
-```json
-{
-  "build_passed": true,
-  "regression_pass_rate": 1.0,
-  "task_pass_rate": 0.75,
-  "responsive_pass_rate": 1.0,
-  "design_rule_pass_rate": 0.8,
-  "code_quality_pass_rate": 0.9
-}
+For a combined path, `grpo.start_from` must equal `sft.output_dir`. `train auto` passes the just-completed adapter into GRPO and writes the result to a different output directory. GRPO does not silently create a second unrelated adapter after SFT.
+
+A practice-only project may use `start_from: base` to create a fresh QLoRA policy, or an explicitly compatible completed adapter.
+
+## Observed telemetry
+
+Training events are written durably and exposed identically to the GUI and CLI service layer. The dashboard can graph observed step/loss/reward values, stage transitions, logs, and output paths. It does not fill gaps with simulated values.
+
+If the backend stops during a job, the durable record is marked interrupted when recovered. Full optimizer/checkpoint resume is not automatic for every combined-path interruption; retry can repeat a stage. Preserve output directories and receipts before deciding whether a retry is comparable.
+
+## One-GPU policy
+
+The reference recipe uses one 9B model, two GRPO generations, no vLLM, and one environment at a time. It is designed to complete on one GPU, not to keep a trainer, reference model, serving process, and multiple sandboxes resident together.
+
+An exclusive cross-process GPU-0 lease covers:
+
+- SFT/GRPO training;
+- built-in model evaluation;
+- the local callable model host.
+
+Only one of those operations may run across all local AutoTrainer projects. This prevents the GUI and an agent command from accidentally loading competing 9B models.
+
+For out-of-memory failures, reduce sequence/completion length, generation count, or the generation batch first. Record every change in the resolved recipe.
+
+## Evaluation after training
+
+An optimizer completion is not the success criterion. Freeze the held-out plan and run the built-in benchmark:
+
+```bash
+autotrainer model reference-download --config autotrainer.yaml
+autotrainer evaluate plan --write --config autotrainer.yaml
+autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
 ```
 
-Never reward only shorter patches, fewer tokens, or static-analysis scores. Those signals are easy to exploit without completing the frontend task.
+The benchmark compares:
 
-### Sequential single-GPU execution
+- pinned Qwythos 9B reference at `14a29bae5143091aeaf87ad37120de4cd57d592c`;
+- the project model plus the selected completed adapter.
 
-The initial GRPO configuration uses two generations, disables vLLM, and runs one environment at a time. The intended schedule is sequential:
+Both use the same held-out task snapshots, instructions, tools, limits, seeds, sampling settings, and trusted verifier. The built-in runner loads arms in a frozen grouped order so one 9B model occupies the GPU at a time. Each result, patch, verifier report, and rubric component is durable and appears in the Evaluation view only when observed.
 
-```text
-load policy and generate grouped rollouts
-        ↓
-release rollout-only memory
-        ↓
-execute builds and verifiers on CPU/container runtime
-        ↓
-load/update the trainable adapter
-        ↓
-save state and repeat
+The separate Fable A/B remains external and deferred until its version and orchestration digest are pinned. Its absence does not prevent the local model benchmark, but both decisions are required before a final verified-winner claim.
+
+## Serve the result
+
+Serving is a post-training use step, not another training stage:
+
+```bash
+autotrainer host start --adapter auto --config autotrainer.yaml
+autotrainer host test "Improve this component." --config autotrainer.yaml
+autotrainer host stop --config autotrainer.yaml
 ```
 
-“Single GPU” means one GPU can complete the job. It does not promise that policy serving, a reference model, a trainer, a vision judge, and multiple sandboxes remain resident concurrently.
+`auto` prefers a completed GRPO adapter, then SFT, then the base snapshot. The host is text-only, loopback-only, non-streaming, and serializes one bounded generation request. It implements a small `/v1/chat/completions` compatibility surface, not public deployment.
 
-If the job runs out of memory, first reduce `sft.max_length`, `grpo.max_completion_length`, `grpo.num_generations`, or the generation batch. Do not increase gradient accumulation expecting it to reduce the memory needed for one forward pass. Record every change in the resolved recipe so checkpoint comparisons remain meaningful.
+## Reproducibility
 
-## Reproducibility and recovery
+Retain:
 
-Every run should retain:
+- original and resolved config;
+- exact base revision and download receipt;
+- package/CUDA/GPU identity;
+- source locks and compiled-data fingerprints;
+- container and task/verifier identity;
+- seeds and generation settings;
+- trainer events, checkpoints, rollouts, patches, and raw verifier reports;
+- final adapter and evidence hashes.
 
-- The original and resolved configuration.
-- Exact base-model revision and tokenizer identity.
-- Python package and CUDA versions.
-- GPU name and available VRAM.
-- Source locks and compiled dataset fingerprints.
-- Environment/container identity.
-- Random seeds and generation settings.
-- Periodic adapter checkpoints.
-- Rollout prompts, tool trajectories, patches, and raw verifier reports where licensing permits.
-- Failure and exclusion reasons.
+Changing model/source revisions, compiler code, adapter architecture, reward policy, tasks, or limits creates a new experiment identity.
 
-Resume only when all locked inputs match. If the model revision, source revision, compiler version, reward weights, task limits, or adapter architecture changed, start a new run identity rather than appending incomparable steps.
+## V1 exclusions
 
-## Evaluation protocol
-
-A successful optimizer run is not the product success criterion. The required model benchmark compares:
-
-- The immutable 9B reference declared for the benchmark.
-- The project model with the adapter produced by the prepared teach, practice,
-  or combined QLoRA path.
-
-Use the same held-out tasks, model prompt template, tools, starting revisions, completion limit, tool-call limit, generation settings, and verifier. The primary metric is verified task success; also retain build rate, task-test pass rate, regressions, accessibility, responsive checks, tokens per success, and wall time per success.
-
-The second proof runs:
-
-- Fable orchestrator with the base 9B.
-- The identical Fable orchestrator with that same trained candidate adapter.
-
-Both receive identical website briefs, context, tools, time limits, and completion limits. Blind reviewers compare whether the finished sites satisfy the brief and which is better. This final rendering/review step does not make the training pipeline multimodal.
-
-The CLI implements immutable evaluation planning, model-benchmark execution, external Fable request/result exchange, local result verification, blind-review import/export, reporting, and winner-gated packaging. `benchmark` is an alias for `evaluate` and accepts the same subcommands. Implementation alone is not evidence: the configured runners must be pinned, every planned trial must be completed, the model benchmark must satisfy its unique-task and confidence rules, the Fable review must satisfy its unique-task and completeness rules, and both decisions must report `verified_better`. The bundled placeholders and fixtures do not meet that bar. See the [V1 handoff plan](../V1-HANDOFF.md) for the remaining run work.
-
-## Current runtime matrix
-
-The 2026-07-14 reference combination is Python 3.11 with PyTorch 2.13.0, Transformers 5.13.1, TRL 1.8.0, PEFT 0.19.1, Accelerate 1.14.0, Datasets 5.0.0, bitsandbytes 0.49.2, and jmespath 1.1.0. See [Getting started](getting-started.md) for authoritative package links and installation notes.
-
-This matrix is recorded because agentic GRPO depends on evolving library interfaces. Upgrade it as a tested set, not one dependency at a time in an unrecorded environment.
-
-## Out of scope for V1
-
-- Multimodal or screenshot-conditioned model training.
-- Cloud, distributed, or multi-GPU training.
-- A GPU vision judge.
-- Arbitrary framework and arbitrary-model compatibility.
-- Full-weight fine-tuning or merged-base redistribution.
-- Unreviewed automatic task generation from arbitrary Git history.
-- Claims of improvement without held-out model and Fable comparisons.
+- multimodal or screenshot-conditioned training;
+- cloud, multi-GPU, or distributed training;
+- full-weight fine-tuning or merged-base redistribution;
+- arbitrary model/framework compatibility;
+- unreviewed conversion of any repository into demonstrations or tasks;
+- improvement claims without held-out model and Fable evidence.

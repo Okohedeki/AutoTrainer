@@ -1,89 +1,105 @@
 # AutoTrainer
 
-AutoTrainer is an Apache-2.0, local-first foundry for turning a 9B base model into a verified frontend expert on one consumer GPU.
+AutoTrainer is an Apache-2.0, local-first tool for turning a supported 9B text model into a specialist on one consumer GPU.
 
-The GUI is the main path for people. The CLI is the same path for agents. Both
-call the same local Python services and use `autotrainer.yaml` as the project
-record:
+The GUI is the main path for people. The CLI is the equivalent path for agents. Both use the same Python services, `autotrainer.yaml`, compiled data, job records, and evaluation evidence.
 
 ```text
-choose and download one supported 9B model
-        |
-add GitHub repositories or local files
-        |
-review accepted Git changes and/or add executable tasks
-        |
-Prepare: validate, compile, resolve the recipe, and check this machine
-        |
-train the useful path: teach (SFT), practice (GRPO), or both
-        |
-compare the base model with the trained specialist on held-out work
+Projects -> Data -> Train -> Evaluate -> Serve
 ```
 
-## What is usable now
+V1 stays narrow: local GitHub repositories or files, QLoRA adapters, optional verifier-backed GRPO, a frozen local benchmark, and a loopback model endpoint. It does not add cloud training, multimodal inputs, or distributed orchestration.
 
-- A project CLI for model and source declaration, validation, scanning, compilation, locking, planning, and runtime checks.
-- A loopback-only local API and operational GUI with three-step setup, one
-  durable local training monitor, and observable evaluation jobs.
-- Immutable Hugging Face model download receipts and offline-only training loads.
-- Deterministic repository inventories and direct SFT JSONL compilation.
-- Versioned executable frontend task packs with a Docker/Podman security boundary.
-- A guarded Hugging Face QLoRA SFT runner.
-- A guarded TRL GRPO runner that reloads the SFT adapter as trainable instead of creating a new adapter.
-- A conservative RTX 4090 / 24 GB recipe and dry runs that do not import CUDA libraries.
-- Immutable, paired evaluation plans with local result verification, separate model/Fable reports, and blind-review import/export.
-- Winner-gated LoRA adapter packaging with auditable file hashes and an explicitly labeled unverified-development escape hatch.
+## What V1 does
 
-The evaluation and packaging workflow is implemented, but this checkout does
-not claim a verified winner yet. That claim requires a completed 9B run and the
-two held-out comparisons described below. The GUI and CLI can prepare and start
-the same conditional training path. The GUI can also freeze the proof matrix,
-start or resume the command-backed local benchmark, and watch trusted trial
-results; neither interface treats a successful optimizer run as proof that the
-specialist is better.
+- Creates and switches local projects. GUI project creation writes, validates, and activates the new project as one operation.
+- Searches Hugging Face, labels V1 compatibility, pins an exact model revision, and downloads a durable local snapshot. Weights are not bundled with this repository.
+- Adds GitHub repositories or supported local paths. A GitHub add clones the repository into managed storage and pins a detached commit before saving it.
+- Makes repository intent explicit: accepted changes, practice tasks, reference only, or evaluation holdout. Raw code is never silently called training data.
+- Compiles reviewed demonstrations for SFT and executable verifier-backed tasks for GRPO.
+- Runs the useful learning path: QLoRA SFT, QLoRA GRPO, or SFT followed by GRPO on the same adapter.
+- Records observed training metrics and evaluation evidence durably. The GUI graphs only values returned by the trainer and trusted verifier.
+- Freezes and runs a built-in, text-only model benchmark against the pinned Qwythos 9B reference.
+- Hosts the downloaded base or a completed adapter behind a small, loopback-only OpenAI-compatible endpoint.
+- Prevents Train, Evaluate, and Serve from competing for GPU 0, including across local projects and processes.
 
-## Quickstart
+## Start the GUI
 
-Use Python 3.11. GPU training should run in Linux or WSL2. Core inspection works without CUDA:
+Use Python 3.11. GPU training, evaluation, and hosting should run in Linux or WSL2 with a CUDA build of PyTorch. Basic project setup and dry inspection do not load model weights.
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ./services/trainer
 
-autotrainer init my-frontend-expert
-cd my-frontend-expert
+# Terminal 1: dashboard control API, default http://127.0.0.1:8765/api/v1
+autotrainer serve --config examples/frontend-expert/autotrainer.yaml
+
+# Terminal 2: human interface, normally http://127.0.0.1:3000
+npm install
+npm run dev
 ```
 
-Or inspect the complete example with the same preparation action the GUI uses:
+The console follows one lifecycle:
+
+1. **Projects** - create or select a specialist workspace.
+2. **Data** - choose/download the base and benchmark models, then add learning and held-out sources.
+3. **Train** - let AutoTrainer validate, compile, choose the learning path, check the runtime, and start training. Watch observed metrics and logs.
+4. **Evaluate** - freeze the plan and watch generation, verification, and rubric results from the trusted local benchmark.
+5. **Serve** - load the base or best available adapter, copy the endpoint, and send a bounded test prompt.
+
+`autotrainer serve` and `autotrainer host` are different:
+
+- `autotrainer serve` runs the lightweight `/api/v1` dashboard backend on port `8765`. It does not load a model.
+- `autotrainer host start` launches the selected model on port `8791` by default and exposes `/v1/models` and non-streaming `/v1/chat/completions`.
+
+Both bind to loopback only in V1.
+
+## Agent path
+
+Agents can perform the same work without GUI-only state:
 
 ```bash
-python -m pip install -e ./services/trainer
-autotrainer prepare --config examples/frontend-expert/autotrainer.yaml
-```
+autotrainer init ./my-specialist
+cd ./my-specialist
 
-The example includes a small evaluation authoring fixture, not an independent repository holdout or a statistically useful benchmark. Evaluation planning remains blocked until that source is replaced with a genuinely separate repository, the placeholder runner identities are pinned, and the candidate adapter exists; add multiple independent held-out project families before making an improvement claim.
-
-## Declare the model
-
-Edit the `model` section or use the CLI:
-
-```bash
-autotrainer models list
-autotrainer model use qwen3.5-9b-text \
-  --config autotrainer.yaml
-autotrainer model status --config autotrainer.yaml
+autotrainer models search "Qwen 9B"
+autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
 autotrainer model download --config autotrainer.yaml
+autotrainer model reference-download --config autotrainer.yaml
+
+autotrainer source add Okohedeki/example-repo \
+  --mode accepted_changes \
+  --mode practice_tasks \
+  --config autotrainer.yaml
+autotrainer source add ./data/accepted.jsonl --config autotrainer.yaml
+autotrainer source add ./tasks/train --config autotrainer.yaml
+
+autotrainer prepare --config autotrainer.yaml
+autotrainer train auto --config autotrainer.yaml
+
+autotrainer evaluate plan --write --config autotrainer.yaml
+autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
+
+autotrainer host start --adapter auto --config autotrainer.yaml
+autotrainer host status --config autotrainer.yaml
+autotrainer host test "Build a focused account settings view." --config autotrainer.yaml
+autotrainer host stop --config autotrainer.yaml
 ```
 
-The V1 trainable project model is `Qwen/Qwen3.5-9B`, loaded through the text-only `Qwen3_5ForCausalLM` path. AutoTrainer never loads its processor, image inputs, or vision encoder, and aborts if a different class is instantiated. A custom model can be declared for authoring, but the guarded V1 training backend currently supports only this tested profile; the separately pinned 9B benchmark reference may use a different model through its external runner.
+`prepare` performs input validation, source scanning, deterministic compilation, recipe selection, snapshot checks, and local runtime checks without loading the model. `train auto` repeats that preparation before using the GPU.
+
+Stage-specific `train sft`, `train rl`, `validate`, `compile`, `plan`, and `doctor` commands remain available for diagnosis and controlled experiments.
+
+## Models
+
+The guarded V1 training profile is:
 
 ```yaml
 model:
   provider: huggingface
   id: Qwen/Qwen3.5-9B
-  revision: YOUR_IMMUTABLE_HUGGING_FACE_COMMIT
-  cache_dir: .autotrainer/model-cache
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
   loader: qwen3_5_text
   trust_remote_code: false
   dtype: bfloat16
@@ -95,112 +111,62 @@ model:
     compute_dtype: bfloat16
 ```
 
-`model download` resolves a mutable Hugging Face revision, writes the immutable commit back to YAML, downloads the complete snapshot, and records a token-free receipt. Real training is offline-only and refuses a missing or mutable model. `autotrainer lock` records that model identity with local Git revisions in `.autotrainer/autotrainer.lock.json`. A published experiment should never rely on `main`.
+Hugging Face search is broad, but V1 compatibility claims are not. Results outside the tested profile are labeled unverified and cannot be selected for guarded training through the GUI.
 
-## Point it at repositories and data
+The fixed benchmark reference is `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` at revision `14a29bae5143091aeaf87ad37120de4cd57d592c`. It is downloaded separately and is never offered as the training base.
 
-Repositories, demonstrations, and RL tasks are separate source kinds:
+Public model downloads normally need no token. Gated models use the operator's Hugging Face authentication or `HF_TOKEN`; AutoTrainer does not write the token to YAML or receipts.
 
-```bash
-autotrainer source add ../storefront \
-  --name storefront \
-  --kind repository \
-  --roles style,history,rl_seed \
-  --revision HEAD \
-  --config autotrainer.yaml
+## Learning path
 
-autotrainer source add ./data/accepted.jsonl \
-  --name accepted-trajectories \
-  --kind sft_jsonl \
-  --config autotrainer.yaml
+QLoRA is the one-GPU adapter strategy. SFT and GRPO are separate, conditional learning stages:
 
-autotrainer source add './tasks/train/**/*.json' \
-  --name frontend-train-tasks \
-  --kind task_pack \
-  --config autotrainer.yaml
-```
+- accepted prompt/response examples or reviewed Git changes -> **SFT**;
+- executable tasks with reset, bounded tools, and hidden verifier -> **GRPO**;
+- both signals -> **SFT, then GRPO continuing the SFT adapter**.
 
-For a Git URL, declare it the same way, then run `autotrainer source materialize <source-id> --config autotrainer.yaml` to create a detached local checkout and update the source URI.
+A repository by itself provides neither an instruction/accepted response nor an RL reward. AutoTrainer records what is still needed instead of pretending the repository is ready to train.
 
-A repository alone is **not** an SFT dataset or an RL environment:
+## Evaluation and Fable
 
-- Final source code is reference/style evidence.
-- Prompt → accepted response or tool trajectory JSONL is direct SFT data.
-- Git history can become SFT only after a compiler reconstructs a non-leaking instruction and accepted patch.
-- GRPO requires a starting revision, task instruction, isolated tools, hidden verifier, reward, and reset mechanism.
+The built-in model benchmark compares the pinned Qwythos 9B reference with the trained candidate on the same held-out tasks. The frozen plan covers task content, model revisions, adapter bytes, runtime identity, seeds, and fairness policy. The runner loads one arm at a time on the single GPU, produces a durable result envelope, then scores the patch in the trusted local verifier environment.
 
-`source scan` reports exactly which role each input can serve. `compile` writes inspectable data beneath `.autotrainer/compiled/` and never silently turns raw code into demonstrations.
+Fable remains a second, external comparison: base 9B + Fable versus the same trained candidate + Fable. Its placeholder version and orchestration digest are marked deferred. Missing Fable runtime/results do not block the local model benchmark, and AutoTrainer does not claim to provide Fable.
 
-## Install the training runtime
+## Honest status
 
-First install the CUDA build of PyTorch selected for your host at the [official PyTorch installer](https://pytorch.org/get-started/locally/). Then install the pinned reference stack:
+The V1 workflow is implemented and tested at the service and UI level, but this checkout does **not** contain:
 
-```bash
-python -m pip install -e './services/trainer[training]'
-docker build -t autotrainer/frontend-runtime:0.1 -f infra/frontend-runtime/Dockerfile .
-autotrainer doctor --config autotrainer.yaml
-```
+- downloaded model weights;
+- a completed real 9B SFT/GRPO run;
+- a production-sized held-out 9B benchmark result;
+- a pinned local Fable runtime, Fable outputs, or blind-review results.
 
-The reference matrix is Python 3.11, PyTorch 2.13.0, Transformers 5.13.1, TRL 1.8.0, PEFT 0.19.1, Accelerate 1.14.0, Datasets 5.0.0, bitsandbytes 0.49.2, and jmespath 1.1.0. The rollout image pins Playwright 1.61.1; task repositories should use the matching Playwright package.
+Local hosting is text-only, loopback-only, non-streaming, and serializes one bounded generation request on the GPU. It is not a public deployment system.
 
-## Prepare and train
+Do not call an adapter a verified winner until the model benchmark and the separately completed Fable comparison both meet their declared decision rules.
 
-For agents, one command performs the same validation, scan, compile, recipe
-selection, and runtime check as the GUI's **Prepare training** button:
-
-```bash
-autotrainer prepare --config autotrainer.yaml
-autotrainer train auto --config autotrainer.yaml
-```
-
-`train auto` follows the learning signal that preparation found:
-
-- accepted prompt/response examples: QLoRA SFT;
-- executable tasks and verifiers: QLoRA GRPO practice;
-- both: SFT, then continue the same adapter with GRPO.
-
-QLoRA is how trainable parameters fit on one GPU; SFT and GRPO are conditional
-learning stages. The stage-specific `train sft` and `train rl` commands remain
-available for debugging and controlled experiments.
-
-## Data and environment contracts
+## Documentation
 
 - [Getting started](docs/guides/getting-started.md)
-- [Configuration reference](docs/guides/configuration.md)
-- [Data-source rules](docs/guides/data-sources.md)
-- [Training and RL environment](docs/guides/training.md)
+- [Data sources](docs/guides/data-sources.md)
+- [Training](docs/guides/training.md)
+- [Configuration](docs/guides/configuration.md)
 - [Architecture](docs/architecture.md)
-- [RL security model](docs/rl-environment.md)
-- [V1 handoff and remaining proof work](docs/V1-HANDOFF.md)
-- [Project schema](schemas/autotrainer.schema.json)
-- [Frontend task schema](schemas/frontend-task.schema.json)
-- [External evaluation result schema](schemas/evaluation-result.schema.json)
-- [Blind-review row schema](schemas/blind-review-row.schema.json)
+- [RL environment security](docs/rl-environment.md)
+- [V1 handoff and proof work](docs/V1-HANDOFF.md)
 
 ## Development
 
 ```bash
 python -m pip install -e ./services/trainer
-python -m unittest discover -s services/trainer/tests -v
+python -m pytest services/trainer/tests -q
 
-npm ci
+npm install
 npm test
+npm run build
 ```
-
-Run the human GUI with the local backend and Vite in separate terminals:
-
-```bash
-autotrainer serve --config examples/frontend-expert/autotrainer.yaml
-npm run dev
-```
-
-The GUI calls `/api/v1`; Vite forwards it to the loopback backend at
-`127.0.0.1:8765`. Agents use `autotrainer model ...`, `source ...`, `history
-...`, `prepare`, `train auto`, and `evaluate ...` against the same YAML and
-service code. Fable remains an external producer: the GUI reports its verified
-handoff state while the CLI provides request export, result ingestion, blind
-review exchange, and report generation.
 
 ## License
 
-Apache License 2.0. Training data, model checkpoints, and imported repositories retain their own licenses; AutoTrainer records source license declarations but does not grant redistribution rights to third-party material.
+Apache License 2.0. Imported repositories, datasets, models, and generated adapters retain their own licenses. AutoTrainer records source declarations; it does not grant rights to third-party material.

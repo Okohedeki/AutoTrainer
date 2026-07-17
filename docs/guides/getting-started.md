@@ -1,43 +1,24 @@
 # Getting started
 
-AutoTrainer uses one project record: `autotrainer.yaml`. The GUI is the primary
-path for people; the CLI exposes the same local services for agents. Neither
-surface keeps hidden training state.
+AutoTrainer uses one project record, `autotrainer.yaml`. The GUI is the primary path for people and the CLI exposes the same services for agents.
 
-The GUI has three setup steps:
-
-1. Choose the supported 9B base and download its exact Hugging Face snapshot.
-2. Add GitHub repositories or local paths. Optionally review accepted Git
-   changes as examples, or add demonstration JSONL and executable task packs.
-3. Select **Prepare training**. AutoTrainer validates and compiles the inputs,
-   selects the useful training path, checks the machine, and enables **Start
-   training** only when that exact project is ready.
-
-QLoRA is the one-GPU parameter and memory strategy. It does not require every
-project to run both learning stages. Accepted examples select **teach** (SFT),
-verifier-backed tasks select **practice** (GRPO), and projects with both select
-**both** (SFT followed by GRPO on the same adapter).
-
-The repository includes an authoring example in [`examples/frontend-expert`](../../examples/frontend-expert). It contains miniature training and evaluation fixtures in separate directories for exercising the contracts, but both starting projects belong to this same Git repository and therefore do not establish repository holdout. Use multiple genuinely independent held-out project families and pin the real runners before collecting evidence.
+```text
+Projects -> Data -> Train -> Evaluate -> Serve
+```
 
 ## Requirements
 
 - Linux, or Ubuntu under WSL2 on Windows.
 - Python 3.11.
-- One NVIDIA GPU. The initial recipe targets a 24 GB card, but memory use depends on model architecture and sequence length.
-- A CUDA-capable PyTorch installation.
-- Docker or Podman when the selected path includes verifier-backed practice or
-  local evaluation.
-- Node.js 22 or newer for the included frontend task fixtures.
-- Enough local storage for the base model, Hugging Face cache, source snapshots, rollouts, and adapters.
+- One NVIDIA GPU. The reference profile targets a 24 GiB card.
+- A CUDA-enabled PyTorch build.
+- Docker or Podman for verifier-backed GRPO or local benchmark tasks.
+- Node.js 22 or newer for the web console and included frontend fixtures.
+- Local disk space for two 9B snapshots, source clones, compiled data, checkpoints, and evidence.
 
-Native Windows is suitable for editing and the web UI, but CUDA training and
-any selected container sandbox should run in Linux. See [Windows and
-WSL2](#windows-and-wsl2).
+Native Windows is suitable for editing and the web UI. Run CUDA and container work in Linux/WSL2.
 
-## Install from a clone
-
-From Ubuntu or another Linux environment:
+## Install
 
 ```bash
 git clone https://github.com/Okohedeki/AutoTrainer.git
@@ -49,161 +30,173 @@ python -m pip install --upgrade pip
 python -m pip install -e ./services/trainer
 ```
 
-Install a CUDA build of PyTorch appropriate for the installed NVIDIA driver using the [official PyTorch selector](https://pytorch.org/get-started/locally/), then install the pinned training extra. Installing PyTorch first prevents a generic wheel from being selected for you:
+Install the CUDA build of PyTorch selected for your driver, then install the pinned training extra:
 
 ```bash
 python -m pip install -e './services/trainer[training]'
+docker build -t autotrainer/frontend-runtime:0.1 -f infra/frontend-runtime/Dockerfile .
 ```
 
-Verify the GPU before attempting to download a model:
+The reference package matrix is recorded in the project dependency declarations and checked by `autotrainer doctor`. Upgrade it as a tested set; Transformers, TRL, PEFT, bitsandbytes, and PyTorch interfaces change together.
+
+## Run the console
+
+From the repository root, use two terminals:
 
 ```bash
-python -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))'
-docker run --rm --network none hello-world
-```
-
-The training reference matrix checked on 2026-07-14 is:
-
-| Package | Reference version |
-|---|---:|
-| `autotrainer-trainer` | `0.1.0` |
-| [PyTorch](https://pypi.org/project/torch/) | `2.13.0` |
-| [Transformers](https://pypi.org/project/transformers/) | `5.13.1` |
-| [TRL](https://pypi.org/project/trl/) | `1.8.0` |
-| [PEFT](https://pypi.org/project/peft/) | `0.19.1` |
-| [Accelerate](https://pypi.org/project/accelerate/) | `1.14.0` |
-| [Datasets](https://pypi.org/project/datasets/) | `5.0.0` |
-| [bitsandbytes](https://pypi.org/project/bitsandbytes/) | `0.49.2` |
-| [jmespath](https://pypi.org/project/jmespath/) | `1.1.0` |
-
-The project dependency declaration remains the authority for supported ranges. Record the installed versions in every run; do not assume a newer combination is compatible merely because each package installs independently.
-
-## Run the bundled example
-
-Start the loopback backend from the repository root, then start the web app in a
-second terminal:
-
-```bash
+# Terminal 1: lightweight dashboard backend
 autotrainer serve --config examples/frontend-expert/autotrainer.yaml
+```
+
+```bash
+# Terminal 2: web console
+npm install
 npm run dev
 ```
 
-Follow the walkthrough: choose and download the model, add work, then prepare.
-The example contains small authoring fixtures, not a completed 9B result. Do not
-copy only `examples/frontend-expert`; its local source paths point into this
-checkout. Generated state remains under its ignored `.autotrainer` directory.
+Open the Vite URL, normally `http://127.0.0.1:3000`. The web app forwards `/api/v1` requests to `http://127.0.0.1:8765`.
 
-The console keeps execution separate from setup. **Training** shows only the
-durable stage, returned metrics, and adapter paths. **Evaluation** shows
-readiness blockers, freezes the configured paired matrix, starts or resumes the
-local command-backed benchmark, and advances at observed generation,
-verification, and trusted-score boundaries. It never simulates the external
-Fable producer as a local job.
+The included example exercises authoring and service contracts. Its training and evaluation fixtures belong to the same repository, so they are not a valid independent holdout and do not prove model improvement.
 
-Before a real run:
+## 1. Projects
 
-1. Use work you have the right to train on and review each source license.
-2. Add accepted examples, executable tasks, or both. Raw repository code is
-   reference material; it is not silently treated as training data.
-3. Replace the evaluation fixture with multiple genuinely independent held-out
-   project families before making an improvement claim.
+Select the startup project or create a new specialist. A new GUI project is created under the dashboard's trusted `.autotrainer/projects` directory, validated, and activated in one operation. It shares the workspace model cache but owns its configuration, sources, checkpoints, evaluation evidence, and host record.
 
-V1 training supports the text-only `Qwen/Qwen3.5-9B` profile. A separately
-declared evaluation reference runs through its own pinned external runner; it
-does not expand trainer compatibility.
-
-## The equivalent agent path
-
-The CLI discovers `autotrainer.yaml` in the current directory. These commands
-perform the same model, source, optional history, prepare, and start actions as
-the GUI:
+Agent equivalent:
 
 ```bash
-autotrainer models list
+autotrainer init ./my-specialist
+cd ./my-specialist
+```
+
+The CLI can also list, create, and resolve projects inside an explicit managed root with `autotrainer projects`. Ordinary agent automation can simply pass the intended `--config` path.
+
+## 2. Data
+
+### Choose and download the training base
+
+Type a model or author in the Hugging Face search. Results are labeled **Ready for V1 training**, **Evaluation reference only**, or **Not verified for V1 training**. The search is broad; the guarded V1 trainer remains deliberately narrow.
+
+Select `Qwen/Qwen3.5-9B`, keep its pinned revision, then choose **Use & download**. The dashboard runs the download as a durable job and reports Downloaded only after the local snapshot and receipt exist.
+
+Agent equivalent:
+
+```bash
+autotrainer models search "Qwen 9B"
 autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
 autotrainer model download --config autotrainer.yaml
+autotrainer model status --config autotrainer.yaml
+```
 
-autotrainer source add https://github.com/OWNER/REPOSITORY --config autotrainer.yaml
-# Local repositories, accepted-example JSONL, and task-pack paths use the same command.
-autotrainer source list --config autotrainer.yaml
+Weights are not included in the Git repository. Public models normally need no token. For a gated model, authenticate with Hugging Face or supply `HF_TOKEN` to the process; the token is not written to project files.
 
-# Optional: approve a small accepted Git change as a supervised example.
-autotrainer history list --config autotrainer.yaml
-autotrainer history review CANDIDATE_ID --approve \
-  --instruction "Describe the accepted change" --rights-confirmed \
+### Download the benchmark reference
+
+The model benchmark is fixed to `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` at revision `14a29bae5143091aeaf87ad37120de4cd57d592c`. Use **Download reference** in the GUI or:
+
+```bash
+autotrainer model reference-download --config autotrainer.yaml
+autotrainer model reference-status --config autotrainer.yaml
+```
+
+The reference cannot be used as the V1 training base.
+
+### Add work
+
+The input accepts a GitHub `owner/repository`, a GitHub URL, or a supported local path. For a repository, say what it contributes:
+
+- **Accepted changes** - review small Git changes and their real instructions for SFT.
+- **Practice tasks** - use the repository as a starting state for executable GRPO tasks.
+- **Reference only** - retain code/style evidence without producing training rows.
+- **Evaluation holdout** - isolate the repository from training for final tasks.
+
+Accepted changes, practice tasks, and reference only may be combined. Evaluation holdout must be used alone.
+
+```bash
+autotrainer source add OWNER/REPOSITORY \
+  --mode accepted_changes \
+  --mode practice_tasks \
   --config autotrainer.yaml
 
-autotrainer prepare --config autotrainer.yaml
-autotrainer train auto --config autotrainer.yaml
+autotrainer source add ./data/accepted.jsonl --config autotrainer.yaml
+autotrainer source add ./tasks/train --config autotrainer.yaml
+autotrainer source list --config autotrainer.yaml
 ```
 
-`model download` is required before real training. It resolves the immutable
-revision, writes it to YAML, downloads the snapshot, and records
-`.autotrainer/models/current.json`. Training refuses a missing or mismatched
-snapshot and loads the recorded model offline. Public models need no key. For a
-gated model, authenticate with Hugging Face or pass `HF_TOKEN` to the backend;
-AutoTrainer does not store the token in project files.
+A GitHub add clones into AutoTrainer-managed storage, checks out a detached pinned commit, and only then saves the source. Local Git repositories, `.jsonl` files, and task-pack directories stay where they are.
 
-To create a standalone project:
+Raw repository code is not automatically a demonstration or an RL environment. The GUI shows the next required action for each source. For accepted Git history:
 
 ```bash
-autotrainer init ./my-frontend-expert
-cd ./my-frontend-expert
-autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
-autotrainer model download --config autotrainer.yaml
+autotrainer history list --config autotrainer.yaml
+autotrainer history review CANDIDATE_ID --approve \
+  --instruction "Describe the task this accepted change solved" \
+  --rights-confirmed \
+  --config autotrainer.yaml
 ```
 
-GitHub sources are cloned into AutoTrainer-managed storage and pinned when they
-are added. Local sources remain in place. `source scan` is read-only with
-respect to both kinds of source.
+## 3. Train
 
-## Prepare and train
+The GUI's Train action performs preparation before launching the selected path. Agents use:
 
 ```bash
 autotrainer prepare --config autotrainer.yaml
 autotrainer train auto --config autotrainer.yaml
 ```
 
-`prepare` performs validation, source scanning, compilation, recipe resolution,
-model-snapshot checks, and local runtime checks without loading model weights.
-It returns one conditional path:
+Preparation validates YAML and paths, scans sources, compiles inspectable trainer inputs, selects a recipe, verifies model receipts, and checks the GPU/package/container runtime without loading weights.
 
-- **teach:** accepted examples run QLoRA SFT only;
-- **practice:** executable tasks run GRPO from a fresh QLoRA policy, or from an
-  explicitly selected compatible adapter;
-- **both:** SFT runs first, then GRPO continues that produced adapter.
+The compiled learning signal selects:
 
-`train auto` repeats preparation and runs only the selected stages. The
-stage-specific `train sft` and `train rl` commands remain diagnostics and
-controlled-experiment tools; they are not the normal human workflow. GRPO runs
-rollouts through the declared network-isolated verifier environment.
+- demonstrations -> QLoRA SFT;
+- executable tasks -> QLoRA GRPO;
+- both -> SFT, then GRPO continues the produced SFT adapter.
 
-See [Training](training.md) for the data formats, reward gates, and memory controls.
+The Training view shows observed stages, logs, loss/reward metrics, and output adapters from the durable job record. It does not synthesize progress. `train sft --dry-run`, `train rl --dry-run`, and the lower-level validation commands remain available for diagnosis.
 
-## Evaluate and package
+Only one Train, Evaluate, or Host operation may own GPU 0. A second local project or agent command receives a busy error instead of loading another 9B model.
 
-The required proof has two parts:
+## 4. Evaluate
 
-1. Run the declared 9B reference and trained candidate through the same held-out task harness and show that the candidate earns a higher verified benchmark.
-2. Run Fable with the base model and with that same trained candidate under identical orchestration, briefs, budgets, and time limits, then compare the resulting websites in a blind review.
-
-Freeze the plan before producing any results. The command runner can execute the model suite locally; the external Fable suite uses verifier-free request export and immutable result ingestion:
+Add multiple task packs from repository/project families that contributed no training code, demonstrations, mutation seeds, or rollouts. Then freeze and run the local benchmark:
 
 ```bash
 autotrainer evaluate plan --write --config autotrainer.yaml
 autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
-autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
-# Run those requests through the pinned Fable setup. Name directory-mode
-# envelopes result.json or *.result.json, then ingest the results.
-autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
-autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
-# Collect reviewer JSONL choices, then import them.
-autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
-autotrainer evaluate report --config autotrainer.yaml
-autotrainer package --config autotrainer.yaml
 ```
 
-`benchmark` is an alias for `evaluate` and uses the same subcommands. Packaging refuses a winner unless both suite decisions are verified; `--allow-unverified` creates a clearly marked development artifact instead. The repository's placeholder runner pins, miniature task packs, and absence of real 9B/Fable results mean the included example is not yet verified. Follow the [V1 handoff plan](../V1-HANDOFF.md) to complete the proof.
+The built-in runner compares the pinned Qwythos reference and the candidate adapter one arm at a time on the same task matrix. Results are generated, stored, applied, and scored with the trusted verifier. The GUI graphs actual build, regression, task, responsive, design, and patch-quality evidence as trials complete.
+
+Fable is a separate external suite. Its missing runtime or placeholder identity does not block the local model benchmark. When a pinned Fable setup exists:
+
+```bash
+autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
+# Produce results with the separately pinned Fable setup.
+autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
+autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
+# Collect blind reviewer rows.
+autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
+autotrainer evaluate report --config autotrainer.yaml
+```
+
+AutoTrainer does not bundle or emulate Fable.
+
+## 5. Serve
+
+After downloading the base or producing an adapter, start the local model from the GUI or CLI:
+
+```bash
+autotrainer host start --adapter auto --config autotrainer.yaml
+autotrainer host status --config autotrainer.yaml
+autotrainer host test "Create an accessible settings form." --config autotrainer.yaml
+autotrainer host stop --config autotrainer.yaml
+```
+
+`--adapter auto` prefers a completed GRPO adapter, then SFT, then the base. Explicit choices are `grpo`, `sft`, and `base`.
+
+The default endpoint is `http://127.0.0.1:8791` with `/health`, `/v1/models`, and `/v1/chat/completions`. This is a small OpenAI-compatible subset: text messages, non-streaming responses, one serialized bounded request, and loopback access only.
+
+Do not confuse it with `autotrainer serve`, which runs the dashboard control API and never loads model weights.
 
 ## Windows and WSL2
 
@@ -214,26 +207,23 @@ wsl --install -d Ubuntu
 wsl --update
 ```
 
-Install the current NVIDIA Windows driver with WSL support. Do not install a second Windows GPU driver inside the Linux distribution. In Ubuntu, confirm `nvidia-smi` and `torch.cuda.is_available()` before proceeding.
+Install the current NVIDIA Windows driver with WSL support. Do not install a second Windows GPU driver inside the Linux distribution. In Ubuntu, verify `nvidia-smi` and `torch.cuda.is_available()`.
 
-The source checkout may remain on `H:` and appears under a path such as `/mnt/h/AutoTrainer`, but model caches, container storage, compiled datasets, rollouts, and checkpoints perform better on the WSL Linux filesystem. A practical layout is:
+The checkout may remain under `/mnt/h/AutoTrainer`, but caches, containers, rollouts, and checkpoints perform better on the WSL Linux filesystem:
 
 ```bash
 export HF_HOME="$HOME/.cache/huggingface"
 export AUTOTRAINER_HOME="$HOME/.local/share/autotrainer"
 ```
 
-Keep user repositories wherever convenient, then reference them with Linux paths in `autotrainer.yaml`. YAML paths are resolved relative to the configuration file, not relative to the AutoTrainer source repository.
+## Current limits
 
-## Honest limits of the first release
+- Text-only 9B causal language model path; no image or multimodal inputs.
+- One local GPU; no cloud, distributed, or multi-GPU training.
+- GitHub repositories or supported local files only for normal V1 onboarding.
+- No bundled weights and no completed real 9B training/evaluation proof in this checkout.
+- No included Fable runtime, outputs, or blind reviews.
+- Local model hosting is loopback-only, non-streaming, and not public deployment.
+- Interrupted jobs leave durable evidence, but optimizer checkpoint resume is not automatic for every path.
 
-- Text-only causal language models only; no image fields or multimodal training.
-- One GPU, one environment at a time, and no cloud or distributed training.
-- A repository is not automatically an SFT dataset or RL environment.
-- Compilation does not guarantee that arbitrary history contains a useful, non-leaking instruction or verifier.
-- Dependencies must be fetched before a network-disabled episode can run.
-- Hidden verifier isolation depends on Docker or Podman and must not be replaced by running untrusted repository commands directly on the host.
-- Evaluation orchestration and local package assembly are implemented, but AutoTrainer does not provide or host the model-agent/Fable runtimes and does not serve the packaged adapter.
-- This checkout has no completed real 9B training result on any conditional
-  path, production-sized held-out benchmark, Fable outputs, or blind reviews;
-  both report decisions must be verified before calling an adapter a V1 winner.
+See [V1 handoff](../V1-HANDOFF.md) for the remaining proof work.

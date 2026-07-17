@@ -1,149 +1,170 @@
 # Data sources
 
-AutoTrainer accepts three source kinds, and they are not interchangeable:
+AutoTrainer accepts GitHub repositories and supported local paths. A source declaration records both **what the input is** and **what it is allowed to do**.
 
-| Kind | What it contributes | What it does not prove |
+## Source kinds
+
+| Kind | Accepted input | Contribution |
 |---|---|---|
-| `repository` | Code/style evidence, accepted history candidates, and starting states for tasks | That an instruction, demonstration, hidden test, or reward exists |
-| `sft_jsonl` | Explicit text demonstrations for supervised QLoRA | That the response builds or earns an RL reward |
-| `task_pack` | Reproducible starting states, instructions, tools, limits, and hidden verification | That the task is suitable for SFT unless a successful trajectory is also supplied |
+| `repository` | GitHub repository or local Git root | code reference, accepted-history candidates, or task starting states |
+| `sft_jsonl` | local `.jsonl` file | explicit text demonstrations for SFT |
+| `task_pack` | local task directory or `task.json` | resettable training/evaluation tasks with hidden verification |
 
-This distinction is central to the product. Pointing AutoTrainer at repositories whose design you like is useful, but a final source tree alone does not explain which alternatives were rejected or provide a resettable reinforcement-learning environment.
+These kinds are not interchangeable. A final source tree does not contain a task instruction, accepted response, reset rule, or reward by itself.
 
-## Repository sources
+## Add a source
 
-Canonical shape:
+The GUI accepts:
+
+- `owner/repository`;
+- an HTTPS or SSH GitHub URL;
+- a local Git repository root;
+- a local `.jsonl` file;
+- a local task-pack directory or `task.json`.
+
+The CLI uses the same inference service:
+
+```bash
+autotrainer source add OWNER/REPOSITORY \
+  --mode accepted_changes \
+  --config autotrainer.yaml
+
+autotrainer source add ../local-repository \
+  --mode reference_only \
+  --config autotrainer.yaml
+
+autotrainer source add ./data/accepted.jsonl --config autotrainer.yaml
+autotrainer source add ./tasks/train --config autotrainer.yaml
+```
+
+An ordinary GitHub add is transactional: AutoTrainer clones it beneath the project's managed source directory, resolves the requested revision, checks out a detached commit, validates the resulting declaration, and then saves YAML. A failed clone or validation does not leave a configured source.
+
+Local sources remain at their existing paths. A local repository must be the root of a Git working tree and have a resolvable commit. Local paths are resolved relative to `autotrainer.yaml` unless absolute.
+
+`source materialize` remains available for an older or hand-written YAML declaration that still points at a remote repository. Normal `source add` already materializes GitHub inputs.
+
+## Repository modes
+
+People choose intent in product language; YAML retains the lower-level roles used by compilation:
+
+| Mode | YAML role | What happens next |
+|---|---|---|
+| `accepted_changes` | `history` | review useful Git changes and supply the instruction each answered |
+| `practice_tasks` | `rl_seed` | add or construct executable tasks and verifiers from repository starting states |
+| `reference_only` | `style` | keep inspectable code evidence without creating training rows |
+| `evaluation_holdout` | `evaluation` | reserve the repository for held-out task packs |
+
+`accepted_changes`, `practice_tasks`, and `reference_only` may be combined. `evaluation_holdout` must be selected alone and sets `partition: evaluation`.
+
+```bash
+autotrainer source add OWNER/REPOSITORY \
+  --mode accepted_changes,practice_tasks \
+  --include 'src/**' \
+  --include 'tests/**' \
+  --exclude 'dist/**' \
+  --license Apache-2.0 \
+  --config autotrainer.yaml
+```
+
+Advanced agent automation can still supply `--kind`, `--partition`, and low-level `--roles`, but it must not mix `--roles` with `--mode`.
+
+## Repository declaration
+
+After a GitHub repository is cloned and pinned, its canonical shape is local and immutable:
 
 ```yaml
 sources:
-  - id: preferred-storefront
+  - id: owner-storefront
     kind: repository
-    uri: /work/preferred-storefront
+    uri: .autotrainer/sources/owner-storefront
     revision: 34f8c81b3b7f5b65d8e63d82abac42b66fb60f50
     partition: train
-    roles: [style, history, rl_seed]
-    include:
-      - package.json
-      - src/**
-      - tests/**
-    exclude:
-      - node_modules/**
-      - dist/**
-      - coverage/**
-    runtime:
-      preset: react-vite-tailwind
-      working_directory: .
-      install: npm ci
-      build: npm run build
-      test: npm test
-      browser_test: npm run test:browser
+    roles: [history, rl_seed]
+    include: [src/**, tests/**]
+    exclude: [node_modules/**, dist/**, coverage/**]
     license:
       spdx: Apache-2.0
-      attribution: https://example.com/preferred-storefront
+      attribution: https://github.com/owner/storefront
 ```
 
-`uri` may be a local Git working tree or a Git URL. The V1 scanner requires Git because it must identify and lock an exact source state. A remote declaration is materialized explicitly with `autotrainer source materialize <source-id> --config autotrainer.yaml`; that command clones into the project artifact directory, checks out a detached commit, and updates the source URI. You can instead clone into a reviewed local directory yourself. A plain non-Git directory is not accepted as a repository source.
+For a local repository, `uri` remains the supplied local path. `revision: HEAD` is acceptable while authoring, but compilation locks the resolved commit and warns about a dirty working tree. Commit or clean local changes before collecting reproducible evidence.
 
-For local sources, `revision: HEAD` is acceptable while authoring. Compilation records the exact commit and warns when the working tree is dirty because a commit SHA cannot reproduce uncommitted content. Clean the source before collecting or publishing evidence. For remote sources, prefer an immutable commit from the beginning.
-
-### What scanning does
+## Scanning
 
 ```bash
-autotrainer source scan --config autotrainer.yaml
+autotrainer source scan --write --config autotrainer.yaml
 ```
 
 Scanning:
 
-- Resolves each Git repository and revision.
-- Applies include and exclude globs.
-- Rejects escaping symlinks, binaries, generated output, dependencies, and files above configured safety limits.
-- Reports source-role eligibility.
-- Warns about secret-prone filenames and absent license metadata.
-- Does not run install, build, test, browser, or repository-provided scripts.
-- Does not upload source code.
+- resolves the exact Git root and revision;
+- applies include/exclude filters and file limits;
+- rejects escaping links, binaries, dependencies, and generated output;
+- reports role eligibility and license/secret warnings;
+- writes deterministic inventories when `--write` is used;
+- does not run repository scripts, upload code, or manufacture demonstrations.
 
-The scanner can report a repository as usable for `style` but blocked for `history` or `rl_seed`. That is a useful result, not an error to hide.
+A configured source can still be blocked for its intended role. That result should be fixed, not hidden.
 
-### What repository roles mean
+## Accepted changes for SFT
 
-`style` means eligible final code can be indexed as reference evidence or used to construct code-domain examples. It must not be mislabeled as instruction/response SFT data.
+`accepted_changes` makes small Git changes eligible for review. It does not approve them automatically.
 
-`history` means the compiler may examine accepted commits as candidates for demonstrations. A useful candidate still needs a non-leaking instruction, a reconstructable parent state, and a valid result. A commit message that contains the exact patch is rejected as answer leakage.
+```bash
+autotrainer history list --config autotrainer.yaml
+autotrainer history review CANDIDATE_ID --approve \
+  --instruction "Make the card grid readable below 768px." \
+  --rights-confirmed \
+  --config autotrainer.yaml
+```
 
-`rl_seed` means the repository can provide starting states for explicit or mechanically reconstructed tasks. It does not make every commit an RL episode. A compiled task should satisfy a red/green rule: the starting state fails its target verifier and the accepted/reference state passes.
+The instruction must describe the real task without revealing the patch. AutoTrainer rejects stale approvals and obvious answer leakage. Only reviewed, rights-confirmed examples reach SFT compilation.
 
 ## SFT JSONL
 
-The most direct supervised source is one JSON object per line with a nonempty conversational `messages` list:
+The direct format is one text-only conversation per line:
 
 ```json
-{"messages":[{"role":"system","content":"You are a focused frontend engineer."},{"role":"user","content":"Make the card grid responsive without changing desktop behavior."},{"role":"assistant","content":"I will use a one-column base rule and restore the three-column grid at the existing desktop breakpoint, then run the checks."}],"source_id":"accepted-change-42"}
+{"messages":[{"role":"system","content":"You are a focused frontend engineer."},{"role":"user","content":"Make the card grid responsive without changing desktop behavior."},{"role":"assistant","content":"I will adjust the base grid and preserve the existing desktop breakpoint, then run the checks."}],"source_id":"accepted-change-42"}
 ```
 
-The included minimal dataset is [`examples/frontend-expert/data/sft-messages.jsonl`](../../examples/frontend-expert/data/sft-messages.jsonl).
-
-The loader also accepts conversational `prompt` plus `completion`. Raw free-form text, empty assistant messages, and `image` or `images` fields are rejected in the text-only V1 path.
-
-Good SFT records come from:
-
-- An accepted developer change paired with its real task description.
-- A successful tool trajectory whose final patch passed verification.
-- A failed attempt followed by an accepted correction.
-- A review comment followed by the revised implementation.
-- A human-selected result with provenance and redistribution permission.
-
-Avoid examples that merely restate a target diff in the instruction. They teach copying rather than frontend problem solving.
-
-Declare the file separately from repository evidence:
-
-```yaml
-- id: accepted-frontend-demonstrations
-  kind: sft_jsonl
-  uri: ./data/sft-messages.jsonl
-  partition: train
-  roles: [demonstrations]
-  license:
-    spdx: LicenseRef-Proprietary-Internal
-```
-
-`sft.dataset` points to the exact compiled file used by the trainer, normally `./.autotrainer/compiled/sft/train.jsonl`. The source entry records the authored file and its provenance; it does not implicitly treat every scanned repository document as SFT.
+Conversational `prompt` plus `completion` is also accepted. Empty targets, arbitrary raw text, and image fields are rejected. Keep provenance and training rights with every authored dataset.
 
 ## Task packs
 
-A task pack is a directory of version `1.0` task manifests plus verifier bundles. An authoring manifest links to a declared repository source instead of inventing a snapshot name:
+A task pack supplies the pieces a repository alone lacks:
+
+- a task instruction and stable ID;
+- a declared repository source and starting revision;
+- an isolated working directory;
+- bounded tools and execution limits;
+- trusted build/regression checks;
+- a hidden verifier and structured reward report;
+- a reset mechanism for every rollout.
+
+Minimal shape:
 
 ```json
 {
   "version": "1.0",
   "task": {
-    "id": "responsive-pricing-train-001",
-    "instruction": "Make the pricing grid readable below 768px without changing desktop behavior.",
-    "sourceId": "preferred-storefront",
+    "id": "responsive-pricing-001",
+    "instruction": "Make the pricing grid readable below 768px.",
+    "sourceId": "owner-storefront",
     "startingRevision": "locked",
     "split": "train",
-    "groupId": "preferred-storefront-family"
+    "groupId": "storefront-family"
   },
   "runtime": {
-    "workingDirectory": "examples/frontend-expert/fixture-site",
-    "install": "cp -a /opt/autotrainer/frontend-deps/node_modules ./node_modules",
+    "workingDirectory": ".",
     "build": "npm run build",
-    "tests": "npm test",
-    "browserTests": "npm run test:browser"
+    "tests": "npm test"
   },
   "tools": ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
   "verifier": {
     "bundle": "./verifier",
     "command": "node /autotrainer-verifier/verify.mjs",
     "reportPath": ".autotrainer-verifier-report.json"
-  },
-  "rewards": {
-    "buildGate": true,
-    "regressionGate": true,
-    "regressionSafety": 0.2,
-    "taskTests": 0.35,
-    "responsiveRules": 0.2,
-    "designRules": 0.15,
-    "patchQuality": 0.1
   },
   "limits": {
     "toolCalls": 40,
@@ -154,62 +175,38 @@ A task pack is a directory of version `1.0` task manifests plus verifier bundles
 }
 ```
 
-`sourceId` must match a `kind: repository` entry. `startingRevision: locked` is valid in a local authoring fixture; `compile` replaces it in generated state with the source revision captured by the source lock. Published task packs should use exact revisions.
-
-`workingDirectory` is relative to the checked-out repository root. The editable workspace contains only the repository snapshot. `verifier.bundle` resolves relative to the task manifest and is mounted separately so the policy cannot inspect or modify it.
-
-The trusted verifier command writes JSON at `reportPath` with these keys:
-
-```json
-{
-  "build_passed": true,
-  "regression_pass_rate": 1.0,
-  "task_pass_rate": 1.0,
-  "responsive_pass_rate": 1.0,
-  "design_rule_pass_rate": 1.0,
-  "code_quality_pass_rate": 1.0
-}
-```
-
-All rates are finite values from zero through one. Build failure or a regression rate below one gates the scalar reward to zero. Individual signals remain in run artifacts for reward-hacking analysis.
-
-The example task pack contains real local files and uses `startingRevision: locked`; it does not use a fake `project@sha` identifier.
+`sourceId` must point to a declared repository. The editable workspace contains its locked snapshot; the verifier bundle stays outside that tree and is mounted read-only only for scoring.
 
 ## Compile and inspect
 
 ```bash
 autotrainer compile --config autotrainer.yaml
-autotrainer plan --config autotrainer.yaml
+autotrainer plan --write --config autotrainer.yaml
 ```
 
-The current compiler produces deterministic state below `project.artifact_dir`:
+Compilation writes inspectable artifacts below `project.artifact_dir`:
 
 ```text
 .autotrainer/
-├── sources.lock.json
-├── ingested/
-│   └── <source-id>.documents.jsonl
-├── compiled/
-│   ├── compile-report.json
-│   ├── sft/train.jsonl
-│   ├── sft/evaluation.jsonl  # when sft.eval_dataset is declared
-│   ├── rl/train.jsonl
-│   └── rl/evaluation.jsonl   # final held-out evaluation.dataset
-└── plan.json
+  sources.lock.json
+  ingested/<source-id>.documents.jsonl
+  compiled/compile-report.json
+  compiled/sft/train.jsonl
+  compiled/rl/train.jsonl
+  compiled/rl/evaluation.jsonl
+  plan.json
 ```
 
-`grpo.eval_dataset`, when used, is a separate training-time validation file supplied to the GRPO trainer; it is not the compiled held-out benchmark. It must resolve to a different path from `evaluation.dataset`. This prevents final proof tasks from influencing training diagnostics or checkpoint choices.
+The presence of a repository never creates SFT rows. It contributes rows only through approved history examples or explicit task contracts.
 
-The current compiler locks and validates declared sources. It does not call a cloud teacher, infer product taste from screenshots, or promise to synthesize high-quality instructions and hidden tests from arbitrary commits. Those transformations must remain inspectable and reviewable when added.
+## Holdout isolation
 
-## Train/evaluation isolation
+Set `evaluation_holdout` on held-out repositories and use `split: evaluation` task packs. Split by repository or project family, not random records. A real benchmark must exclude every project that contributed source code, demonstrations, task mutations, rollouts, or checkpoint feedback to training.
 
-Set `partition: evaluation` on held-out repository and task-pack sources. `compile` writes those final proof records to `evaluation.dataset`, not `grpo.eval_dataset`. Use `groupId` to keep related variants together. The production benchmark split is by repository or project family, not by random records.
+The bundled evaluation task is an authoring fixture inside the AutoTrainer repository. It is useful for contract tests but is not independent evidence.
 
-The bundled example includes a miniature evaluation source subtree and hidden-verifier task so authors can exercise configuration, compilation, and scoring. That subtree still belongs to the same AutoTrainer Git repository as the training fixture, so it is an authoring fixture rather than a valid repository holdout or production benchmark. Add multiple genuinely separate repository families and task packs before evaluating a release; a real benchmark must not use projects that contributed source code, demonstrations, mutation seeds, or RL rollouts to training. The [V1 handoff plan](../V1-HANDOFF.md) lists the remaining held-out-suite acceptance criteria.
+## Licenses and secrets
 
-## Licensing and sensitive data
+Public access does not imply permission to train or redistribute. Record SPDX and attribution data, preserve upstream notices, and review model/dataset terms separately.
 
-The ability to clone a public repository does not automatically grant permission to train on it or redistribute derived artifacts. Record an SPDX expression and attribution for each source, preserve upstream notices, and review model and dataset terms separately.
-
-Never commit credentials, private source snapshots, generated rollouts containing secrets, or model weights to the AutoTrainer repository. Scanning is not a complete secret detector. Perform an independent privacy, security, and license review before training or publishing an adapter.
+Do not commit tokens, private source snapshots, model weights, or rollouts containing secrets. Scanning provides warnings, not a complete privacy or license review.
