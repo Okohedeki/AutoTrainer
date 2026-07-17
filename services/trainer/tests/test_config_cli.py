@@ -175,6 +175,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload, {"models": result})
         search.assert_called_once_with("qwen", limit=5)
 
+    def test_reference_model_commands_share_the_pinned_cache_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        status_result = {"status": "not_downloaded", "alias": "qwythos-9b-reference"}
+        download_result = {"status": "downloaded", "alias": "qwythos-9b-reference"}
+        with patch(
+            "autotrainer.model_cache.inspect_reference_model",
+            return_value=status_result,
+        ) as status:
+            code, payload = self._json_command(
+                ["model", "reference-status", "--config", str(config_path), "--json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, status_result)
+        status.assert_called_once_with(config_path)
+
+        with patch(
+            "autotrainer.model_cache.materialize_reference_model",
+            return_value=download_result,
+        ) as download:
+            code, payload = self._json_command(
+                ["model", "reference-download", "--config", str(config_path), "--json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, download_result)
+        download.assert_called_once_with(config_path)
+
     def test_source_add_flattens_repeatable_intent_and_scope_flags(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "autotrainer.yaml"

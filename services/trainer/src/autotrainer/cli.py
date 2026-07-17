@@ -97,6 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
         "download", help="resolve, download, and record the configured model snapshot"
     )
     _config_argument(model_download)
+    reference_status = model_sub.add_parser(
+        "reference-status", help="inspect the pinned Qwythos benchmark snapshot"
+    )
+    _config_argument(reference_status)
+    reference_download = model_sub.add_parser(
+        "reference-download", help="download the pinned Qwythos benchmark snapshot"
+    )
+    _config_argument(reference_download)
     model_use = model_sub.add_parser("use")
     model_use.add_argument("model")
     model_use.add_argument(
@@ -353,6 +361,7 @@ def _run_models(arguments: argparse.Namespace) -> int:
 
 
 def _run_model(arguments: argparse.Namespace) -> int:
+    from .model_cache import inspect_reference_model, materialize_reference_model
     from .model_service import download_model, get_model, model_status, select_model
 
     if arguments.model_command == "show":
@@ -363,6 +372,12 @@ def _run_model(arguments: argparse.Namespace) -> int:
         return 0
     if arguments.model_command == "download":
         _emit(download_model(arguments.config), as_json=arguments.json)
+        return 0
+    if arguments.model_command == "reference-status":
+        _emit(inspect_reference_model(arguments.config), as_json=arguments.json)
+        return 0
+    if arguments.model_command == "reference-download":
+        _emit(materialize_reference_model(arguments.config), as_json=arguments.json)
         return 0
     result = select_model(
         arguments.config,
