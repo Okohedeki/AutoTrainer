@@ -405,6 +405,11 @@ class ModelHostHandler(BaseHTTPRequestHandler):
                 text, prompt_tokens, completion_tokens = self.server.generator.generate(**request)
             finally:
                 self.server.generation_lock.release()
+            finish_reason = (
+                "length"
+                if completion_tokens >= int(request["max_tokens"])
+                else "stop"
+            )
             self._send(
                 HTTPStatus.OK,
                 {
@@ -416,7 +421,8 @@ class ModelHostHandler(BaseHTTPRequestHandler):
                         {
                             "index": 0,
                             "message": {"role": "assistant", "content": text},
-                            "finish_reason": "stop",
+                            "logprobs": None,
+                            "finish_reason": finish_reason,
                         }
                     ],
                     "usage": {

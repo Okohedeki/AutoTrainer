@@ -118,6 +118,8 @@ class ModelHostTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["object"], "chat.completion")
         self.assertEqual(payload["choices"][0]["message"]["content"], "A local answer.")
+        self.assertIsNone(payload["choices"][0]["logprobs"])
+        self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
         self.assertEqual(payload["usage"]["total_tokens"], 11)
         self.assertEqual(generator.requests[0]["max_tokens"], 64)
 
