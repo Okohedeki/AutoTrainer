@@ -60,8 +60,135 @@ class SourceServiceTests(unittest.TestCase):
         self.assertEqual(result["source"]["origin"], "local")
         self.assertEqual(result["source"]["purpose"], "work")
         self.assertEqual(result["source"]["revision"], commit)
+        self.assertEqual(
+            result["source"]["modes"],
+            ["accepted_changes", "reference_only"],
+        )
+        self.assertEqual(result["source"]["status"], "configured")
         with self.assertRaisesRegex(ConfigError, "already added"):
             add_source(self.config_path, str(repository / "."))
+
+    def test_human_modes_define_repository_roles_and_preserve_reviewed_scope(self) -> None:
+        repository, commit = self.create_repository()
+
+        result = add_source(
+            self.config_path,
+            str(repository),
+            # Input order is intentionally reversed; persisted product modes and
+            # low-level roles have one canonical order for stable clients.
+            modes=["practice_tasks", "accepted_changes"],
+            require_modes=True,
+            revision=commit,
+            include=["app.py", "tests/**"],
+            exclude=["vendor/**"],
+            license_spdx="Apache-2.0",
+            license_attribution="https://example.invalid/workspace",
+        )
+
+        source = result["source"]
+        self.assertEqual(source["modes"], ["accepted_changes", "practice_tasks"])
+        self.assertEqual(source["partition"], "train")
+        self.assertEqual(source["roles"], ["history", "rl_seed"])
+        self.assertEqual(
+            source["filters"],
+            {"include": ["app.py", "tests/**"], "exclude": ["vendor/**"]},
+        )
+        self.assertEqual(
+            source["license"],
+            {
+                "spdx": "Apache-2.0",
+                "attribution": "https://example.invalid/workspace",
+            },
+        )
+        self.assertEqual(source["status"], "configured")
+        self.assertEqual(source["next_action"]["title"], "Review changes and add tasks")
+
+        declared = load_config(self.config_path).sources[0]
+        self.assertEqual(declared["roles"], ["history", "rl_seed"])
+        self.assertEqual(declared["revision"], commit)
+        self.assertEqual(declared["include"], ["app.py", "tests/**"])
+        self.assertEqual(declared["exclude"], ["vendor/**"])
+
+    def test_evaluation_mode_is_isolated_and_cannot_mix_with_training_modes(self) -> None:
+        repository, _commit = self.create_repository()
+
+        result = add_source(
+            self.config_path,
+            str(repository),
+            modes=["evaluation_holdout"],
+            require_modes=True,
+        )
+
+        source = result["source"]
+        self.assertEqual(source["modes"], ["evaluation_holdout"])
+        self.assertEqual(source["partition"], "evaluation")
+        self.assertEqual(source["roles"], ["evaluation"])
+        self.assertEqual(source["next_action"]["title"], "Add held-out tasks")
+
+        with self.assertRaisesRegex(ConfigError, "cannot be combined"):
+            add_source(
+                self.config_path,
+                str(repository),
+                modes=["evaluation_holdout", "accepted_changes"],
+            )
+
+    def test_human_mode_guard_applies_only_to_ambiguous_repositories(self) -> None:
+        repository, _commit = self.create_repository()
+        examples = self.root / "accepted.jsonl"
+        examples.write_text(
+            '{"messages":[{"role":"assistant","content":"ok"}]}\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ConfigError, "source mode is required"):
+            add_source(self.config_path, str(repository), require_modes=True)
+
+        # A demonstration file already has one intrinsic purpose, so requiring
+        # repository intent does not invent a misleading mode for it.
+        result = add_source(
+            self.config_path,
+            str(examples),
+            require_modes=True,
+            license_spdx="LicenseRef-Internal",
+        )
+        self.assertEqual(result["source"]["modes"], [])
+        self.assertEqual(result["source"]["license"], {"spdx": "LicenseRef-Internal"})
+        self.assertEqual(result["source"]["next_action"]["title"], "Validate examples")
+
+    def test_modes_reject_conflicting_low_level_roles_and_partition(self) -> None:
+        repository, _commit = self.create_repository()
+
+        with self.assertRaisesRegex(ConfigError, "modes or repository roles"):
+            add_source(
+                self.config_path,
+                str(repository),
+                modes=["accepted_changes"],
+                roles=["history"],
+            )
+        with self.assertRaisesRegex(ConfigError, "conflicts with the selected modes"):
+            add_source(
+                self.config_path,
+                str(repository),
+                modes=["practice_tasks"],
+                partition="evaluation",
+            )
+
+    def test_advanced_role_callers_remain_backward_compatible_without_modes(self) -> None:
+        repository, commit = self.create_repository()
+
+        result = add_source(
+            self.config_path,
+            str(repository),
+            kind="repository",
+            partition="train",
+            roles=["rl_seed"],
+            revision=commit,
+            include=["app.py"],
+        )
+
+        self.assertEqual(result["source"]["modes"], ["practice_tasks"])
+        self.assertEqual(result["source"]["roles"], ["rl_seed"])
+        self.assertEqual(result["source"]["filters"]["include"], ["app.py"])
 
     def test_infers_demonstrations_and_task_partition(self) -> None:
         demonstrations = self.root / "accepted.jsonl"

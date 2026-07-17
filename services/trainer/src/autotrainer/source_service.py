@@ -33,6 +33,17 @@ _SOURCE_ID_PATTERN = re.compile(r"[^a-z0-9._-]+")
 _GITHUB_PART_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _GITHUB_SCP_PATTERN = re.compile(r"^(?:[^@\s]+@)?github\.com:(?P<path>[^?#]+)$", re.IGNORECASE)
 
+# Human-facing modes say why a repository was added.  They intentionally map
+# onto the same low-level roles used by YAML and the agent CLI, so the GUI
+# cannot create a second source policy or imply that raw code is training data.
+_MODE_TO_ROLE = {
+    "accepted_changes": "history",
+    "practice_tasks": "rl_seed",
+    "reference_only": "style",
+    "evaluation_holdout": "evaluation",
+}
+_MODE_ORDER = tuple(_MODE_TO_ROLE)
+
 
 def _resolve_local(value: str, root: Path) -> Path:
     candidate = Path(value).expanduser()
@@ -135,6 +146,61 @@ def _slug(value: str) -> str:
     return candidate or "source"
 
 
+def _strings(value: Sequence[str] | None, field: str) -> list[str]:
+    """Normalize an optional list without treating one string as characters."""
+
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, bytearray)):
+        raise ConfigError(f"{field} must be a list of strings")
+    normalized = [str(item).strip() for item in value]
+    if any(not item for item in normalized):
+        raise ConfigError(f"{field} cannot contain empty values")
+    return normalized
+
+
+def _normalize_modes(value: Sequence[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    supplied = _strings(value, "modes")
+    invalid = sorted(set(supplied) - set(_MODE_TO_ROLE))
+    if invalid:
+        raise ConfigError(
+            "source modes must be accepted_changes, practice_tasks, "
+            "reference_only, or evaluation_holdout"
+        )
+    if len(set(supplied)) != len(supplied):
+        raise ConfigError("source modes must be unique")
+    selected = [mode for mode in _MODE_ORDER if mode in supplied]
+    if "evaluation_holdout" in selected and len(selected) != 1:
+        raise ConfigError(
+            "evaluation_holdout cannot be combined with training source modes"
+        )
+    return selected
+
+
+def _apply_repository_modes(
+    source: dict[str, Any],
+    modes: Sequence[str],
+    *,
+    requested_partition: str | None,
+) -> None:
+    """Project product modes into the canonical repository declaration."""
+
+    if source.get("kind") != "repository":
+        raise ConfigError("source modes are only supported for Git repositories")
+    if not modes:
+        raise ConfigError("at least one source mode is required for a repository")
+    evaluation = "evaluation_holdout" in modes
+    partition = "evaluation" if evaluation else "train"
+    if requested_partition is not None and requested_partition != partition:
+        raise ConfigError(
+            f"source partition {requested_partition!r} conflicts with the selected modes"
+        )
+    source["partition"] = partition
+    source["roles"] = [_MODE_TO_ROLE[mode] for mode in modes]
+
+
 def _unique_id(base: str, value: str, sources: Sequence[Mapping[str, Any]]) -> str:
     used = {str(source.get("id", "")) for source in sources}
     candidate = _slug(base)
@@ -229,7 +295,8 @@ def _advanced_source(
         "partition": selected_partition,
     }
     if kind == "repository":
-        source["roles"] = list(roles or ("style",))
+        selected_roles = _strings(roles, "roles") if roles is not None else []
+        source["roles"] = selected_roles or ["style"]
         source["revision"] = revision or "HEAD"
         source["license"] = {"spdx": license_spdx or "UNDECLARED"}
     elif kind == "sft_jsonl":
@@ -239,6 +306,50 @@ def _advanced_source(
     else:
         raise ConfigError("source kind must be repository, sft_jsonl, or task_pack")
     return source, Path(value.rstrip("/\\")).stem or kind
+
+
+def _apply_optional_fields(
+    source: dict[str, Any],
+    *,
+    revision: str | None,
+    include: Sequence[str] | None,
+    exclude: Sequence[str] | None,
+    license_spdx: str | None,
+    license_attribution: str | None,
+) -> None:
+    """Retain reviewed source scope regardless of inference or advanced input."""
+
+    kind = str(source.get("kind", ""))
+    if revision is not None:
+        selected_revision = str(revision).strip()
+        if kind != "repository":
+            raise ConfigError("revision is only supported for Git repositories")
+        if not selected_revision:
+            raise ConfigError("revision must be non-empty")
+        source["revision"] = selected_revision
+
+    include_values = _strings(include, "include") if include is not None else None
+    exclude_values = _strings(exclude, "exclude") if exclude is not None else None
+    if (include_values is not None or exclude_values is not None) and kind != "repository":
+        raise ConfigError("include and exclude filters are only supported for Git repositories")
+    if include_values is not None:
+        source["include"] = include_values
+    if exclude_values is not None:
+        source["exclude"] = exclude_values
+
+    if license_spdx is not None or license_attribution is not None:
+        selected_spdx = str(license_spdx or "UNDECLARED").strip()
+        selected_attribution = (
+            str(license_attribution).strip() if license_attribution is not None else None
+        )
+        if not selected_spdx:
+            raise ConfigError("license SPDX value must be non-empty")
+        if license_attribution is not None and not selected_attribution:
+            raise ConfigError("license attribution must be non-empty")
+        license_value: dict[str, str] = {"spdx": selected_spdx}
+        if selected_attribution is not None:
+            license_value["attribution"] = selected_attribution
+        source["license"] = license_value
 
 
 def _managed_source_root(config: Any) -> Path:
@@ -290,6 +401,77 @@ def _canonical_locator(config: Any, source: Mapping[str, Any]) -> str:
     return ""
 
 
+def _declared_modes(source: Mapping[str, Any]) -> list[str]:
+    """Reconstruct product modes for old YAML and new human declarations."""
+
+    if source.get("kind") != "repository":
+        return []
+    roles = set(_strings(source.get("roles"), "roles"))
+    if source.get("partition") == "evaluation" or "evaluation" in roles:
+        return ["evaluation_holdout"]
+    return [mode for mode in _MODE_ORDER if _MODE_TO_ROLE[mode] in roles]
+
+
+def _next_action(kind: str, modes: Sequence[str], partition: str) -> dict[str, str]:
+    """Explain what must happen before a configured source can teach anything."""
+
+    selected = set(modes)
+    if "evaluation_holdout" in selected:
+        return {
+            "title": "Add held-out tasks",
+            "detail": (
+                "This repository is isolated from training. Add held-out tasks and "
+                "verifiers before it can evaluate the model."
+            ),
+        }
+    if "accepted_changes" in selected and "practice_tasks" in selected:
+        return {
+            "title": "Review changes and add tasks",
+            "detail": (
+                "Approve useful Git changes as demonstrations, then create or import "
+                "executable practice tasks with verifiers."
+            ),
+        }
+    if "accepted_changes" in selected:
+        return {
+            "title": "Review accepted changes",
+            "detail": (
+                "Raw code is not a demonstration. Approve useful Git changes and "
+                "supply the instruction each change answered."
+            ),
+        }
+    if "practice_tasks" in selected:
+        return {
+            "title": "Add practice tasks",
+            "detail": (
+                "This repository supplies starting states only. Create or import "
+                "executable tasks and verifiers before reinforcement learning."
+            ),
+        }
+    if "reference_only" in selected:
+        return {
+            "title": "Reference configured",
+            "detail": "Reference code is inspectable evidence and does not train the model by itself.",
+        }
+    if kind == "sft_jsonl":
+        return {
+            "title": "Validate examples",
+            "detail": "Prepare the project to validate and compile these authored demonstrations.",
+        }
+    if kind == "task_pack":
+        return {
+            "title": "Validate held-out tasks" if partition == "evaluation" else "Validate practice tasks",
+            "detail": (
+                "Prepare the project to validate each task, starting state, and verifier "
+                "before execution."
+            ),
+        }
+    return {
+        "title": "Choose a learning purpose",
+        "detail": "A repository needs an explicit purpose before it can contribute training data.",
+    }
+
+
 def _serialize_source(config: Any, source: Mapping[str, Any]) -> dict[str, Any]:
     source_id = str(source.get("id", ""))
     kind = str(source.get("kind", ""))
@@ -313,6 +495,13 @@ def _serialize_source(config: Any, source: Mapping[str, Any]) -> dict[str, Any]:
         local_name = Path(uri.rstrip("/\\")).name
         label = local_name or source_id
     purpose = {"repository": "work", "sft_jsonl": "examples", "task_pack": "tasks"}.get(kind, "work")
+    partition = str(source.get("partition", "train"))
+    roles = _strings(source.get("roles"), "roles")
+    modes = _declared_modes(source)
+    include = _strings(source.get("include"), "include") if source.get("include") is not None else []
+    exclude = _strings(source.get("exclude"), "exclude") if source.get("exclude") is not None else []
+    license_value = source.get("license")
+    serialized_license = dict(license_value) if isinstance(license_value, Mapping) else None
     record: dict[str, Any] = {
         "id": source_id,
         "kind": kind,
@@ -320,7 +509,15 @@ def _serialize_source(config: Any, source: Mapping[str, Any]) -> dict[str, Any]:
         "value": value,
         "origin": origin,
         "purpose": purpose,
-        "status": "ready",
+        "modes": modes,
+        "partition": partition,
+        "roles": roles,
+        "filters": {"include": include, "exclude": exclude},
+        "license": serialized_license,
+        # Configured means the declaration is persisted. Readiness is resolved
+        # later by scan/compile; a repository alone is never called training data.
+        "status": "configured",
+        "next_action": _next_action(kind, modes, partition),
     }
     revision = str(source.get("revision", "")).strip()
     if revision:
@@ -343,14 +540,22 @@ def _add_source_owned(
     kind: str | None = None,
     partition: str | None = None,
     roles: Sequence[str] | None = None,
+    modes: Sequence[str] | None = None,
+    require_modes: bool = False,
     revision: str | None = None,
+    include: Sequence[str] | None = None,
+    exclude: Sequence[str] | None = None,
     license_spdx: str | None = None,
+    license_attribution: str | None = None,
 ) -> dict[str, Any]:
     """Infer, persist, and when needed securely materialize one source."""
 
     supplied = str(value).strip()
     if not supplied:
         raise ConfigError("source value is required")
+    normalized_modes = _normalize_modes(modes)
+    if normalized_modes is not None and roles is not None:
+        raise ConfigError("use source modes or repository roles, not both")
     with project_config_mutation(config_path):
         config = load_config(config_path)
         inferred_origin = "local"
@@ -373,6 +578,26 @@ def _add_source_owned(
             if github:
                 declared["uri"] = _github_url(*github)
                 inferred_origin = "github"
+
+        if normalized_modes is not None:
+            _apply_repository_modes(
+                declared,
+                normalized_modes,
+                requested_partition=partition,
+            )
+        elif require_modes and declared.get("kind") == "repository":
+            # Deterministic files retain their intrinsic purpose. Repositories
+            # are ambiguous and the human/API path must say how they contribute.
+            raise ConfigError("at least one source mode is required for a repository")
+
+        _apply_optional_fields(
+            declared,
+            revision=revision,
+            include=include,
+            exclude=exclude,
+            license_spdx=license_spdx,
+            license_attribution=license_attribution,
+        )
 
         locator = _canonical_locator(config, declared)
         if locator and any(_canonical_locator(config, source) == locator for source in config.sources):
@@ -452,10 +677,19 @@ def add_source(
     kind: str | None = None,
     partition: str | None = None,
     roles: Sequence[str] | None = None,
+    modes: Sequence[str] | None = None,
+    require_modes: bool = False,
     revision: str | None = None,
+    include: Sequence[str] | None = None,
+    exclude: Sequence[str] | None = None,
     license_spdx: str | None = None,
+    license_attribution: str | None = None,
 ) -> dict[str, Any]:
-    """Add one source only while no training snapshot is active."""
+    """Add one source only while no training snapshot is active.
+
+    ``require_modes`` is the human/API guard. Agent and YAML-compatible callers
+    may omit it and continue supplying explicit low-level roles as before.
+    """
 
     with project_mutation_gate(config_path):
         return _add_source_owned(
@@ -465,8 +699,13 @@ def add_source(
             kind=kind,
             partition=partition,
             roles=roles,
+            modes=modes,
+            require_modes=require_modes,
             revision=revision,
+            include=include,
+            exclude=exclude,
             license_spdx=license_spdx,
+            license_attribution=license_attribution,
         )
 
 
