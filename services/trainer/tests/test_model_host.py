@@ -15,6 +15,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 from autotrainer.config import default_config, write_config  # noqa: E402
 from autotrainer.model_host import (  # noqa: E402
     ModelHostError,
+    _require_context_fit,
     create_model_host_server,
     resolve_host_spec,
 )
@@ -78,6 +79,12 @@ class ModelHostTests(unittest.TestCase):
     def test_explicit_missing_adapter_is_not_presented_as_deployed(self) -> None:
         with self.assertRaisesRegex(ModelHostError, "not complete"):
             resolve_host_spec(self.config_path, "grpo")
+
+    def test_context_limit_rejects_generation_before_cuda_overrun(self) -> None:
+        self.assertEqual(_require_context_fit(4_000, 2_000, 32_768), 8_192)
+        self.assertEqual(_require_context_fit(1_000, 500, 2_048), 2_048)
+        with self.assertRaisesRegex(ModelHostError, "8192-token context limit"):
+            _require_context_fit(7_000, 2_000, 32_768)
 
     def test_chat_endpoint_runs_the_injected_generator_and_reports_usage(self) -> None:
         generator = FakeGenerator()

@@ -32,6 +32,7 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_MESSAGES = 200
 MAX_MESSAGE_CHARS = 200_000
 MAX_NEW_TOKENS = 4096
+MAX_CONTEXT_TOKENS = 8192
 
 
 class ModelHostError(ConfigError):
@@ -63,6 +64,23 @@ class TextGenerator(Protocol):
         top_p: float,
         seed: int | None,
     ) -> tuple[str, int, int]: ...
+
+
+def _require_context_fit(
+    prompt_tokens: int,
+    max_tokens: int,
+    native_limit: object,
+) -> int:
+    """Return the V1 context limit or reject a request before CUDA generation."""
+
+    model_limit = MAX_CONTEXT_TOKENS
+    if isinstance(native_limit, int) and not isinstance(native_limit, bool) and native_limit > 0:
+        model_limit = min(model_limit, native_limit)
+    if prompt_tokens + max_tokens > model_limit:
+        raise ModelHostError(
+            f"prompt plus max_tokens exceeds the local {model_limit}-token context limit"
+        )
+    return model_limit
 
 
 def _adapter_output(config_path: Path, stage: str) -> Path:
@@ -193,6 +211,11 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
             )
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
             prompt_tokens = int(inputs["input_ids"].shape[-1])
+            _require_context_fit(
+                prompt_tokens,
+                max_tokens,
+                getattr(model.config, "max_position_embeddings", None),
+            )
             generate_options: dict[str, Any] = {
                 "max_new_tokens": max_tokens,
                 "do_sample": temperature > 0,
