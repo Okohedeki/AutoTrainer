@@ -274,6 +274,27 @@ class SourceServiceTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(list_sources(self.config_path), [])
 
+    def test_github_materialization_reports_safe_actionable_failures(self) -> None:
+        before = self.config_path.read_bytes()
+        cases = (
+            (RuntimeError("git clone timed out"), "download timed out"),
+            (RuntimeError("fatal: repository not found"), "not found or requires access"),
+            (
+                RuntimeError("cannot resolve declared revision 'missing'"),
+                "does not contain the requested branch",
+            ),
+        )
+        for error, expected in cases:
+            with self.subTest(expected=expected), patch(
+                "autotrainer.source_service.materialize_repository",
+                side_effect=error,
+            ):
+                with self.assertRaisesRegex(ConfigError, expected):
+                    add_source(self.config_path, "owner/repository")
+
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(list_sources(self.config_path), [])
+
 
 if __name__ == "__main__":
     unittest.main()

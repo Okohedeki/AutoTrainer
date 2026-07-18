@@ -165,7 +165,13 @@ def _artifact_dir(config: Mapping[str, Any], project_root: Path) -> Path:
     return candidate.resolve()
 
 
-def _git(repository: Path, *arguments: str) -> tuple[bool, str]:
+def _git(
+    repository: Path,
+    *arguments: str,
+    timeout: int = 20,
+) -> tuple[bool, str]:
+    """Run bounded Git argv without ever opening an interactive prompt."""
+
     environment = os.environ.copy()
     environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
     try:
@@ -176,7 +182,7 @@ def _git(repository: Path, *arguments: str) -> tuple[bool, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=20,
+            timeout=timeout,
             env=environment,
         )
     except FileNotFoundError:
@@ -939,21 +945,32 @@ def _safe_artifact_name(source_id: str) -> str:
     return name or hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
 
 
-def _clone_repository(uri: str, destination: Path) -> tuple[bool, str]:
+def _clone_repository(
+    uri: str,
+    destination: Path,
+    *,
+    shallow_remote: bool = False,
+) -> tuple[bool, str]:
+    """Clone a repository without downloading irrelevant remote history."""
+
     environment = os.environ.copy()
     environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
+    arguments = [
+        "git",
+        "clone",
+        "--quiet",
+        "--no-checkout",
+        "--no-hardlinks",
+        "--no-recurse-submodules",
+    ]
+    if shallow_remote:
+        # A training source needs one immutable tree, not years of Git history.
+        # Missing explicit revisions are fetched narrowly after this first clone.
+        arguments.extend(["--filter=blob:none", "--depth=1"])
+    arguments.extend([uri, str(destination)])
     try:
         completed = subprocess.run(
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "--no-checkout",
-                "--no-hardlinks",
-                "--no-recurse-submodules",
-                uri,
-                str(destination),
-            ],
+            arguments,
             check=False,
             capture_output=True,
             text=True,
@@ -1103,11 +1120,42 @@ def materialize_repository(
     clone_started = False
     try:
         clone_started = True
-        ok, detail = _clone_repository(clone_uri, local_path)
+        remote_source = _is_remote(uri)
+        ok, detail = _clone_repository(
+            clone_uri,
+            local_path,
+            shallow_remote=remote_source,
+        )
         if not ok:
             raise RuntimeError(f"cannot clone repository source {requested_id!r}: {detail}")
 
-        ok, commit = _git(local_path, "rev-parse", "--verify", f"{revision}^{{commit}}")
+        ok, commit = _git(
+            local_path,
+            "rev-parse",
+            "--verify",
+            f"{revision}^{{commit}}",
+        )
+        if not ok and remote_source:
+            # A requested branch, tag, or SHA may not be the default branch tip
+            # included by the depth-one clone. Fetch only that requested object.
+            fetched, fetch_detail = _git(
+                local_path,
+                "fetch",
+                "--quiet",
+                "--depth=1",
+                "origin",
+                revision,
+                timeout=300,
+            )
+            if fetched:
+                ok, commit = _git(
+                    local_path,
+                    "rev-parse",
+                    "--verify",
+                    "FETCH_HEAD^{commit}",
+                )
+            else:
+                commit = fetch_detail
         if not ok:
             raise RuntimeError(
                 f"cannot resolve declared revision {revision!r} for source {requested_id!r}: {commit}"
@@ -1115,35 +1163,34 @@ def materialize_repository(
         if not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
             raise RuntimeError(f"git returned a non-immutable commit identifier: {commit!r}")
 
-        ok, tree = _git(local_path, "ls-tree", "-r", "-z", commit)
-        if not ok:
-            raise RuntimeError(f"cannot inspect repository tree at {commit}: {tree}")
-        symlinks = []
-        for entry in tree.split("\x00"):
-            if not entry:
-                continue
-            metadata, separator, path_value = entry.partition("\t")
-            if separator and metadata.startswith("120000 "):
-                symlinks.append(path_value)
-        if symlinks:
-            preview = ", ".join(sorted(symlinks)[:5])
-            raise ValueError(
-                "repository tree contains symlinks, which are not supported by V1 "
-                f"materialization: {preview}"
-            )
-
         ok, checkout_detail = _git(
             local_path,
             "-c",
             "core.autocrlf=false",
+            "-c",
+            "core.longpaths=true",
+            "-c",
+            "core.symlinks=false",
             "checkout",
             "--quiet",
             "--detach",
             "--force",
             commit,
+            timeout=300,
         )
         if not ok:
             raise RuntimeError(f"cannot check out resolved commit {commit}: {checkout_detail}")
+        # Git tree links are useful in real repositories such as Airflow, but a
+        # training source must never create active links into the host. With
+        # core.symlinks=false they are ordinary files containing the link text.
+        active_links = [path for path in local_path.rglob("*") if path.is_symlink()]
+        if active_links:
+            preview = ", ".join(
+                path.relative_to(local_path).as_posix() for path in active_links[:5]
+            )
+            raise ValueError(
+                "materialized repository contains active filesystem links: " + preview
+            )
         ok, head = _git(local_path, "rev-parse", "HEAD")
         if not ok or head != commit:
             raise RuntimeError(

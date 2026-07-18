@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
@@ -14,6 +15,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 from autotrainer.history import list_history, review_history  # noqa: E402
 from autotrainer.planner import build_plan  # noqa: E402
 from autotrainer.sources import (  # noqa: E402
+    _clone_repository,
     _write_text_atomic,
     materialize_repository,
     scan_sources,
@@ -459,6 +461,28 @@ class RepositoryMaterializationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
                 materialize_repository(config, root, "remote")
 
+    def test_remote_clone_uses_one_filtered_history_tip(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch("autotrainer.sources.subprocess.run", return_value=completed) as run:
+            ok, detail = _clone_repository(
+                "https://github.com/apache/airflow.git",
+                Path("managed-airflow"),
+                shallow_remote=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "")
+        arguments = run.call_args.args[0]
+        self.assertIn("--filter=blob:none", arguments)
+        self.assertIn("--depth=1", arguments)
+        self.assertIn("--no-recurse-submodules", arguments)
+        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+
     def test_rejects_undeclared_non_repository_and_unpinned_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -512,17 +536,20 @@ class RepositoryMaterializationTests(unittest.TestCase):
 
             self.assertFalse(local.exists())
 
-    def test_rejects_repository_tree_symlinks_before_checkout(self) -> None:
+    def test_materializes_git_symlinks_as_inert_regular_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             remote, commit = create_bare_remote(root, include_tree_symlink=True)
             config = self.config(remote, commit)
             local = root / "artifacts" / "sources" / "remote"
 
-            with self.assertRaisesRegex(ValueError, "repository tree contains symlinks"):
-                materialize_repository(config, root, "remote")
+            result = materialize_repository(config, root, "remote")
 
-            self.assertFalse(local.exists())
+            inert_link = local / "escape-link"
+            self.assertEqual(result["commit"], commit)
+            self.assertTrue(inert_link.is_file())
+            self.assertFalse(inert_link.is_symlink())
+            self.assertEqual(inert_link.read_text(encoding="utf-8").strip(), "../outside")
 
 
 class PlannerTests(unittest.TestCase):

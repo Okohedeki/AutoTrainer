@@ -356,6 +356,33 @@ def _managed_source_root(config: Any) -> Path:
     return (config.artifact_dir / "sources").resolve()
 
 
+def _public_materialization_error(error: Exception) -> str:
+    """Translate credential-free Git failures into useful localhost guidance."""
+
+    detail = str(error).casefold()
+    if "timed out" in detail:
+        return "GitHub repository download timed out; check the connection and retry"
+    if any(
+        marker in detail
+        for marker in (
+            "repository not found",
+            "authentication failed",
+            "could not read username",
+            "access denied",
+        )
+    ):
+        return (
+            "GitHub repository was not found or requires access; use owner/repository "
+            "and verify Git credentials"
+        )
+    if "cannot resolve declared revision" in detail:
+        return "GitHub repository does not contain the requested branch, tag, or commit"
+    return (
+        "could not clone and pin the GitHub repository; check access, network, "
+        "and repository name"
+    )
+
+
 def _managed_source_path(config: Any, source: Mapping[str, Any]) -> Path | None:
     uri = str(source.get("uri", "")).strip()
     if not uri or "://" in uri or uri.startswith("git@"):
@@ -618,9 +645,7 @@ def _add_source_owned(
                 try:
                     materialized = materialize_repository(trial, config.root, source_id)
                 except (RuntimeError, ValueError) as error:
-                    raise ConfigError(
-                        "could not clone and pin the GitHub repository; check access, network, and repository name"
-                    ) from error
+                    raise ConfigError(_public_materialization_error(error)) from error
                 declared = dict(materialized["updated_source"])
                 materialized_path = Path(str(materialized["local_path"])).resolve()
                 trial["sources"][-1] = declared
