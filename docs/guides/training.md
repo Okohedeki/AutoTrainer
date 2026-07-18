@@ -106,7 +106,19 @@ A practice-only project may use `start_from: base` to create a fresh QLoRA polic
 
 ## Observed telemetry
 
-Training events are written durably and exposed identically to the GUI and CLI service layer. The dashboard can graph observed step/loss/reward values, stage transitions, logs, and output paths. It does not fill gaps with simulated values.
+Training events are written durably and exposed through the same service contract used by the GUI and CLI:
+
+```bash
+autotrainer curriculum --config autotrainer.yaml --json
+```
+
+The curriculum view has three levels. **Overview** shows the compiled task and retained signal distribution. **Tasks** shows each instruction, locked snapshot, bounded tools, hidden-verifier contract, reward weights, and observed outcome pattern. **Rollouts** shows one verifier-scored attempt with safe tool counts, changed-file count, elapsed time, gate result, reward, and rubric components.
+
+Rollout telemetry does not persist model reasoning, patches, tool arguments/output, verifier output, or source text. The task instruction already frozen in the compiled curriculum is the only prompt material shown. The view also does not fill gaps with simulated values. Empty measurements remain empty rather than becoming zero.
+
+Every GRPO job records the fingerprint and SHA-256 of the compiled task dataset it actually used. Rollouts are merged into task summaries only when that binding matches the current compiled curriculum. Stored events outside that match remain visibly unmatched. Metrics describe the current job's retained event window; a truncated window is labeled as truncated rather than presented as the complete run.
+
+Outcome labels are descriptive, not improvement claims. `unobserved` has no scored evidence, `uncalibrated` has too few retained attempts to read a pattern, `varied` has reward spread, and `flat` does not. Task difficulty should be calibrated with frozen base-policy rollouts before tasks are raised, repaired, or removed.
 
 If the backend stops during a job, the durable record is marked interrupted when recovered. Full optimizer/checkpoint resume is not automatic for every combined-path interruption; retry can repeat a stage. Preserve output directories and receipts before deciding whether a retry is comparable.
 

@@ -18,7 +18,7 @@ V1 stays narrow: local GitHub repositories or files, QLoRA adapters, optional ve
 - Makes repository intent explicit: accepted changes, practice tasks, reference only, or evaluation holdout. Raw code is never silently called training data.
 - Compiles reviewed demonstrations for SFT and executable verifier-backed tasks for GRPO.
 - Runs the useful learning path: QLoRA SFT, QLoRA GRPO, or SFT followed by GRPO on the same adapter.
-- Records observed training metrics and evaluation evidence durably. The GUI graphs only values returned by the trainer and trusted verifier.
+- Shows the GRPO curriculum at overview, task, or rollout granularity. The GUI graphs only values returned by the trainer and trusted verifier.
 - Freezes and runs a built-in, text-only model benchmark against the pinned Qwythos 9B reference.
 - Hosts the downloaded base or a completed adapter behind a small, loopback-only OpenAI-compatible endpoint.
 - Prevents Train, Evaluate, and Serve from competing for GPU 0, including across local projects and processes.
@@ -76,6 +76,7 @@ autotrainer source add ./data/accepted.jsonl --config autotrainer.yaml
 autotrainer source add ./tasks/train --config autotrainer.yaml
 
 autotrainer prepare --config autotrainer.yaml
+autotrainer curriculum --config autotrainer.yaml --json
 autotrainer train auto --config autotrainer.yaml
 
 autotrainer evaluate plan --write --config autotrainer.yaml

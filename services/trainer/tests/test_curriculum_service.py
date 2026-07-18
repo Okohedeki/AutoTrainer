@@ -228,6 +228,31 @@ class CurriculumServiceTests(unittest.TestCase):
         self.assertEqual(result["rollouts"], [])
         self.assertEqual(result["unmatched_observations"][0]["reason"], "catalog_mismatch")
 
+    def test_matched_started_episode_is_visible_until_it_scores(self) -> None:
+        activity = self._activity([])
+        activity["events"].append(
+            {
+                "type": "episode_started",
+                "stage": "grpo",
+                "sequence": 2,
+                "observed_at": "2026-07-17T00:00:02Z",
+                "episode_id": "000000000002",
+                "task_id": "pricing-task",
+                "task_family_id": "pricing-family",
+            }
+        )
+        activity["window"].update(
+            last_sequence=2,
+            retained_event_count=2,
+            observed_event_count=2,
+        )
+
+        result = get_curriculum_workspace(self.config_path, activity=activity)
+
+        self.assertEqual(result["run"]["catalog_alignment"], "matched")
+        self.assertEqual(result["run"]["active_episodes"][0]["episode_id"], "000000000002")
+        self.assertEqual(result["summary"]["active_episode_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
