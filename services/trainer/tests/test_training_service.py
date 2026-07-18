@@ -91,6 +91,38 @@ class TrainingServiceTests(unittest.TestCase):
         self.assertFalse(stage_config["sft"]["enabled"])
         self.assertEqual(stage_config["grpo"]["start_from"], "base")
 
+    def test_practice_events_bind_to_the_compiled_curriculum(self) -> None:
+        events: list[dict[str, object]] = []
+        digest = "a" * 64
+        fingerprint = "b" * 64
+        with (
+            patch("autotrainer.training_service.prepare_project", return_value=_prepared("practice")),
+            patch("autotrainer.training_service.run_grpo", return_value={"stage": "grpo"}),
+            patch(
+                "autotrainer.curriculum_service.load_compiled_catalog",
+                return_value={
+                    "status": "compiled",
+                    "fingerprint": fingerprint,
+                    "dataset_sha256": digest,
+                    "blockers": [],
+                },
+            ),
+        ):
+            run_project_training(
+                self.config_path,
+                on_event=lambda event: events.append(dict(event)),
+            )
+
+        self.assertEqual(
+            events[1],
+            {
+                "type": "stage_completed",
+                "stage": "prepare",
+                "catalog_fingerprint": fingerprint,
+                "dataset_sha256": digest,
+            },
+        )
+
     def test_both_runs_sft_before_rl(self) -> None:
         order: list[str] = []
         with (
@@ -227,6 +259,14 @@ class TrainingServiceTests(unittest.TestCase):
             _path: Path, *, on_progress: object, on_event: object
         ) -> dict[str, object]:
             on_progress("grpo", "Practicing against verified tasks.")  # type: ignore[operator]
+            on_event(  # type: ignore[operator]
+                {
+                    "type": "stage_completed",
+                    "stage": "prepare",
+                    "catalog_fingerprint": "a" * 64,
+                    "dataset_sha256": "b" * 64,
+                }
+            )
             on_event({"type": "stage_started", "stage": "grpo"})  # type: ignore[operator]
             on_event(  # type: ignore[operator]
                 {
@@ -244,12 +284,26 @@ class TrainingServiceTests(unittest.TestCase):
             )
             on_event(  # type: ignore[operator]
                 {
+                    "type": "episode_started",
+                    "episode_id": "0123456789ab",
+                    "task_id": "pricing-task",
+                    "task_family_id": "pricing-family",
+                    "prompt": secret,
+                }
+            )
+            on_event(  # type: ignore[operator]
+                {
                     "type": "episode_scored",
                     "stage": "grpo",
+                    "episode_id": "0123456789ab",
                     "task_id": "pricing-task",
                     "reward": 0.91,
                     "hard_gate_passed": True,
                     "gate_reason": None,
+                    "tool_call_count": 7,
+                    "tool_calls_by_name": {"read_file": 4, "apply_patch": 3, "shell": 99},
+                    "changed_file_count": 2,
+                    "elapsed_seconds": 12.5,
                     "rubric": {
                         "design_rules": 0.8,
                         "patch_quality": 0.9,
@@ -273,8 +327,10 @@ class TrainingServiceTests(unittest.TestCase):
         self.assertEqual(
             [event["type"] for event in page["events"]],
             [
+                "stage_completed",
                 "stage_started",
                 "trainer_log",
+                "episode_started",
                 "episode_scored",
                 "stage_completed",
                 "job_completed",
@@ -282,18 +338,27 @@ class TrainingServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [event["sequence"] for event in page["events"]],
-            list(range(1, 6)),
+            list(range(1, 8)),
         )
-        trainer_log = page["events"][1]
+        self.assertEqual(page["events"][0]["catalog_fingerprint"], "a" * 64)
+        trainer_log = page["events"][2]
         self.assertEqual(trainer_log["metrics"], {"loss": 0.25, "reward": 0.75})
-        self.assertEqual(page["events"][2]["rubric"]["task_tests"], 1.0)
+        episode = page["events"][4]
+        self.assertEqual(episode["rubric"]["task_tests"], 1.0)
+        self.assertEqual(episode["episode_id"], "0123456789ab")
+        self.assertEqual(
+            episode["tool_calls_by_name"],
+            {"apply_patch": 3, "read_file": 4},
+        )
+        self.assertEqual(episode["changed_file_count"], 2)
+        self.assertEqual(episode["elapsed_seconds"], 12.5)
         serialized = json.dumps(page)
         self.assertNotIn(secret, serialized)
         self.assertNotIn('"patch":', serialized)
 
         tail = manager.events(after=2)
-        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5])
-        self.assertEqual(tail["cursor"], 5)
+        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5, 6, 7])
+        self.assertEqual(tail["cursor"], 7)
         self.assertFalse(tail["truncated"])
 
         restored = TrainingJobManager(self.config_path)

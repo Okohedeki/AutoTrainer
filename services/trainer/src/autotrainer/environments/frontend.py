@@ -17,6 +17,7 @@ import time
 import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from ..environment import CheckResult, EpisodeResult, RolloutVerifierReport, score_rollout
 from ..manifest import TaskManifest
@@ -54,6 +55,7 @@ class FrontendEnvironment:
         self._backend = "docker"
         self._image = ""
         self._tool_calls = 0
+        self._tool_calls_by_name: dict[str, int] = {}
         self._max_output_chars = 12_000
         self._install_result: CheckResult | None = None
         self._check_results: dict[str, CheckResult] = {}
@@ -62,6 +64,7 @@ class FrontendEnvironment:
         self._latest_diff = ""
         self._last_result: EpisodeResult | None = None
         self._episode_callback: EpisodeEventCallback | None = None
+        self._episode_id: str | None = None
 
     def _set_episode_callback(
         self, callback: EpisodeEventCallback | None
@@ -75,6 +78,19 @@ class FrontendEnvironment:
 
         try:
             manifest, revision = self._initialize(task_row)
+            if self._episode_callback is not None:
+                # Expose only bounded episode structure. Prompts, source text,
+                # model reasoning, and verifier content stay private.
+                self._episode_callback(
+                    {
+                        "type": "episode_started",
+                        "episode_id": self._episode_id,
+                        "task_id": manifest.task_id,
+                        # A manifest group is a task family, not a batch of
+                        # sibling completions sampled by GRPO.
+                        "task_family_id": manifest.group_id,
+                    }
+                )
             install = manifest.runtime_commands.get("install", "").strip()
             self._install_result = self._run_named_check("install", install)
             if self._install_result.timed_out:
@@ -435,7 +451,9 @@ class FrontendEnvironment:
 
         self._manifest = manifest
         self._task_root = task_root
+        self._episode_id = uuid4().hex[:12]
         self._tool_calls = 0
+        self._tool_calls_by_name = {}
         self._install_result = None
         self._check_results = {}
         self._latest_diff = ""
@@ -601,10 +619,18 @@ class FrontendEnvironment:
             self._episode_callback(
                 {
                     "type": "episode_scored",
+                    "episode_id": self._episode_id,
                     "task_id": result.task_id,
                     "reward": result.reward,
                     "hard_gate_passed": not result.gated,
                     "gate_reason": result.hard_gate_reason,
+                    "tool_call_count": result.tool_call_count,
+                    "tool_calls_by_name": dict(sorted(self._tool_calls_by_name.items())),
+                    "elapsed_seconds": result.elapsed_seconds,
+                    "changed_file_count": sum(
+                        line.startswith("diff --git ")
+                        for line in result.unified_diff.splitlines()
+                    ),
                     "rubric": {
                         name: float(result.raw_verifier_rates.get(name, 0.0))
                         for name in _RUBRIC_COMPONENTS
@@ -1247,8 +1273,12 @@ class FrontendEnvironment:
         if name not in manifest.tools:
             raise RuntimeError(f"tool is disabled for this task: {name}")
         self._tool_calls += 1
+        self._tool_calls_by_name[name] = self._tool_calls_by_name.get(name, 0) + 1
         if self._tool_calls > manifest.tool_call_limit:
             raise RuntimeError("task tool-call limit exceeded")
+        # Per-tool events would evict more useful scored episodes from the
+        # bounded event store. The score event publishes aggregate names and
+        # counts, never arguments, output, source, or model reasoning.
 
     def _bounded(self, value: str) -> str:
         self._check_deadline()
@@ -1296,6 +1326,8 @@ class FrontendEnvironment:
             self._remove_tree(root)
         self._manifest = None
         self._task_root = None
+        self._episode_id = None
+        self._tool_calls_by_name = {}
         self._install_result = None
         self._started_at = None
         self._deadline = None

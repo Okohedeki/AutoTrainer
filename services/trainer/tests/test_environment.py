@@ -625,6 +625,8 @@ class EpisodeFinalizationTests(unittest.TestCase):
             environment._set_episode_callback(  # type: ignore[attr-defined]
                 lambda event: events.append(dict(event))
             )
+            environment._tool_calls = 3
+            environment._tool_calls_by_name = {"read_file": 2, "apply_patch": 1}
 
             result = environment._finalize()
 
@@ -634,6 +636,11 @@ class EpisodeFinalizationTests(unittest.TestCase):
             self.assertEqual(event["task_id"], result.task_id)
             self.assertEqual(event["reward"], result.reward)
             self.assertTrue(event["hard_gate_passed"])
+            self.assertEqual(event["tool_call_count"], 3)
+            self.assertEqual(
+                event["tool_calls_by_name"],
+                {"apply_patch": 1, "read_file": 2},
+            )
             self.assertEqual(
                 set(event["rubric"]),
                 {

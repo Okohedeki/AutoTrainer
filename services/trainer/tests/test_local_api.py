@@ -650,6 +650,37 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_curriculum_uses_the_server_owned_validated_event_window(self) -> None:
+        activity = {
+            "job_id": "a" * 32,
+            "status": "running",
+            "stage": "grpo",
+            "events": [],
+            "window": {"scope": "current_job_retained_window"},
+        }
+        workspace = {"schema_version": 1, "status": "ready"}
+        with (
+            patch.object(
+                self.server.training,
+                "rollout_snapshot",
+                return_value=activity,
+            ) as snapshot,
+            patch(
+                "autotrainer.local_api.get_curriculum_workspace",
+                return_value=workspace,
+            ) as curriculum,
+        ):
+            status, result = self.request("GET", "/api/v1/curriculum")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        snapshot.assert_called_once_with()
+        curriculum.assert_called_once_with(self.config_path.resolve(), activity=activity)
+
+        status, rejected = self.request("GET", "/api/v1/curriculum?view=fake")
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
+
     def test_evaluation_endpoints_use_the_server_owned_job_manager(self) -> None:
         workspace = {
             "readiness": {"status": "ready", "blockers": []},

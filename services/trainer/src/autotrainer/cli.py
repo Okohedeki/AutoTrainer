@@ -197,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(history_retire)
 
+    curriculum = subparsers.add_parser(
+        "curriculum",
+        help="inspect executable GRPO tasks and their observed learning signal",
+    )
+    _config_argument(curriculum)
+
     validate = subparsers.add_parser("validate", help="validate config, paths, recipes, and declared sources")
     _config_argument(validate)
 
@@ -509,6 +515,18 @@ def _run_history(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_curriculum(arguments: argparse.Namespace) -> int:
+    from .curriculum_service import get_curriculum_workspace
+    from .training_service import read_training_activity
+
+    result = get_curriculum_workspace(
+        arguments.config,
+        activity=read_training_activity(arguments.config),
+    )
+    _emit(result, as_json=arguments.json)
+    return 0 if result["status"] != "blocked" else 3
+
+
 def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
     from .planner import build_plan
     from .sources import scan_sources
@@ -752,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source(arguments)
         if arguments.command == "history":
             return _run_history(arguments)
+        if arguments.command == "curriculum":
+            return _run_curriculum(arguments)
         if arguments.command == "validate":
             return _run_validate(arguments)
         if arguments.command == "prepare":

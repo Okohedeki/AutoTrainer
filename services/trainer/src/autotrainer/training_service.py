@@ -26,6 +26,7 @@ from .device_gate import (
     device_run_gate,
 )
 from .model_cache import ModelCacheError
+from .manifest import V1_TOOLS
 from .project_service import prepare_project, read_project_config
 from .project_gate import (
     ProjectLease,
@@ -58,6 +59,7 @@ _EVENT_TYPES = frozenset(
     {
         "stage_started",
         "trainer_log",
+        "episode_started",
         "episode_scored",
         "stage_completed",
         "job_completed",
@@ -123,11 +125,31 @@ def _run_project_training_owned(
     recipe = str(preparation.get("recipe", ""))
     if recipe not in TRAINING_RECIPES:
         raise TrainingServiceError("Prepared data does not select a training recipe.")
-    _notify_event(on_event, "stage_completed", stage="prepare")
 
     # Load the exact file again after preparation because preparation may write
     # deterministic compiled artifacts that the guarded stage runners consume.
     config = read_project_config(config_path)
+    binding: dict[str, str] = {}
+    if recipe in {"practice", "both"} and on_event is not None:
+        # Bind every observed rollout to the exact compiler-frozen JSONL. This
+        # prevents a later Prepare or edited task file from inheriting evidence
+        # that belongs to an older curriculum with the same task IDs.
+        from .curriculum_service import load_compiled_catalog
+
+        details = preparation.get("details", {})
+        report = details.get("compile") if isinstance(details, Mapping) else None
+        catalog = load_compiled_catalog(config, report=report)
+        if catalog["status"] != "compiled":
+            blockers = catalog.get("blockers", [])
+            raise TrainingServiceError(
+                str(blockers[0]) if blockers else "Compiled GRPO tasks could not be verified."
+            )
+        binding = {
+            "catalog_fingerprint": str(catalog["fingerprint"]),
+            "dataset_sha256": str(catalog["dataset_sha256"]),
+        }
+    _notify_event(on_event, "stage_completed", stage="prepare", **binding)
+
     stage_config = select_stage_config(config.data, recipe)
     stages: list[dict[str, Any]] = []
     if recipe in {"teach", "both"}:
@@ -240,6 +262,35 @@ def _finite_number(value: object, *, minimum: float = 0.0) -> float | None:
     return None
 
 
+def _bounded_integer(value: object, *, maximum: int = 1_000_000) -> int | None:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= maximum
+    ):
+        return value
+    return None
+
+
+def _episode_id(value: object) -> str | None:
+    text = str(value or "")
+    return text if re.fullmatch(r"[0-9a-f]{12}", text) else None
+
+
+def _tool_call_counts(value: object) -> dict[str, int]:
+    """Keep only bounded counts for policy tools; never their inputs or output."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, int] = {}
+    for raw_name, raw_count in value.items():
+        name = str(raw_name)
+        count = _bounded_integer(raw_count, maximum=100_000)
+        if name in V1_TOOLS and count is not None:
+            result[name] = count
+    return dict(sorted(result.items()))
+
+
 def _sanitize_event(value: object) -> dict[str, Any] | None:
     """Whitelist one observed event before it reaches disk or localhost."""
 
@@ -270,9 +321,24 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
         epoch = _finite_number(value.get("epoch"))
         if epoch is not None:
             event["epoch"] = epoch
+    elif event_type == "episode_started":
+        event["stage"] = "grpo"
+        identifier = _episode_id(value.get("episode_id"))
+        if identifier is None:
+            return None
+        event["episode_id"] = identifier
+        event["task_id"] = _redact_secrets(
+            value.get("task_id", "unknown-task"), limit=200
+        )
+        family = value.get("task_family_id")
+        if family:
+            event["task_family_id"] = _redact_secrets(family, limit=200)
     elif event_type == "episode_scored":
         event["stage"] = "grpo"
         event["task_id"] = _redact_secrets(value.get("task_id", "unknown-task"), limit=200)
+        identifier = _episode_id(value.get("episode_id"))
+        if identifier is not None:
+            event["episode_id"] = identifier
         reward = _finite_number(value.get("reward"))
         if reward is None or reward > 1.0:
             return None
@@ -292,6 +358,19 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
                 return None
             rubric[name] = component
         event["rubric"] = rubric
+        for field, maximum in (
+            ("tool_call_count", 100_000),
+            ("changed_file_count", 100_000),
+        ):
+            count = _bounded_integer(value.get(field), maximum=maximum)
+            if count is not None:
+                event[field] = count
+        elapsed = _finite_number(value.get("elapsed_seconds"))
+        if elapsed is not None and elapsed <= 7 * 24 * 60 * 60:
+            event["elapsed_seconds"] = elapsed
+        tool_counts = _tool_call_counts(value.get("tool_calls_by_name"))
+        if tool_counts:
+            event["tool_calls_by_name"] = tool_counts
     elif event_type == "job_completed":
         recipe = str(value.get("recipe", ""))
         if recipe in _RECIPES:
@@ -301,8 +380,17 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
             value.get("message", "Training stopped."), limit=1000
         )
 
-    if event_type in {"stage_started", "stage_completed"} and stage not in _STAGES:
-        return None
+    if event_type in {"stage_started", "stage_completed"}:
+        if stage not in _STAGES:
+            return None
+        if event_type == "stage_completed" and stage == "prepare":
+            fingerprint = str(value.get("catalog_fingerprint", ""))
+            dataset_digest = str(value.get("dataset_sha256", ""))
+            if re.fullmatch(r"[0-9a-f]{64}", fingerprint) and re.fullmatch(
+                r"[0-9a-f]{64}", dataset_digest
+            ):
+                event["catalog_fingerprint"] = fingerprint
+                event["dataset_sha256"] = dataset_digest
     return event
 
 
@@ -496,6 +584,48 @@ def _read_job_record(path: Path) -> dict[str, Any] | None:
     return _normalize_saved_job(payload.get("job"))
 
 
+def _training_activity(
+    job: Mapping[str, Any],
+    events: list[dict[str, Any]],
+    next_sequence: int,
+) -> dict[str, Any]:
+    """Describe the validated retained event window without claiming completeness."""
+
+    first_sequence = events[0]["sequence"] if events else None
+    last_sequence = events[-1]["sequence"] if events else None
+    return {
+        "job_id": job.get("id"),
+        "status": job.get("status", "idle"),
+        "stage": job.get("stage"),
+        "events": deepcopy(events),
+        "window": {
+            "scope": "current_job_retained_window",
+            "first_sequence": first_sequence,
+            "last_sequence": last_sequence,
+            "retained_event_count": len(events),
+            # The next cursor tells us how many events existed, but not which
+            # event types were evicted. The UI therefore never invents a total
+            # rollout count for a truncated job.
+            "observed_event_count": max(0, next_sequence - 1),
+            "truncated": bool(first_sequence is not None and first_sequence > 1),
+        },
+    }
+
+
+def read_training_activity(config_path: str | Path) -> dict[str, Any]:
+    """Read a job and its events through the same strict schema used on restore."""
+
+    config = read_project_config(config_path)
+    record_path = config.artifact_dir / "training" / "current-job.json"
+    job = _read_job_record(record_path) or _idle_job()
+    job_id = job.get("id")
+    if not isinstance(job_id, str):
+        return _training_activity(job, [], 1)
+    event_path = config.artifact_dir / "training" / "jobs" / job_id / "events.json"
+    events, next_sequence = _read_event_record(event_path, job_id)
+    return _training_activity(job, events, next_sequence)
+
+
 class TrainingJobManager:
     """Own and durably report one local single-GPU training job."""
 
@@ -567,6 +697,16 @@ class TrainingJobManager:
                 ),
                 "has_more": len(available) > len(page),
             }
+
+    def rollout_snapshot(self) -> dict[str, Any]:
+        """Return the current validated event window for curriculum aggregation."""
+
+        with self._lock:
+            return _training_activity(
+                self._job,
+                self._events,
+                self._next_event_sequence,
+            )
 
     def _append_event_locked(
         self, job_id: str, value: Mapping[str, Any]
@@ -769,5 +909,6 @@ class TrainingJobManager:
 __all__ = [
     "TrainingJobManager",
     "TrainingServiceError",
+    "read_training_activity",
     "run_project_training",
 ]

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from .config import ConfigError
+from .curriculum_service import get_curriculum_workspace
 from .evaluation_service import EvaluationJobManager
 from .github_service import GitHubSearchError, search_repositories
 from .hosting_service import HostingManager
@@ -534,6 +535,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         {"sources": list_sources(self.server.config_path)},
+                    )
+                elif path == f"{API_PREFIX}/curriculum":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        get_curriculum_workspace(
+                            self.server.config_path,
+                            activity=self.server.training.rollout_snapshot(),
+                        ),
                     )
                 elif path == f"{API_PREFIX}/history":
                     _query_values(query, allowed=set())

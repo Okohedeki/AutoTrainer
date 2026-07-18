@@ -89,6 +89,28 @@ class CliTests(unittest.TestCase):
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["model"]["revision"], "abc123")
 
+    def test_curriculum_cli_uses_the_same_validated_activity_contract(self) -> None:
+        activity = {"job_id": None, "status": "idle", "events": []}
+        workspace = {"schema_version": 1, "status": "empty"}
+        with (
+            patch(
+                "autotrainer.training_service.read_training_activity",
+                return_value=activity,
+            ) as read_activity,
+            patch(
+                "autotrainer.curriculum_service.get_curriculum_workspace",
+                return_value=workspace,
+            ) as curriculum,
+        ):
+            status, result = self._json_command(
+                ["curriculum", "--config", "project.yaml", "--json"]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(result, workspace)
+        read_activity.assert_called_once_with(Path("project.yaml"))
+        curriculum.assert_called_once_with(Path("project.yaml"), activity=activity)
+
     def test_catalog_selection_uses_the_pinned_default_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "autotrainer.yaml"
