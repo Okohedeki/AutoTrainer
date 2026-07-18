@@ -65,6 +65,25 @@ export type ModelWorkspace = {
   cache: ModelCacheState;
 };
 
+export type LocalModelCandidate = {
+  candidate_id: string;
+  catalog_key: string;
+  model_id: string;
+  revision: string;
+  availability: "available";
+  selected: boolean;
+  source: "project_cache" | "huggingface_cache" | "transformers_cache";
+  cache_label: string;
+  file_count: number;
+  logical_bytes: number;
+};
+
+export type LocalModelsWorkspace = {
+  models: LocalModelCandidate[];
+  scanned_cache_count: number;
+  ignored_incomplete_count: number;
+};
+
 export type ProjectRecord = {
   id: string;
   name: string;
@@ -488,6 +507,21 @@ export async function searchHuggingFaceModels(query: string, limit = 12, signal?
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   const result = await request<{ models: ModelSearchResult[] }>(`/api/v1/models/search?${params}`, { signal });
   return result.models;
+}
+
+export async function getLocalModels(signal?: AbortSignal): Promise<LocalModelsWorkspace> {
+  // Discovery is local-only. It does not make model selection or start a
+  // download, which keeps opening the Data screen a read-only operation.
+  return request("/api/v1/models/local", { signal });
+}
+
+export async function useLocalModel(candidateId: string): Promise<unknown> {
+  // The backend resolves the opaque ID again; local filesystem paths never
+  // cross this mutation boundary as browser-controlled input.
+  return request("/api/v1/model/use-local", {
+    method: "POST",
+    body: JSON.stringify({ candidate_id: candidateId }),
+  });
 }
 
 export async function selectProjectModel(input: {

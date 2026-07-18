@@ -73,6 +73,23 @@ test("model search distinguishes training support and observes background downlo
   assert.doesNotMatch(panel, /Math\.random|\bETA\b/i);
 });
 
+test("model setup detects and adopts existing local base models without downloading", async () => {
+  const panel = await source("src/ModelSetupPanel.tsx");
+  const api = await source("src/api.ts");
+  const localHandler = panel.slice(panel.indexOf("const adoptLocalModel"), panel.indexOf("const downloadSelection"));
+  assert.match(api, /request\("\/api\/v1\/models\/local", \{ signal \}\)/);
+  assert.match(api, /request\("\/api\/v1\/model\/use-local"/);
+  assert.match(api, /body: JSON\.stringify\(\{ candidate_id: candidateId \}\)/);
+  for (const field of ["candidate_id", "catalog_key", "availability", "cache_label", "scanned_cache_count", "ignored_incomplete_count"]) assert.match(api, new RegExp(field));
+  assert.match(panel, /getLocalModels/);
+  assert.match(panel, /On this machine/);
+  for (const state of ["Checking this machine", "Found locally", "No supported base models found", "Ready locally", "Could not check known model caches"]) assert.match(panel, new RegExp(state));
+  assert.match(localHandler, /await useLocalModel\(localModel\.candidate_id\)/);
+  assert.match(localHandler, /await getModelWorkspace\(\)/);
+  assert.match(localHandler, /await scanLocalModels\(\)/);
+  assert.doesNotMatch(localHandler, /downloadProjectModel|cache_dir|snapshot_path/);
+});
+
 test("repository search resolves names before explicit purpose and advanced scope", async () => {
   const panel = await source("src/SourceSetupPanel.tsx");
   const api = await source("src/api.ts");

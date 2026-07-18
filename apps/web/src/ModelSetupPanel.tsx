@@ -3,11 +3,15 @@ import {
   ApiClientError,
   downloadProjectModel,
   downloadReferenceModel,
+  getLocalModels,
   getModelStatus,
   getModelWorkspace,
   getReferenceModel,
   searchHuggingFaceModels,
   selectProjectModel,
+  useLocalModel,
+  type LocalModelCandidate,
+  type LocalModelsWorkspace,
   type ModelCacheState,
   type ModelDownloadJob,
   type ModelSearchResult,
@@ -15,7 +19,7 @@ import {
   type ReferenceModelStatus,
 } from "./api";
 
-type ActionState = "idle" | "saving" | "downloading";
+type ActionState = "idle" | "saving" | "downloading" | "using-local";
 type StatusTone = "good" | "warning" | "danger" | "muted" | "info";
 
 const DEFAULT_MODEL = "Qwen/Qwen3.5-9B";
@@ -54,6 +58,65 @@ function compatibilityTone(value: string): StatusTone {
   if (value === "supported") return "good";
   if (value === "reference_only") return "warning";
   return "muted";
+}
+
+function LocalModelRow({
+  candidate,
+  workspace,
+  checking,
+  error,
+  ready,
+  disabled,
+  using,
+  onUse,
+  onRetry,
+}: {
+  candidate: LocalModelCandidate | null;
+  workspace: LocalModelsWorkspace | null;
+  checking: boolean;
+  error: boolean;
+  ready: boolean;
+  disabled: boolean;
+  using: boolean;
+  onUse: () => void;
+  onRetry: () => void;
+}) {
+  let title = "No supported base models found";
+  let detail = workspace
+    ? `Checked ${workspace.scanned_cache_count} known ${workspace.scanned_cache_count === 1 ? "cache" : "caches"}.`
+    : "AutoTrainer checks known model caches without contacting Hugging Face.";
+  let tone: StatusTone = "muted";
+  let label = "None found";
+
+  if (checking) {
+    title = "Checking this machine";
+    detail = "Looking in known model caches.";
+    label = "Checking";
+  } else if (error) {
+    title = "Could not check known model caches";
+    detail = "Retry the local scan; Hugging Face search still works normally.";
+    tone = "danger";
+    label = "Check failed";
+  } else if (candidate) {
+    title = candidate.model_id;
+    detail = `${candidate.cache_label} · ${readableBytes(candidate.logical_bytes)} · ${candidate.file_count.toLocaleString()} files`;
+    tone = ready ? "good" : "info";
+    label = ready ? "Ready locally" : "Found locally";
+  } else if ((workspace?.ignored_incomplete_count || 0) > 0) {
+    detail = `No complete supported snapshot found; ${workspace?.ignored_incomplete_count} incomplete cache ${workspace?.ignored_incomplete_count === 1 ? "entry was" : "entries were"} ignored.`;
+  }
+
+  return (
+    <div className="local-model-row" aria-live="polite" data-state={error ? "error" : checking ? "checking" : ready ? "ready" : candidate ? "found" : "empty"}>
+      <div><span>On this machine</span><strong>{title}</strong><small>{detail}</small></div>
+      <span className={`status-chip ${tone}`}>{label}</span>
+      {error ? (
+        <button className="secondary-button" type="button" onClick={onRetry} disabled={disabled}>Retry</button>
+      ) : candidate ? (
+        <button className="secondary-button" type="button" onClick={onUse} disabled={disabled || ready}>{using ? "Verifying..." : ready ? "Ready" : "Use local"}</button>
+      ) : null}
+    </div>
+  );
 }
 
 function BenchmarkReferenceRow({ disabled, onActiveChange }: { disabled: boolean; onActiveChange: (active: boolean) => void }) {
@@ -145,6 +208,9 @@ export default function ModelSetupPanel({
   const [selectedResult, setSelectedResult] = useState<ModelSearchResult | null>(null);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [revision, setRevision] = useState(DEFAULT_REVISION);
+  const [localModels, setLocalModels] = useState<LocalModelsWorkspace | null>(null);
+  const [localChecking, setLocalChecking] = useState(true);
+  const [localCheckFailed, setLocalCheckFailed] = useState(false);
 
   const hydrate = (next: ModelWorkspace) => {
     setWorkspace(next);
@@ -163,6 +229,28 @@ export default function ModelSetupPanel({
         setConnected(false);
         setError(reason instanceof Error ? reason.message : "AutoTrainer is not connected.");
       });
+    return () => controller.abort();
+  }, []);
+
+  const scanLocalModels = async (signal?: AbortSignal) => {
+    setLocalChecking(true);
+    setLocalCheckFailed(false);
+    try {
+      setLocalModels(await getLocalModels(signal));
+    } catch {
+      if (signal?.aborted) return;
+      // A cache scan failure is deliberately isolated from model search and
+      // setup. Absolute backend paths and dependency errors stay out of this
+      // compact human-facing row.
+      setLocalCheckFailed(true);
+    } finally {
+      if (!signal?.aborted) setLocalChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void scanLocalModels(controller.signal);
     return () => controller.abort();
   }, []);
 
@@ -189,7 +277,10 @@ export default function ModelSetupPanel({
         if (stopped) return;
         setDownloadJob(status.download_job);
         setWorkspace((current) => current ? { ...current, cache: status.cache } : current);
-        if (status.download_job?.status === "completed" || status.cache.status === "downloaded") hydrate(await getModelWorkspace(controller.signal));
+        if (status.download_job?.status === "completed" || status.cache.status === "downloaded") {
+          hydrate(await getModelWorkspace(controller.signal));
+          await scanLocalModels(controller.signal);
+        }
         else if (status.download_job?.status === "failed") setError(status.download_job.error || status.download_job.message || "The model download failed.");
         else if (["queued", "downloading", "running"].includes(status.download_job?.status || "")) timer = window.setTimeout(() => void poll(), 2_000);
         else setError("The download job is no longer available. Queue the model again.");
@@ -250,6 +341,19 @@ export default function ModelSetupPanel({
     ),
   );
   const cache = workspace?.cache || null;
+  const localModel = useMemo(() => {
+    const candidates = localModels?.models || [];
+    return candidates.find((candidate) => candidate.selected)
+      || candidates.find((candidate) => candidate.model_id === selectedModel && candidate.revision === revision)
+      || candidates[0]
+      || null;
+  }, [localModels, revision, selectedModel]);
+  const localReady = Boolean(
+    localModel?.selected
+    && cache?.status === "downloaded"
+    && cache.model_id === localModel.model_id
+    && cache.revision === localModel.revision,
+  );
   const downloadActive = ["queued", "downloading", "running"].includes(downloadJob?.status || "");
   const status = connected === false
     ? { label: "Not connected", tone: "danger" as const }
@@ -257,6 +361,8 @@ export default function ModelSetupPanel({
       ? { label: "Connecting", tone: "muted" as const }
       : downloadActive
         ? { label: downloadJob?.status === "queued" ? "Download queued" : "Downloading", tone: "info" as const }
+      : localReady
+        ? { label: "Ready locally", tone: "good" as const }
       : cacheLabel(cache, selectionChanged);
   const busy = action !== "idle";
   const locked = busy || downloadActive || referenceActive || disabled;
@@ -279,8 +385,27 @@ export default function ModelSetupPanel({
       await selectProjectModel({ model: selectedModel, revision });
       onModelChanged?.();
       hydrate(await getModelWorkspace());
+      await scanLocalModels();
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "Could not save these model settings.");
+    } finally {
+      setAction("idle");
+    }
+  };
+
+  const adoptLocalModel = async () => {
+    if (!localModel) return;
+    setAction("using-local");
+    setLocalCheckFailed(false);
+    try {
+      await useLocalModel(localModel.candidate_id);
+      onModelChanged?.();
+      hydrate(await getModelWorkspace());
+      await scanLocalModels();
+    } catch {
+      // Adoption can fail when another process removes or changes a cache
+      // after discovery. The next scan re-establishes current local truth.
+      setLocalCheckFailed(true);
     } finally {
       setAction("idle");
     }
@@ -306,7 +431,7 @@ export default function ModelSetupPanel({
     <section className="panel setup-step model-setup" aria-labelledby="model-heading" data-tour="model">
       <header className="step-heading">
         <span className="step-number" aria-hidden="true">1</span>
-        <div><h2 id="model-heading">Choose the base model</h2><p>Search Hugging Face, pin the exact revision, then download it to this machine.</p></div>
+        <div><h2 id="model-heading">Choose the base model</h2><p>Search Hugging Face or use a supported model already on this machine.</p></div>
         <span className={`status-chip ${status.tone}`}>{status.label}</span>
       </header>
 
@@ -340,6 +465,18 @@ export default function ModelSetupPanel({
             </div>
           )}
         </label>
+
+        <LocalModelRow
+          candidate={localModel}
+          workspace={localModels}
+          checking={localChecking}
+          error={localCheckFailed}
+          ready={localReady}
+          disabled={locked}
+          using={action === "using-local"}
+          onUse={() => void adoptLocalModel()}
+          onRetry={() => void scanLocalModels()}
+        />
 
         <div className="selected-model-row">
           <div><span>Selected model</span><strong>{selectedModel}</strong><code>{revision || "Revision required"}</code></div>
