@@ -26,12 +26,15 @@ test("the operating console follows Projects, Data, Train, Evaluate, Serve", asy
   assert.match(app, /<ProjectsPanel/);
   assert.match(app, /<ModelSetupPanel/);
   assert.match(app, /<SourceSetupPanel/);
+  assert.match(app, /<GrpoEvidencePanel context="data"/);
   assert.match(app, /<HistoryReviewPanel/);
   assert.match(app, /<TrainingMonitorPanel/);
   assert.match(app, /<EvaluationMonitorPanel/);
   assert.match(app, /<ServePanel/);
   assert.doesNotMatch(app, /<PreparePanel/);
   assert.doesNotMatch(app, /className="hero"|site-footer|CommandDrawer/);
+  assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<GrpoEvidencePanel context=\"data\""));
+  assert.ok(app.indexOf("<GrpoEvidencePanel context=\"data\"") < app.indexOf("<HistoryReviewPanel"));
 });
 
 test("projects can be created and switched through durable backend state", async () => {
@@ -92,8 +95,33 @@ test("repository search resolves names before explicit purpose and advanced scop
   assert.match(api, /body: JSON\.stringify\(input\)/);
 });
 
-test("Train owns one-click start plus real loss, reward, rubric, and event telemetry", async () => {
+test("Data and Train share one truthful three-level GRPO evidence surface", async () => {
+  const panel = await source("src/GrpoEvidencePanel.tsx");
+  const api = await source("src/api.ts");
+  const training = await source("src/TrainingMonitorPanel.tsx");
+  for (const label of ["Overview", "Tasks", "Rollouts"]) assert.match(panel, new RegExp(`label: "${label}"`));
+  for (const field of ["episode_id", "task_id", "tool_call_count", "tool_calls_by_name", "changed_file_count", "elapsed_seconds"]) assert.match(panel, new RegExp(field));
+  for (const key of ["design_rules", "patch_quality", "regression_safety", "responsive_rules", "task_tests"]) assert.match(panel, new RegExp(key));
+  assert.match(panel, /aria-pressed={value === item\.id}/);
+  assert.match(panel, /getCurriculumWorkspace/);
+  assert.match(api, /request\("\/api\/v1\/curriculum", \{ signal \}\)/);
+  assert.match(panel, /task\.split === "train"/);
+  assert.match(panel, /protected_holdout_count/);
+  assert.match(panel, /function TaskDetail/);
+  for (const aspect of ["Locked snapshot", "Bounded tools", "Hidden verifier", "Verifier and reward"]) assert.match(panel, new RegExp(aspect));
+  assert.match(panel, /task\.checks/);
+  assert.match(panel, /Latest retained rollout window/);
+  assert.match(panel, /unmatched_observations/);
+  assert.match(panel, /never fabricates progress/);
+  assert.match(panel, /never change granularity/);
+  assert.match(panel, /No activity is simulated here/);
+  assert.match(training, /<GrpoEvidencePanel context="training"/);
+  assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b|estimated time/i);
+});
+
+test("Train owns one-click start, observed SFT loss, and the shared GRPO evidence surface", async () => {
   const panel = await source("src/TrainingMonitorPanel.tsx");
+  const evidence = await source("src/GrpoEvidencePanel.tsx");
   const api = await source("src/api.ts");
   assert.match(panel, />Start training</);
   assert.match(panel, /Check readiness/);
@@ -109,11 +137,10 @@ test("Train owns one-click start plus real loss, reward, rubric, and event telem
   assert.match(panel, /getTrainingEvents\(cursorRef\.current/);
   assert.match(panel, /jobRolledOver/);
   assert.match(panel, /getTrainingEvents\(0, controller\.signal\)/);
-  assert.match(panel, /event\.hard_gate_passed === false/);
-  assert.match(panel, /Teaching loss/);
-  assert.match(panel, /Practice reward and rubric/);
-  for (const key of ["design_rules", "patch_quality", "regression_safety", "responsive_rules", "task_tests"]) assert.match(panel, new RegExp(key));
-  assert.match(panel, /No training events yet/);
+  assert.match(panel, /const sftLoss = useMemo/);
+  assert.match(panel, /teachingLoss={sftLoss}/);
+  assert.match(evidence, /Teaching loss/);
+  assert.doesNotMatch(panel, /Practice reward and rubric|events\.slice\(-24\)|Durable event rail/);
   assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b/i);
 });
 
@@ -171,7 +198,7 @@ test("the first run walkthrough covers all five real lifecycle screens", async (
 test("charts render observed values and truthful empty states", async () => {
   const chart = await source("src/TelemetryChart.tsx");
   const visibleUi = await Promise.all([
-    source("src/App.tsx"), source("src/TrainingMonitorPanel.tsx"), source("src/EvaluationMonitorPanel.tsx"), source("src/ServePanel.tsx"),
+    source("src/App.tsx"), source("src/GrpoEvidencePanel.tsx"), source("src/TrainingMonitorPanel.tsx"), source("src/EvaluationMonitorPanel.tsx"), source("src/ServePanel.tsx"),
   ]).then((files) => files.join("\n"));
   assert.match(chart, /plots only observed backend values/);
   assert.match(chart, /Waiting for observed values/);

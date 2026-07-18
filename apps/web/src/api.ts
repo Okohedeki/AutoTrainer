@@ -218,6 +218,93 @@ export type TrainingEventPage = {
   has_more: boolean;
 };
 
+export type CurriculumTask = {
+  id: string;
+  instruction: string;
+  task_family_id: string | null;
+  source_id: string | null;
+  source_revision: string | null;
+  split: "train";
+  status: string;
+  declaration_state: string;
+  tools: string[];
+  checks: Record<string, boolean>;
+  limits: Record<string, number | boolean | string | null>;
+  reward_weights: Record<string, number>;
+  aspects: Record<string, boolean>;
+  observed: {
+    rollout_count: number;
+    hard_gate_pass_rate: number | null;
+    reward_mean: number | null;
+    reward_min: number | null;
+    reward_max: number | null;
+    reward_variance: number | null;
+    rubric_means: Record<string, number | null>;
+    gate_reasons: Record<string, number>;
+    outcome_mix: string;
+    gate_pattern: string;
+  };
+};
+
+export type CurriculumRollout = {
+  sequence: number;
+  observed_at: string;
+  episode_id: string | null;
+  task_id: string;
+  reward: number;
+  hard_gate_passed: boolean;
+  gate_reason: string | null;
+  rubric: Record<string, number>;
+  tool_call_count: number | null;
+  tool_calls_by_name: Record<string, number>;
+  changed_file_count: number | null;
+  elapsed_seconds: number | null;
+};
+
+export type CurriculumWorkspace = {
+  catalog: {
+    status: string;
+    fingerprint: string | null;
+    dataset_sha256: string | null;
+    task_count: number;
+  };
+  run: {
+    job_id: string | null;
+    status: string;
+    stage: string | null;
+    catalog_alignment: string;
+    window: {
+      scope: string;
+      first_sequence: number | null;
+      last_sequence: number | null;
+      retained_event_count: number;
+      observed_event_count: number;
+      truncated: boolean;
+    };
+    active_episodes: Array<{
+      sequence: number;
+      observed_at: string;
+      episode_id: string;
+      task_id: string;
+      task_family_id: string | null;
+    }>;
+  };
+  summary: {
+    protected_holdout_count: number;
+    observed_task_count: number;
+    rollout_count: number;
+    hard_gate_pass_rate: number | null;
+    reward_mean: number | null;
+    rubric_means: Record<string, number | null>;
+    outcome_states: Record<string, number>;
+  };
+  tasks: CurriculumTask[];
+  rollouts: CurriculumRollout[];
+  unmatched_observations: unknown[];
+  next_action: { title: string; detail: string } | null;
+  policy: Record<string, unknown>;
+};
+
 export type BackendHealth = {
   status: "ok";
   config: string;
@@ -489,6 +576,10 @@ export async function startTraining(): Promise<TrainingJob> {
 
 export async function getTrainingEvents(after = 0, signal?: AbortSignal): Promise<TrainingEventPage> {
   return request(`/api/v1/training/events?after=${encodeURIComponent(after)}`, { signal });
+}
+
+export async function getCurriculumWorkspace(signal?: AbortSignal): Promise<CurriculumWorkspace> {
+  return request("/api/v1/curriculum", { signal });
 }
 
 export async function getEvaluationWorkspace(signal?: AbortSignal): Promise<EvaluationWorkspace> {

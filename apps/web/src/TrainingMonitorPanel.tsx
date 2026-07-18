@@ -9,18 +9,10 @@ import {
   type TrainingEvent,
   type TrainingJob,
 } from "./api";
-import TelemetryChart, { type ChartPoint, type ChartSeries } from "./TelemetryChart";
+import GrpoEvidencePanel from "./GrpoEvidencePanel";
+import type { ChartPoint } from "./TelemetryChart";
 
 const liveStatuses = new Set<TrainingJob["status"]>(["queued", "running"]);
-const rubricKeys = ["design_rules", "patch_quality", "regression_safety", "responsive_rules", "task_tests"] as const;
-const rubricLabels: Record<(typeof rubricKeys)[number], string> = {
-  design_rules: "Design rules",
-  patch_quality: "Patch quality",
-  regression_safety: "Regression safety",
-  responsive_rules: "Responsive rules",
-  task_tests: "Task tests",
-};
-const rubricColors = ["#7c82ff", "#2fb785", "#f0a34a", "#e06c75", "#57a9d9"];
 
 const stageNames: Record<string, string> = {
   prepare: "Prepare run",
@@ -48,25 +40,6 @@ const recipeCopy: Record<PreparationResult["recipe"], { label: string; detail: s
     detail: "Add accepted examples, executable tasks, or both in Data.",
   },
 };
-
-function eventLabel(event: TrainingEvent) {
-  if (event.message) return event.message;
-  if (event.type === "stage_started") return `${stageNames[event.stage || ""] || event.stage || "Training"} started`;
-  if (event.type === "stage_completed") return `${stageNames[event.stage || ""] || event.stage || "Training"} completed`;
-  if (event.type === "episode_scored") return event.task_id ? `Scored ${event.task_id}` : "Practice episode scored";
-  if (event.type === "trainer_log") return event.step === undefined ? "Trainer metrics recorded" : `Trainer metrics recorded at step ${event.step}`;
-  if (event.type === "job_completed") return "Training completed";
-  if (event.type === "job_failed") return "Training stopped";
-  return event.type.replaceAll("_", " ");
-}
-
-function eventMarkerTone(event: TrainingEvent) {
-  // A scored episode that fails its hard gate remains a failure even when the
-  // surrounding event is structurally complete.
-  if (event.hard_gate_passed === false || event.type.includes("failed")) return "danger";
-  if (event.hard_gate_passed === true || event.type.includes("completed")) return "good";
-  return "info";
-}
 
 function numeric(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -202,18 +175,6 @@ export default function TrainingMonitorPanel({
     (event) => metric(event, ["loss", "train_loss", "observed_loss"]),
   ), [events]);
 
-  const grpoSeries = useMemo<ChartSeries[]>(() => {
-    const practice = events.filter((event) => event.stage === "grpo" || event.type === "episode_scored");
-    const reward = pointsFor(practice, (event) => numeric(event.reward) ?? metric(event, ["total_reward", "reward", "reward_mean"]));
-    const componentSeries = rubricKeys.map((key, index) => ({
-      id: key,
-      label: rubricLabels[key],
-      color: rubricColors[index],
-      points: pointsFor(practice, (event) => numeric(event.rubric?.[key]) ?? metric(event, [key])),
-    }));
-    return [{ id: "reward", label: "Total reward", color: "#d8ff58", points: reward }, ...componentSeries];
-  }, [events]);
-
   const completedStages = new Set(job?.result?.stages.map((stage) => stage.stage) ?? []);
   const statusTone = job?.status === "completed"
     ? "good"
@@ -261,33 +222,10 @@ export default function TrainingMonitorPanel({
         {preparation?.recipe !== "needs_training_data" && preparation?.next_action && (
           <div className="training-next-action" role="note"><span>Do this next</span><strong>{preparation.next_action.title}</strong><p>{preparation.next_action.detail}</p></div>
         )}
+        {job && job.status !== "idle" && <div className="run-message training-run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"}><span className={`health-dot ${statusTone}`} aria-hidden="true" /><div><strong>{stageNames[job.stage || ""] || "Training run"}</strong><p>{job.message}</p></div></div>}
       </article>
 
-      <div className="training-live-grid">
-        <article className="panel training-telemetry-panel">
-          <header className="panel-header"><div><p className="panel-kicker">Observed training signal</p><h2>Live training rubric</h2></div>{job?.id && <code>{job.id.slice(0, 12)}</code>}</header>
-          {job && job.status !== "idle" && <div className="run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"}><span className={`health-dot ${statusTone}`} aria-hidden="true" /><div><strong>{stageNames[job.stage || ""] || "Training run"}</strong><p>{job.message}</p></div></div>}
-          <TelemetryChart title="Teaching loss" description="Observed trainer loss by recorded step." series={[{ id: "loss", label: "Loss", color: "#7c82ff", points: sftLoss }]} emptyMessage="Loss appears when supervised training emits its first trainer log." />
-          <TelemetryChart title="Practice reward and rubric" description="Verified reward and each executable rubric component by completed episode. Toggle a line to inspect the others." series={grpoSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="Reward lines appear only after an executable practice episode has been scored." />
-        </article>
-
-        <aside className="panel event-rail-panel">
-          <header className="panel-header"><div><p className="panel-kicker">Durable event rail</p><h2>What is happening</h2></div><span className="status-chip muted">{events.length} events</span></header>
-          {events.length === 0 ? (
-            <div className="evidence-empty"><strong>No training events yet</strong><p>Start training to see preparation, trainer logs, scored practice episodes, and completion as they are written.</p></div>
-          ) : (
-            <ol className="event-rail">
-              {events.slice(-24).reverse().map((event) => (
-                <li key={event.sequence}>
-                  <span className={`event-marker ${eventMarkerTone(event)}`} aria-hidden="true" />
-                  <div><strong>{eventLabel(event)}</strong><p>{stageNames[event.stage || ""] || event.stage || "Training"}{event.epoch !== undefined ? ` / epoch ${event.epoch}` : ""}{event.gate_reason ? ` / ${event.gate_reason}` : ""}</p></div>
-                  <code>{event.sequence}</code>
-                </li>
-              ))}
-            </ol>
-          )}
-        </aside>
-      </div>
+      <GrpoEvidencePanel context="training" refreshKey={`${revision}-${job?.id ?? "idle"}`} live={trainingActive} teachingLoss={sftLoss} />
 
       <article className="panel training-output-panel">
         <header className="panel-header"><div><p className="panel-kicker">Post-training artifact</p><h2>Adapter output</h2></div>{job?.status === "completed" && <span className="status-chip good">ready to evaluate</span>}</header>
