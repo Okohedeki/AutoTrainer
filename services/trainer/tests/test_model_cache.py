@@ -229,10 +229,23 @@ class ModelCacheTests(unittest.TestCase):
 
     def test_exact_snapshot_check_is_local_only(self) -> None:
         calls: list[dict[str, object]] = []
+        revision = "b" * 40
+        snapshot = (
+            self.root
+            / "models--Qwen--Qwen3.5-9B"
+            / "snapshots"
+            / revision
+        )
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_5"}), encoding="utf-8"
+        )
+        (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (snapshot / "model.safetensors").write_bytes(b"weights")
 
         def fake_download(**kwargs: object) -> str:
             calls.append(dict(kwargs))
-            return str(self.root)
+            return str(snapshot)
 
         with patch(
             "autotrainer.model_cache._hub_functions",
@@ -241,7 +254,7 @@ class ModelCacheTests(unittest.TestCase):
             require_materialized_model(
                 {
                     "id": "Qwen/Qwen3.5-9B",
-                    "revision": "b" * 40,
+                    "revision": revision,
                     "cache_dir": str(self.root),
                 }
             )

@@ -14,7 +14,12 @@ import re
 from typing import Any
 
 from .config import ConfigError, load_config, project_config_mutation, write_config
-from .model_cache import inspect_model_cache, materialize_model
+from .model_cache import (
+    adopt_local_model as _adopt_local_model,
+    discover_local_models as _discover_local_models,
+    inspect_model_cache,
+    materialize_model,
+)
 from .models import MODEL_CATALOG, resolve_model
 from .project_gate import project_mutation_gate
 
@@ -168,6 +173,12 @@ def list_models() -> dict[str, dict[str, Any]]:
     return {alias: dict(details) for alias, details in MODEL_CATALOG.items()}
 
 
+def discover_local_models(config_path: str | Path) -> dict[str, Any]:
+    """Discover supported local snapshots through the shared offline policy."""
+
+    return _discover_local_models(config_path)
+
+
 def get_model(config_path: str | Path) -> dict[str, Any]:
     """Return the model declaration currently stored in project YAML."""
 
@@ -226,7 +237,14 @@ def download_model(config_path: str | Path) -> dict[str, Any]:
     return materialize_model(config_path)
 
 
+def use_local_model(config_path: str | Path, candidate_id: str) -> dict[str, Any]:
+    """Adopt one opaque discovery candidate after server-side revalidation."""
+
+    return _adopt_local_model(config_path, candidate_id)
+
+
 __all__ = [
+    "discover_local_models",
     "download_model",
     "get_model",
     "list_models",
@@ -234,4 +252,5 @@ __all__ = [
     "ModelSearchError",
     "search_models",
     "select_model",
+    "use_local_model",
 ]

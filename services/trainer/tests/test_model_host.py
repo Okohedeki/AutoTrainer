@@ -39,8 +39,21 @@ class ModelHostTests(unittest.TestCase):
         payload = default_config(revision=self.revision)
         payload["model"]["cache_dir"] = "./model-cache"
         write_config(self.config_path, payload, overwrite=False)
-        self.snapshot = self.root / "model-cache" / "snapshot"
+        self.snapshot = (
+            self.root
+            / "model-cache"
+            / "models--Qwen--Qwen3.5-9B"
+            / "snapshots"
+            / self.revision
+        )
         self.snapshot.mkdir(parents=True)
+        # Hosting now trusts a receipt only while the canonical Hub snapshot
+        # still has the minimum config, tokenizer, and model weight artifacts.
+        (self.snapshot / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_5"}), encoding="utf-8"
+        )
+        (self.snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (self.snapshot / "model.safetensors").write_bytes(b"weights")
         receipt = self.root / ".autotrainer" / "models" / "current.json"
         receipt.parent.mkdir(parents=True)
         receipt.write_text(
@@ -52,8 +65,10 @@ class ModelHostTests(unittest.TestCase):
                     "revision": self.revision,
                     "snapshot_path": str(self.snapshot),
                     "cache_dir": str((self.root / "model-cache").resolve()),
-                    "file_count": 1,
-                    "logical_bytes": 1,
+                    "file_count": 3,
+                    "logical_bytes": sum(
+                        item.stat().st_size for item in self.snapshot.iterdir()
+                    ),
                 }
             ),
             encoding="utf-8",

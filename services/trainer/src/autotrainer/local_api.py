@@ -29,12 +29,14 @@ from .history_service import (
 )
 from .model_cache import inspect_reference_model, ModelCacheError
 from .model_service import (
+    discover_local_models,
     get_model,
     list_models,
     ModelSearchError,
     model_status,
     search_models,
     select_model,
+    use_local_model,
 )
 from .model_download_service import ModelDownloadManager
 from .project_service import prepare_project
@@ -493,6 +495,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 elif path == f"{API_PREFIX}/models":
                     _query_values(query, allowed=set())
                     self._send_json(HTTPStatus.OK, {"models": list_models()})
+                elif path == f"{API_PREFIX}/models/local":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        discover_local_models(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/model":
                     _query_values(query, allowed=set())
                     self._send_json(
@@ -632,6 +640,23 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         self.server.config_path,
                         _required_text(payload, "model"),
                         revision=_optional_text(payload, "revision"),
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            **result,
+                            "cache": model_status(self.server.config_path),
+                        },
+                    )
+                elif path == f"{API_PREFIX}/model/use-local":
+                    _require_keys(
+                        payload,
+                        allowed={"candidate_id"},
+                        required={"candidate_id"},
+                    )
+                    result = use_local_model(
+                        self.server.config_path,
+                        _required_text(payload, "candidate_id"),
                     )
                     self._send_json(
                         HTTPStatus.OK,

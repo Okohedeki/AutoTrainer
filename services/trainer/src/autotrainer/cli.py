@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     models_search.add_argument("query")
     models_search.add_argument("--limit", type=int, default=12)
     models_search.add_argument("--json", action="store_true")
+    models_local = models_sub.add_parser(
+        "local", help="discover supported base models already cached on this machine"
+    )
+    _config_argument(models_local)
 
     model = subparsers.add_parser("model", help="show or update the configured base model")
     model_sub = model.add_subparsers(dest="model_command", required=True)
@@ -118,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hugging Face cache path used by both download and training",
     )
     _config_argument(model_use)
+    model_use_local = model_sub.add_parser(
+        "use-local", help="adopt one opaque candidate returned by models local"
+    )
+    model_use_local.add_argument("candidate_id")
+    _config_argument(model_use_local)
 
     source = subparsers.add_parser("source", help="declare and inspect repositories or datasets")
     source_sub = source.add_subparsers(dest="source_command", required=True)
@@ -354,12 +363,14 @@ def _run_projects(arguments: argparse.Namespace) -> int:
 
 
 def _run_models(arguments: argparse.Namespace) -> int:
-    from .model_service import list_models, search_models
+    from .model_service import discover_local_models, list_models, search_models
 
     if arguments.models_command == "list":
         payload = list_models()
     elif arguments.models_command == "show":
         payload = resolve_model(arguments.model)
+    elif arguments.models_command == "local":
+        payload = discover_local_models(arguments.config)
     else:
         payload = {"models": search_models(arguments.query, limit=arguments.limit)}
     _emit(payload, as_json=arguments.json)
@@ -368,7 +379,13 @@ def _run_models(arguments: argparse.Namespace) -> int:
 
 def _run_model(arguments: argparse.Namespace) -> int:
     from .model_cache import inspect_reference_model, materialize_reference_model
-    from .model_service import download_model, get_model, model_status, select_model
+    from .model_service import (
+        download_model,
+        get_model,
+        model_status,
+        select_model,
+        use_local_model,
+    )
 
     if arguments.model_command == "show":
         _emit(get_model(arguments.config), as_json=arguments.json)
@@ -384,6 +401,12 @@ def _run_model(arguments: argparse.Namespace) -> int:
         return 0
     if arguments.model_command == "reference-download":
         _emit(materialize_reference_model(arguments.config), as_json=arguments.json)
+        return 0
+    if arguments.model_command == "use-local":
+        _emit(
+            use_local_model(arguments.config, arguments.candidate_id),
+            as_json=arguments.json,
+        )
         return 0
     result = select_model(
         arguments.config,

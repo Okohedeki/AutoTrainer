@@ -40,8 +40,21 @@ class HostingServiceTests(unittest.TestCase):
         payload = default_config(revision=self.revision)
         payload["model"]["cache_dir"] = "./model-cache"
         write_config(self.config_path, payload, overwrite=False)
-        snapshot_path = self.root / "model-cache" / "snapshot"
+        snapshot_path = (
+            self.root
+            / "model-cache"
+            / "models--Qwen--Qwen3.5-9B"
+            / "snapshots"
+            / self.revision
+        )
         snapshot_path.mkdir(parents=True)
+        # Match the usable immutable Hub layout required before a process can
+        # be advertised as ready; no model weights are loaded by this fixture.
+        (snapshot_path / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_5"}), encoding="utf-8"
+        )
+        (snapshot_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (snapshot_path / "model.safetensors").write_bytes(b"weights")
         receipt_path = self.root / ".autotrainer" / "models" / "current.json"
         receipt_path.parent.mkdir(parents=True)
         receipt_path.write_text(
@@ -53,8 +66,10 @@ class HostingServiceTests(unittest.TestCase):
                     "revision": self.revision,
                     "snapshot_path": str(snapshot_path),
                     "cache_dir": str((self.root / "model-cache").resolve()),
-                    "file_count": 0,
-                    "logical_bytes": 0,
+                    "file_count": 3,
+                    "logical_bytes": sum(
+                        item.stat().st_size for item in snapshot_path.iterdir()
+                    ),
                 }
             ),
             encoding="utf-8",

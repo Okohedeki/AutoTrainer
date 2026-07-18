@@ -197,6 +197,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload, {"models": result})
         search.assert_called_once_with("qwen", limit=5)
 
+    def test_local_model_commands_share_discovery_and_adoption_services(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        candidate_id = "a" * 64
+        workspace = {
+            "models": [{"candidate_id": candidate_id, "availability": "available"}],
+            "scanned_cache_count": 1,
+            "ignored_incomplete_count": 0,
+        }
+        adopted = {"model": {"id": "Qwen/Qwen3.5-9B"}}
+        with patch(
+            "autotrainer.model_service.discover_local_models",
+            return_value=workspace,
+        ) as discover:
+            code, payload = self._json_command(
+                ["models", "local", "--config", str(config_path), "--json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, workspace)
+        discover.assert_called_once_with(config_path)
+
+        with patch(
+            "autotrainer.model_service.use_local_model",
+            return_value=adopted,
+        ) as use_local:
+            code, payload = self._json_command(
+                [
+                    "model",
+                    "use-local",
+                    candidate_id,
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, adopted)
+        use_local.assert_called_once_with(config_path, candidate_id)
+
     def test_reference_model_commands_share_the_pinned_cache_service(self) -> None:
         config_path = Path("project/autotrainer.yaml")
         status_result = {"status": "not_downloaded", "alias": "qwythos-9b-reference"}

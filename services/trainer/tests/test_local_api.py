@@ -272,6 +272,68 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertNotIn("hf_supersecretvalue", result["error"]["message"])
 
+    def test_local_model_discovery_and_adoption_use_path_free_contracts(self) -> None:
+        candidate_id = "a" * 64
+        workspace = {
+            "models": [
+                {
+                    "candidate_id": candidate_id,
+                    "catalog_key": "qwen3.5-9b-text",
+                    "model_id": "Qwen/Qwen3.5-9B",
+                    "revision": "b" * 40,
+                    "availability": "available",
+                    "selected": False,
+                    "source": "huggingface_cache",
+                    "cache_label": "Hugging Face cache",
+                    "file_count": 6,
+                    "logical_bytes": 10,
+                }
+            ],
+            "scanned_cache_count": 2,
+            "ignored_incomplete_count": 1,
+        }
+        with patch(
+            "autotrainer.local_api.discover_local_models",
+            return_value=workspace,
+        ) as discover:
+            status, result = self.request("GET", "/api/v1/models/local")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        self.assertNotIn("cache_dir", json.dumps(result))
+        self.assertNotIn("snapshot_path", json.dumps(result))
+        discover.assert_called_once_with(self.config_path.resolve())
+
+        adopted = {
+            "model": {"id": "Qwen/Qwen3.5-9B", "revision": "b" * 40},
+            "catalog_key": "qwen3.5-9b-text",
+        }
+        cache = {"status": "downloaded", "model_id": "Qwen/Qwen3.5-9B"}
+        with (
+            patch(
+                "autotrainer.local_api.use_local_model",
+                return_value=adopted,
+            ) as use_local,
+            patch("autotrainer.local_api.model_status", return_value=cache),
+        ):
+            status, result = self.request(
+                "POST",
+                "/api/v1/model/use-local",
+                {"candidate_id": candidate_id},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {**adopted, "cache": cache})
+        use_local.assert_called_once_with(self.config_path.resolve(), candidate_id)
+
+        with patch("autotrainer.local_api.use_local_model") as use_local:
+            status, result = self.request(
+                "POST",
+                "/api/v1/model/use-local",
+                {"candidate_id": candidate_id, "cache_dir": "C:/private"},
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+        use_local.assert_not_called()
+
     def test_github_repository_search_is_bounded_and_sanitized(self) -> None:
         repositories = [
             {
