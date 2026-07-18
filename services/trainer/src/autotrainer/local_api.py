@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .config import ConfigError
 from .evaluation_service import EvaluationJobManager
+from .github_service import GitHubSearchError, search_repositories
 from .hosting_service import HostingManager
 from .history_service import (
     get_history_workspace,
@@ -381,6 +382,16 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     }
                 },
             )
+        except GitHubSearchError as error:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "error": {
+                        "code": "repository_search_unavailable",
+                        "message": _safe_message(error),
+                    }
+                },
+            )
         except (ConfigError, ValueError) as error:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
@@ -429,6 +440,26 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "models": search_models(
+                            query_value,
+                            limit=int(raw_limit),
+                        )
+                    },
+                )
+                return
+            if path == f"{API_PREFIX}/repositories/search":
+                # Discovery performs no project mutation, so live telemetry
+                # polling does not wait on a slow GitHub request.
+                values = _query_values(query, allowed={"q", "limit"})
+                query_value = values.get("q", [""])[0]
+                if not query_value:
+                    raise ConfigError("q is required")
+                raw_limit = values.get("limit", ["8"])[0]
+                if not re.fullmatch(r"[0-9]+", raw_limit):
+                    raise ConfigError("limit must be a positive integer")
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "repositories": search_repositories(
                             query_value,
                             limit=int(raw_limit),
                         )

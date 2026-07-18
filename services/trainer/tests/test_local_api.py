@@ -14,6 +14,7 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
+from autotrainer.github_service import GitHubSearchError  # noqa: E402
 from autotrainer.local_api import create_local_api_server  # noqa: E402
 from autotrainer.model_service import ModelSearchError  # noqa: E402
 from autotrainer.project_gate import (  # noqa: E402
@@ -270,6 +271,45 @@ class LocalApiTests(unittest.TestCase):
             )
         self.assertEqual(status, 503)
         self.assertNotIn("hf_supersecretvalue", result["error"]["message"])
+
+    def test_github_repository_search_is_bounded_and_sanitized(self) -> None:
+        repositories = [
+            {
+                "full_name": "apache/airflow",
+                "clone_url": "https://github.com/apache/airflow.git",
+                "stars": 42000,
+            }
+        ]
+        with patch(
+            "autotrainer.local_api.search_repositories",
+            return_value=repositories,
+        ) as search:
+            status, result = self.request(
+                "GET",
+                "/api/v1/repositories/search?q=airflow&limit=5",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"repositories": repositories})
+        search.assert_called_once_with("airflow", limit=5)
+
+        status, result = self.request(
+            "GET",
+            "/api/v1/repositories/search?q=airflow&limit=5&limit=6",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
+        with patch(
+            "autotrainer.local_api.search_repositories",
+            side_effect=GitHubSearchError("token=github_supersecretvalue upstream failed"),
+        ):
+            status, result = self.request(
+                "GET",
+                "/api/v1/repositories/search?q=airflow",
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(result["error"]["code"], "repository_search_unavailable")
+        self.assertNotIn("github_supersecretvalue", result["error"]["message"])
 
     def test_model_selection_persists_the_same_yaml_used_by_cli(self) -> None:
         original_cache = load_config(self.config_path).model["cache_dir"]

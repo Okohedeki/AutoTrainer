@@ -4,7 +4,9 @@ import {
   addProjectSource,
   getProjectSources,
   removeProjectSource,
+  searchGitHubRepositories,
   type ProjectSource,
+  type RepositorySearchResult,
   type SourceMode,
 } from "./api";
 
@@ -32,6 +34,24 @@ function hasIntrinsicPurpose(value: string) {
   return normalized.endsWith(".jsonl") || normalized.endsWith("/tasks.yaml") || normalized.endsWith("/tasks.yml") || normalized.endsWith(".taskpack.json");
 }
 
+function shouldSearchGitHub(value: string) {
+  const text = value.trim();
+  if (text.length < 2 || hasIntrinsicPurpose(text)) return false;
+  const lower = text.toLowerCase();
+  return !(
+    text.includes("\\")
+    || /^[a-z]:[\\/]/i.test(text)
+    || /^[./~]/.test(text)
+    || lower.startsWith("github.com/")
+    || lower.startsWith("git@")
+    || text.includes("://")
+  );
+}
+
+function compactStars(value: number) {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
 // Purpose is required because a repository is not training data by itself.
 // Accepted changes and practice tasks may be combined; reference and holdout
 // stay exclusive so one source cannot silently leak into evaluation.
@@ -53,6 +73,10 @@ export default function SourceSetupPanel({
   const [connected, setConnected] = useState<boolean | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [repositoryResults, setRepositoryResults] = useState<RepositorySearchResult[]>([]);
+  const [repositorySearching, setRepositorySearching] = useState(false);
+  const [repositorySearchError, setRepositorySearchError] = useState<string | null>(null);
+  const [repositorySearchEnabled, setRepositorySearchEnabled] = useState(true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -70,6 +94,35 @@ export default function SourceSetupPanel({
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    if (connected !== true || !repositorySearchEnabled || !shouldSearchGitHub(value)) {
+      setRepositoryResults([]);
+      setRepositorySearching(false);
+      setRepositorySearchError(null);
+      return;
+    }
+    const controller = new AbortController();
+    const query = value.trim();
+    const timer = window.setTimeout(() => {
+      setRepositorySearching(true);
+      setRepositorySearchError(null);
+      searchGitHubRepositories(query, 8, controller.signal)
+        .then((results) => setRepositoryResults(results))
+        .catch((reason: unknown) => {
+          if (controller.signal.aborted) return;
+          setRepositoryResults([]);
+          setRepositorySearchError(reason instanceof Error ? reason.message : "GitHub search is unavailable.");
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setRepositorySearching(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [connected, repositorySearchEnabled, value]);
+
   const toggleMode = (mode: SourceMode) => {
     setModes((current) => {
       if (current.includes(mode)) return current.filter((item) => item !== mode);
@@ -79,6 +132,18 @@ export default function SourceSetupPanel({
   };
 
   const intrinsicPurpose = hasIntrinsicPurpose(value);
+
+  const chooseRepository = (repository: RepositorySearchResult) => {
+    // A selected identity is already clone-safe. Suppress the next debounced
+    // lookup so the result menu does not reopen beneath the completed choice.
+    setValue(repository.full_name);
+    setRepositorySearchEnabled(false);
+    setRepositoryResults([]);
+    setRepositorySearchError(null);
+    if (!licenseSpdx.trim() && repository.license_spdx !== "UNDECLARED") {
+      setLicenseSpdx(repository.license_spdx);
+    }
+  };
 
   const addSource = async () => {
     const nextValue = value.trim();
@@ -96,6 +161,8 @@ export default function SourceSetupPanel({
         ...(licenseAttribution.trim() ? { license_attribution: licenseAttribution.trim() } : {}),
       }));
       setValue("");
+      setRepositorySearchEnabled(true);
+      setRepositoryResults([]);
       setModes([]);
       setRevision("");
       setInclude("");
@@ -133,8 +200,36 @@ export default function SourceSetupPanel({
       </header>
 
       <form className="source-entry source-definition" onSubmit={(event) => { event.preventDefault(); void addSource(); }}>
-        <label htmlFor="source-value">GitHub URL or local path</label>
-        <input id="source-value" value={value} onChange={(event) => setValue(event.target.value)} placeholder="github.com/you/project or C:\\path\\to\\work" disabled={connected !== true || busy !== null || disabled} spellCheck={false} autoComplete="off" />
+        <label htmlFor="source-value">Search GitHub or enter a local path</label>
+        <div className="source-repository-picker">
+          <input
+            id="source-value"
+            value={value}
+            onChange={(event) => { setValue(event.target.value); setRepositorySearchEnabled(true); }}
+            placeholder="airflow, apache/airflow, or C:\\path\\to\\work"
+            disabled={connected !== true || busy !== null || disabled}
+            spellCheck={false}
+            autoComplete="off"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={repositoryResults.length > 0}
+            aria-controls="repository-search-results"
+          />
+          {repositorySearching && <small className="repository-search-status">Searching GitHub...</small>}
+          {repositoryResults.length > 0 && (
+            <ul id="repository-search-results" className="repository-search-results" role="listbox" aria-label="GitHub repositories">
+              {repositoryResults.map((repository) => (
+                <li key={repository.full_name} role="option" aria-selected={false}>
+                  <button type="button" onClick={() => chooseRepository(repository)}>
+                    <span><strong>{repository.full_name}</strong><small>{repository.description || "No description provided."}</small></span>
+                    <span className="repository-search-meta">{repository.language || "Code"} · {compactStars(repository.stars)} stars{repository.archived ? " · archived" : ""}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {repositorySearchError && <small className="repository-search-error">{repositorySearchError} You can still paste owner/repository.</small>}
+        </div>
 
         {!intrinsicPurpose ? <fieldset className="source-purpose-options">
           <legend>What should AutoTrainer use from it?</legend>

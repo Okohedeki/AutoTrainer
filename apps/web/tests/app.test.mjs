@@ -70,13 +70,17 @@ test("model search distinguishes training support and observes background downlo
   assert.doesNotMatch(panel, /Math\.random|\bETA\b/i);
 });
 
-test("repository input requires explicit purpose and keeps advanced scope", async () => {
+test("repository search resolves names before explicit purpose and advanced scope", async () => {
   const panel = await source("src/SourceSetupPanel.tsx");
   const api = await source("src/api.ts");
   for (const mode of ["accepted_changes", "practice_tasks", "reference_only", "evaluation_holdout"]) {
     assert.match(panel, new RegExp(mode));
   }
-  assert.match(panel, /GitHub URL or local path/);
+  assert.match(panel, /Search GitHub or enter a local path/);
+  assert.match(panel, /searchGitHubRepositories/);
+  assert.match(panel, /repository\.full_name/);
+  assert.match(panel, /setRepositorySearchEnabled\(false\)/);
+  assert.match(api, /\/api\/v1\/repositories\/search\?\$\{params\}/);
   assert.match(panel, /include: splitPatterns\(include\)/);
   assert.match(panel, /exclude: splitPatterns\(exclude\)/);
   assert.match(panel, /license_spdx/);

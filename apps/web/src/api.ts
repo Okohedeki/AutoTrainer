@@ -92,6 +92,19 @@ export type ModelSearchResult = {
   reason?: string;
 };
 
+export type RepositorySearchResult = {
+  full_name: string;
+  clone_url: string;
+  description: string;
+  language: string | null;
+  stars: number;
+  fork: boolean;
+  archived: boolean;
+  private: boolean;
+  default_branch: string;
+  license_spdx: string;
+};
+
 // The normal source picker deals in product concepts, not YAML source kinds.
 // The backend keeps revisions and provenance while the GUI only needs enough
 // information to show what will teach the model.
@@ -417,6 +430,12 @@ export async function getReferenceModel(signal?: AbortSignal): Promise<Reference
 
 export async function downloadReferenceModel(): Promise<ModelDownloadJob> {
   return request("/api/v1/reference-model/download", { method: "POST", body: "{}" });
+}
+
+export async function searchGitHubRepositories(query: string, limit = 8, signal?: AbortSignal): Promise<RepositorySearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const result = await request<{ repositories: RepositorySearchResult[] }>(`/api/v1/repositories/search?${params}`, { signal });
+  return result.repositories;
 }
 
 export async function getProjectSources(signal?: AbortSignal): Promise<ProjectSource[]> {
