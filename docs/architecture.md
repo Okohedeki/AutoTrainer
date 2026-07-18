@@ -64,7 +64,9 @@ Adding a GitHub source clones it into project-managed storage and pins a detache
 
 ## Model boundary
 
-The GUI and `autotrainer models search` can query Hugging Face, but search results carry an explicit compatibility label. The guarded V1 training implementation supports the pinned text-only `Qwen/Qwen3.5-9B` profile. Selecting a model and downloading it are separate durable operations; real training and hosting load only the recorded local snapshot.
+The GUI and `autotrainer models search` can query Hugging Face, but search results carry an explicit compatibility label. Before any remote search or download, both clients can use the same bounded local discovery service. It inspects only the configured cache and known Hugging Face cache roots, returns opaque candidates for structurally complete supported snapshots, and revalidates a candidate before recording its exact revision and server-owned cache root. It never recursively searches the machine or accepts a browser-provided path.
+
+The guarded V1 training implementation supports the pinned text-only `Qwen/Qwen3.5-9B` profile. Selecting, adopting an existing snapshot, and downloading are separate durable operations; real training and hosting load only the recorded local snapshot.
 
 The benchmark reference is code-owned product configuration:
 

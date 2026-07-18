@@ -13,7 +13,7 @@ V1 stays narrow: local GitHub repositories or files, QLoRA adapters, optional ve
 ## What V1 does
 
 - Creates and switches local projects. GUI project creation writes, validates, and activates the new project as one operation.
-- Searches Hugging Face, labels V1 compatibility, pins an exact model revision, and downloads a durable local snapshot. Weights are not bundled with this repository.
+- Detects supported bases already present in the project or Hugging Face cache, or searches Hugging Face and downloads an exact revision. Weights are not bundled with this repository.
 - Adds GitHub repositories or supported local paths. A GitHub add clones the repository into managed storage and pins a detached commit before saving it.
 - Makes repository intent explicit: accepted changes, practice tasks, reference only, or evaluation holdout. Raw code is never silently called training data.
 - Compiles reviewed demonstrations for SFT and executable verifier-backed tasks for GRPO.
@@ -64,6 +64,7 @@ autotrainer init ./my-specialist
 cd ./my-specialist
 
 autotrainer models search "Qwen 9B"
+autotrainer models local --config autotrainer.yaml
 autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
 autotrainer model download --config autotrainer.yaml
 autotrainer model reference-download --config autotrainer.yaml
@@ -113,6 +114,8 @@ model:
 ```
 
 Hugging Face search is broad, but V1 compatibility claims are not. Results outside the tested profile are labeled unverified and cannot be selected for guarded training through the GUI.
+
+The GUI also checks the configured project cache and the standard local Hugging Face cache without using the network. A structurally complete, supported snapshot appears as **Found locally** and can be adopted without downloading it again. Agents can run `autotrainer models local --config autotrainer.yaml`, then `autotrainer model use-local <candidate-id> --config autotrainer.yaml`. The candidate ID is opaque; callers never supply a cache path.
 
 The fixed benchmark reference is `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` at revision `14a29bae5143091aeaf87ad37120de4cd57d592c`. It is downloaded separately and is never offered as the training base.
 

@@ -75,7 +75,9 @@ The CLI can also list, create, and resolve projects inside an explicit managed r
 
 ### Choose and download the training base
 
-Type a model or author in the Hugging Face search. Results are labeled **Ready for V1 training**, **Evaluation reference only**, or **Not verified for V1 training**. The search is broad; the guarded V1 trainer remains deliberately narrow.
+Open the model step. AutoTrainer first checks the project and standard Hugging Face caches on this machine. A complete supported snapshot appears under **On this machine**; choose **Use local** to pin that exact revision without downloading it again. This scan is bounded, local-only, and never searches arbitrary drives.
+
+Otherwise, type a model or author in the Hugging Face search. Results are labeled **Ready for V1 training**, **Evaluation reference only**, or **Not verified for V1 training**. The search is broad; the guarded V1 trainer remains deliberately narrow.
 
 Select `Qwen/Qwen3.5-9B`, keep its pinned revision, then choose **Use & download**. The dashboard runs the download as a durable job and reports Downloaded only after the local snapshot and receipt exist.
 
@@ -83,10 +85,13 @@ Agent equivalent:
 
 ```bash
 autotrainer models search "Qwen 9B"
+autotrainer models local --config autotrainer.yaml
 autotrainer model use qwen3.5-9b-text --config autotrainer.yaml
 autotrainer model download --config autotrainer.yaml
 autotrainer model status --config autotrainer.yaml
 ```
+
+`models local` returns opaque candidate IDs. If a compatible snapshot is found, use `autotrainer model use-local <candidate-id> --config autotrainer.yaml`; the service rechecks the snapshot and records its cache root itself.
 
 Weights are not included in the Git repository. Public models normally need no token. For a gated model, authenticate with Hugging Face or supply `HF_TOKEN` to the process; the token is not written to project files.
 
