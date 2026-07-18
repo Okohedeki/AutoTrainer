@@ -97,6 +97,12 @@ test("Train owns one-click start plus real loss, reward, rubric, and event telem
   const api = await source("src/api.ts");
   assert.match(panel, />Start training</);
   assert.match(panel, /Check readiness/);
+  assert.match(panel, /Actual GPU training happens here/);
+  assert.match(panel, /Accepted examples → QLoRA SFT/);
+  assert.match(panel, /Executable tasks → GRPO/);
+  assert.match(panel, /GRPO continues training the same adapter/);
+  assert.match(panel, /onClick={onOpenData}>Open Data/);
+  assert.match(panel, /const recipeCopy/);
   assert.match(panel, /await startTraining\(\)/);
   assert.match(panel, /await prepareProject\(\)/);
   assert.match(api, /\/api\/v1\/training\/events\?after=/);

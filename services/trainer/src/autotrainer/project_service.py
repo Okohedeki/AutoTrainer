@@ -404,10 +404,20 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
         if int(readiness_summary.get("pending_history_review_count", 0) or 0) > 0:
             next_action = {
                 "title": "Review accepted changes",
-                "detail": "Approve a useful Git change before using it as a training example.",
+                "detail": (
+                    "Open Data, review a useful Git commit, and write the instruction it answered. "
+                    "Approved changes become examples for QLoRA supervised fine-tuning (SFT)."
+                ),
             }
         else:
-            next_action = {"title": "Add training data", "detail": "Add accepted examples, executable tasks, or both."}
+            next_action = {
+                "title": "Choose how this model will learn",
+                "detail": (
+                    "In Data, add instruction-and-accepted-response examples for QLoRA SFT, "
+                    "or add resettable code tasks with executable verifiers for GRPO. Add both "
+                    "to run SFT first and then continue the same adapter with GRPO."
+                ),
+            }
     elif compile_errors:
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "blocked"), _step("runtime", "waiting")]
         next_action = {"title": "Fix compiled training data", "detail": compile_errors[0]}

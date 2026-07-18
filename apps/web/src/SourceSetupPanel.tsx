@@ -11,8 +11,8 @@ import {
 } from "./api";
 
 const modeCopy: Record<SourceMode, { label: string; detail: string }> = {
-  accepted_changes: { label: "Accepted changes", detail: "Review useful commits and turn approved work into teaching examples." },
-  practice_tasks: { label: "Practice tasks", detail: "Use executable tasks from this repository for reward-driven practice." },
+  accepted_changes: { label: "Accepted changes → QLoRA SFT", detail: "Review useful commits and turn approved work into supervised teaching examples." },
+  practice_tasks: { label: "Executable tasks → GRPO", detail: "Use resettable tasks and executable verifiers for reward-driven practice." },
   reference_only: { label: "Reference only", detail: "Learn project structure and conventions without training on its history." },
   evaluation_holdout: { label: "Isolated evaluation holdout", detail: "Keep this source out of training and use it only to measure the frozen model." },
 };
@@ -195,7 +195,7 @@ export default function SourceSetupPanel({
     <section className="panel setup-step source-setup" aria-labelledby="source-setup-heading" data-tour="sources">
       <header className="step-heading source-setup-header">
         <span className="step-number" aria-hidden="true">2</span>
-        <div><h2 id="source-setup-heading">Add a GitHub repo or local folder</h2><p>Tell AutoTrainer exactly how this source may be used. A repository alone never becomes training data.</p></div>
+        <div><h2 id="source-setup-heading">Add a GitHub repo or local folder</h2><p>Accepted examples run QLoRA SFT. Executable tasks run GRPO. Adding both runs SFT first, then GRPO.</p></div>
         <span className={`status-chip ${connected === false ? "danger" : sources.length ? "good" : "muted"}`}>{connected === false ? "Backend offline" : `${sources.length} configured`}</span>
       </header>
 

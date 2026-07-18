@@ -28,6 +28,27 @@ const stageNames: Record<string, string> = {
   grpo: "Practice against the rubric",
 };
 
+// Readiness returns a recipe derived only from the configured data. Keeping
+// this mapping beside the Train UI makes the exact optimization work explicit.
+const recipeCopy: Record<PreparationResult["recipe"], { label: string; detail: string }> = {
+  teach: {
+    label: "QLoRA supervised fine-tuning (SFT)",
+    detail: "The model learns from instruction-and-accepted-response examples.",
+  },
+  practice: {
+    label: "Verifier-backed GRPO",
+    detail: "The model attempts resettable tasks and learns from executable rewards.",
+  },
+  both: {
+    label: "QLoRA SFT, then verifier-backed GRPO",
+    detail: "Examples teach the adapter first; verified practice then continues that same adapter.",
+  },
+  needs_training_data: {
+    label: "Training path not selected",
+    detail: "Add accepted examples, executable tasks, or both in Data.",
+  },
+};
+
 function eventLabel(event: TrainingEvent) {
   if (event.message) return event.message;
   if (event.type === "stage_started") return `${stageNames[event.stage || ""] || event.stage || "Training"} started`;
@@ -200,6 +221,7 @@ export default function TrainingMonitorPanel({
       ? "danger"
       : trainingActive ? "info" : "muted";
   const outputDirectory = job?.result?.stages.map((stage) => stage.output_dir).filter((value): value is string => Boolean(value)).at(-1);
+  const selectedRecipe = preparation ? recipeCopy[preparation.recipe] : null;
 
   return (
     <section className="training-workspace" aria-labelledby="training-monitor-heading">
@@ -211,7 +233,7 @@ export default function TrainingMonitorPanel({
           <span className={`status-chip ${statusTone}`}>{job?.status ?? "connecting"}</span>
         </header>
         <div className="training-command-copy">
-          <div><strong>Teach from examples. Practice against your rubric.</strong><p>Start runs the complete preflight, then uses only the learning signals configured in Data.</p></div>
+          <div><strong>Actual GPU training happens here.</strong><p>Start training runs preflight, then changes the model with QLoRA SFT, GRPO, or both—based only on what you configured in Data.</p></div>
           <div className="training-command-actions">
             <button className="secondary-button" type="button" onClick={() => void check()} disabled={trainingActive || action !== null}>{action === "check" ? "Checking..." : "Check readiness"}</button>
             <button className="primary-button" type="button" onClick={() => void start()} disabled={trainingActive || action !== null}>{action === "start" ? "Starting..." : job?.status === "failed" || job?.status === "interrupted" ? "Retry training" : job?.status === "completed" ? "Train again" : "Start training"}</button>
@@ -220,8 +242,24 @@ export default function TrainingMonitorPanel({
         {preparation && (
           <div className={`readiness-result ${preparation.status}`} role="status">
             <div><strong>{preparation.status === "ready" ? "Ready on this machine" : "Action needed"}</strong><p>{preparation.summary}</p></div>
-            {preparation.next_action && <div><span>Do this next</span><strong>{preparation.next_action.title}</strong><p>{preparation.next_action.detail}</p></div>}
+            <div><span>Training selected</span><strong>{selectedRecipe?.label}</strong><p>{selectedRecipe?.detail}</p></div>
           </div>
+        )}
+        {preparation?.recipe === "needs_training_data" && (
+          <div className="training-data-guide" role="note">
+            <div className="training-data-guide-heading">
+              <div><span>Do this next</span><strong>{preparation.next_action?.title ?? "Choose how this model will learn"}</strong></div>
+              <button className="secondary-button" type="button" onClick={onOpenData}>Open Data</button>
+            </div>
+            <div className="training-data-options">
+              <section><strong>Accepted examples → QLoRA SFT</strong><p>Add instruction-and-accepted-response JSONL, or choose Accepted changes on a repository and approve useful commits.</p></section>
+              <section><strong>Executable tasks → GRPO</strong><p>Add resettable code tasks with an instruction and an executable verifier that scores the result.</p></section>
+            </div>
+            <p className="training-data-sequence"><strong>Add both:</strong> AutoTrainer runs SFT first, then GRPO continues training the same adapter.</p>
+          </div>
+        )}
+        {preparation?.recipe !== "needs_training_data" && preparation?.next_action && (
+          <div className="training-next-action" role="note"><span>Do this next</span><strong>{preparation.next_action.title}</strong><p>{preparation.next_action.detail}</p></div>
         )}
       </article>
 

@@ -216,6 +216,15 @@ class ProjectServiceTests(unittest.TestCase):
 
         self.assertEqual(result["recipe"], "needs_training_data")
         self.assertEqual(result["next_action"]["title"], "Review accepted changes")
+        self.assertIn("QLoRA", result["next_action"]["detail"])
+
+    def test_missing_training_data_explains_each_training_path(self) -> None:
+        result = self.prepare_with(0, 0)
+
+        self.assertEqual(result["next_action"]["title"], "Choose how this model will learn")
+        detail = result["next_action"]["detail"]
+        for expected in ("Data", "QLoRA SFT", "GRPO", "SFT first"):
+            self.assertIn(expected, detail)
 
     def test_source_failure_invalidates_prior_compiled_provenance(self) -> None:
         report = self.root / ".autotrainer" / "compiled" / "compile-report.json"
