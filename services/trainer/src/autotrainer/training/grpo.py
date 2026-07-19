@@ -248,6 +248,32 @@ def _load_json_dataset(load_dataset: Any, description: Mapping[str, Any]) -> Any
     return load_dataset("json", data_files=description["path"], split="train")
 
 
+def _save_grpo_processing_class(trainer: Any, fallback: Any, destination: Path) -> None:
+    """Persist the exact tokenizer/template contract established by TRL.
+
+    With an environment factory, GRPOTrainer must see the original supported
+    Qwen template so it can add its response schema before deriving the training
+    template. The trainer may retain that final template separately, so copy it
+    onto the processing class that is saved with the adapter.
+    """
+
+    processing_class = getattr(trainer, "processing_class", None) or fallback
+    save_pretrained = getattr(processing_class, "save_pretrained", None)
+    if not callable(save_pretrained):
+        raise TrainingRuntimeError(
+            "GRPOTrainer did not retain a saveable tokenizer processing class"
+        )
+    trainer_template = getattr(trainer, "chat_template", None)
+    if isinstance(trainer_template, str) and trainer_template.strip():
+        processing_class.chat_template = trainer_template
+    saved_template = getattr(processing_class, "chat_template", None)
+    if not isinstance(saved_template, str) or not saved_template.strip():
+        raise TrainingRuntimeError(
+            "GRPOTrainer did not produce a persistent training chat template"
+        )
+    save_pretrained(str(destination))
+
+
 def run_grpo(
     config: Mapping[str, Any],
     *,
@@ -287,7 +313,6 @@ def run_grpo(
             TrainerCallback,
         )
         from trl import GRPOConfig, GRPOTrainer
-        from trl.chat_template_utils import get_training_chat_template
     except (ImportError, OSError) as error:
         raise TrainingDependencyError(
             "The pinned training packages are installed but could not be imported. "
@@ -321,9 +346,6 @@ def run_grpo(
             local_files_only=True,
             trust_remote_code=False,
         )
-        patched_template = get_training_chat_template(processing_class=tokenizer)
-        if patched_template is not None:
-            tokenizer.chat_template = patched_template
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         # GRPO batches variable-length prompts for generation; TRL requires
@@ -446,7 +468,7 @@ def run_grpo(
         )
         train_output = trainer.train()
         trainer.save_model(str(destination))
-        tokenizer.save_pretrained(str(destination))
+        _save_grpo_processing_class(trainer, tokenizer, destination)
         verify_saved_adapter_provenance(
             destination,
             model_recipe["id"],

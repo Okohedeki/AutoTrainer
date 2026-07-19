@@ -51,6 +51,25 @@ class TrainingDependencyContractTests(unittest.TestCase):
         ):
             self.assertIn(name, fields)
 
+    def test_grpo_adds_the_response_schema_before_deriving_training_template(self) -> None:
+        from trl import GRPOTrainer
+
+        source = inspect.getsource(GRPOTrainer.__init__)
+        response_schema = source.find("add_response_schema")
+        training_template = source.find("get_training_chat_template")
+        self.assertGreaterEqual(response_schema, 0)
+        self.assertGreaterEqual(training_template, 0)
+        self.assertLess(response_schema, training_template)
+
+        # AutoTrainer must pass the original pinned tokenizer into that order;
+        # pre-mutating it to a *_training template makes response-schema
+        # detection fail in the pinned TRL release.
+        from autotrainer.training.grpo import run_grpo
+
+        autotrainer_source = inspect.getsource(run_grpo)
+        before_trainer = autotrainer_source.split("trainer = GRPOTrainer", 1)[0]
+        self.assertNotIn("get_training_chat_template", before_trainer)
+
     def test_peft_can_record_the_immutable_base_revision(self) -> None:
         from peft import LoraConfig
 

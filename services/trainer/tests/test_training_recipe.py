@@ -12,6 +12,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.training import (  # noqa: E402
     TrainingConfigurationError,
+    TrainingRuntimeError,
     resolve_grpo_recipe,
     run_grpo,
     run_sft,
@@ -23,6 +24,7 @@ from autotrainer.training.common import (  # noqa: E402
 )
 from autotrainer.training.grpo import (  # noqa: E402
     _load_json_dataset as load_grpo_json_dataset,
+    _save_grpo_processing_class,
 )
 from autotrainer.training.sft import (  # noqa: E402
     _load_json_dataset as load_sft_json_dataset,
@@ -258,6 +260,42 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(len(recipe["grpo"]["dataset"]["sha256"]), 64)
         self.assertEqual(recipe["grpo"]["sft_adapter"]["tree"]["file_count"], 2)
         self.assertEqual(len(recipe["grpo"]["sft_adapter"]["tree"]["sha256"]), 64)
+
+    def test_grpo_persists_the_template_created_by_the_trainer(self) -> None:
+        class ProcessingClass:
+            chat_template = "original-qwen-template"
+
+            def __init__(self) -> None:
+                self.saved_to: str | None = None
+
+            def save_pretrained(self, destination: str) -> None:
+                self.saved_to = destination
+
+        processing_class = ProcessingClass()
+        trainer = MagicMock(
+            processing_class=processing_class,
+            chat_template="trl-response-aware-training-template",
+        )
+        destination = self.project_root / "saved-tokenizer"
+
+        _save_grpo_processing_class(trainer, object(), destination)
+
+        self.assertEqual(
+            processing_class.chat_template,
+            "trl-response-aware-training-template",
+        )
+        self.assertEqual(processing_class.saved_to, str(destination))
+
+    def test_grpo_refuses_to_publish_without_a_persistent_trainer_template(self) -> None:
+        processing_class = MagicMock(chat_template=None)
+        trainer = MagicMock(processing_class=processing_class, chat_template=None)
+
+        with self.assertRaisesRegex(TrainingRuntimeError, "persistent training chat template"):
+            _save_grpo_processing_class(
+                trainer,
+                object(),
+                self.project_root / "saved-tokenizer",
+            )
 
     def test_stage_loaders_reject_dataset_mutation_after_resolution(self) -> None:
         sft_recipe = run_sft(
