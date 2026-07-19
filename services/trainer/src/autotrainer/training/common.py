@@ -504,25 +504,27 @@ def _validate_messages(value: Any, field: str, *, require_assistant: bool) -> No
 
 def inspect_sft_dataset(path: Path) -> dict[str, Any]:
     records = _json_records(path)
-    record = records[0][1]
-    _reject_multimodal(record)
-    try:
-        normalized = normalize_sft_record(record)
-    except ValueError as error:
-        raise TrainingConfigurationError(f"sft.dataset {error}") from error
-    if (
-        "messages" in record
-        or record.get("prompt") != normalized["prompt"]
-        or record.get("completion") != normalized["completion"]
-    ):
-        raise TrainingConfigurationError(
-            "sft.dataset must use compiled conversational prompt and completion message lists"
-        )
+    first_record = records[0][1]
+    for position, record in records:
+        field = f"sft.dataset record {position}"
+        _reject_multimodal(record, field)
+        try:
+            normalized = normalize_sft_record(record)
+        except ValueError as error:
+            raise TrainingConfigurationError(f"{field} {error}") from error
+        if (
+            "messages" in record
+            or record.get("prompt") != normalized["prompt"]
+            or record.get("completion") != normalized["completion"]
+        ):
+            raise TrainingConfigurationError(
+                f"{field} must use compiled conversational prompt and completion message lists"
+            )
     return {
         "path": str(path),
         "format": "conversational-prompt-completion",
         **dataset_file_identity(path, record_count=len(records)),
-        "first_record_fields": sorted(str(key) for key in record),
+        "first_record_fields": sorted(str(key) for key in first_record),
     }
 
 

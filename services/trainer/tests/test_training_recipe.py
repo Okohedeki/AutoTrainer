@@ -155,6 +155,31 @@ class TrainingRecipeTests(unittest.TestCase):
                 dry_run=True,
             )
 
+    def test_sft_dry_run_validates_later_records_before_model_loading(self) -> None:
+        invalid_second = {
+            "messages": [
+                {"role": "user", "content": "Repair the checkout."},
+                {"role": "assistant", "content": "Done."},
+            ]
+        }
+        self.sft_dataset.write_text(
+            self.sft_dataset.read_text(encoding="utf-8")
+            + json.dumps(invalid_second)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            TrainingConfigurationError,
+            "record 2 must use compiled conversational prompt and completion",
+        ):
+            run_sft(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/sft-output"),
+                dry_run=True,
+            )
+
     def test_sft_checks_every_full_conversation_with_the_real_tokenizer_boundary(self) -> None:
         second = {
             "prompt": [{"role": "user", "content": "short task"}],
