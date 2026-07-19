@@ -35,6 +35,7 @@ _ACTION_IDS = frozenset(
         "remove_broken_vllm",
         "install_wsl_ubuntu",
         "install_docker_desktop",
+        "start_docker_desktop",
         "build_runtime_image",
     }
 )
@@ -98,6 +99,23 @@ def _checkout_root() -> Path | None:
     if dockerfile.is_file() and (fixture / "package-lock.json").is_file():
         return candidate
     return None
+
+
+def _docker_desktop_executable() -> Path | None:
+    if platform.system() != "Windows":
+        return None
+    candidate = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
+    return candidate if candidate.is_file() else None
+
+
+def _ensure_docker_cli_on_path() -> None:
+    """Discover Docker installed after this dashboard process started."""
+
+    if platform.system() != "Windows" or shutil.which("docker"):
+        return
+    candidate = Path(r"C:\Program Files\Docker\Docker\resources\bin")
+    if (candidate / "docker.exe").is_file():
+        os.environ["PATH"] = f"{candidate}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
 def _windows_host() -> dict[str, Any]:
@@ -185,6 +203,7 @@ def _broken_optional_vllm(doctor: Mapping[str, Any]) -> str | None:
 def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     """Return Doctor evidence plus only the fixed actions relevant now."""
 
+    _ensure_docker_cli_on_path()
     config = load_config(config_path)
     environment = config.data["environment"]
     backend = str(environment["backend"])
@@ -275,7 +294,18 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
                 restart_required=True,
             )
         )
-    if doctor["sandbox"].get("status") != "ready":
+    docker_desktop = _docker_desktop_executable()
+    if doctor["sandbox"].get("status") != "ready" and docker_desktop is not None:
+        actions.append(
+            _action(
+                "start_docker_desktop",
+                "Start Docker Desktop",
+                "Launch the installed Docker engine, then check again until it is ready.",
+                status="available",
+                command=[str(docker_desktop)],
+            )
+        )
+    elif doctor["sandbox"].get("status") != "ready":
         actions.append(
             _action(
                 "install_docker_desktop",
@@ -379,6 +409,25 @@ def apply_runtime_setup_action_owned(
     environment = os.environ.copy()
     if action_id == "install_training_packages":
         environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    if action_id == "start_docker_desktop":
+        try:
+            subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        except OSError as error:
+            raise RuntimeSetupError(f"Docker Desktop could not start: {error}") from error
+        return {
+            "action_id": action_id,
+            "status": "completed",
+            "message": "Docker Desktop launch requested.",
+            "restart_required": False,
+            "detail": "Check again after the local Docker engine finishes starting.",
+        }
     try:
         completed = subprocess.run(
             command,

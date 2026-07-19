@@ -51,6 +51,7 @@ class RuntimeSetupServiceTests(unittest.TestCase):
             patch("autotrainer.runtime_setup_service.run_doctor", return_value=doctor),
             patch("autotrainer.runtime_setup_service._windows_host", return_value=windows),
             patch("autotrainer.runtime_setup_service._checkout_root", return_value=self.root),
+            patch("autotrainer.runtime_setup_service._docker_desktop_executable", return_value=None),
             patch("autotrainer.runtime_setup_service.shutil.which", return_value="tool.exe"),
         ):
             result = inspect_runtime_setup(self.config_path)
@@ -218,6 +219,34 @@ class RuntimeSetupServiceTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][0], "docker.exe")
         self.assertNotIn("shell", run.call_args.kwargs)
         self.assertEqual(run.call_args.kwargs["cwd"], self.root)
+
+    def test_apply_starts_docker_desktop_without_waiting_for_the_gui_process(self) -> None:
+        selected = {
+            "id": "start_docker_desktop",
+            "title": "Start Docker Desktop",
+            "detail": "Start it.",
+            "status": "available",
+            "command": [r"C:\Program Files\Docker\Docker\Docker Desktop.exe"],
+            "requires_admin": False,
+            "restart_required": False,
+        }
+        with (
+            patch("autotrainer.runtime_setup_service._selected_action", return_value=selected),
+            patch("autotrainer.runtime_setup_service._checkout_root", return_value=self.root),
+            patch(
+                "autotrainer.runtime_setup_service.shutil.which",
+                return_value=selected["command"][0],
+            ),
+            patch("autotrainer.runtime_setup_service.subprocess.Popen") as start,
+        ):
+            result = apply_runtime_setup_action_owned(
+                self.config_path,
+                "start_docker_desktop",
+            )
+
+        self.assertEqual(result["status"], "completed")
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0], selected["command"])
 
     def test_apply_rejects_an_unknown_action_before_execution(self) -> None:
         with self.assertRaisesRegex(RuntimeSetupError, "invalid"):
