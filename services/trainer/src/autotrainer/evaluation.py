@@ -1199,6 +1199,13 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         or not 1 <= max_tool_iterations <= 32
     ):
         raise EvaluationError("grpo.max_tool_calling_iterations must be between 1 and 32")
+    max_completion_tokens = grpo.get("max_completion_length", 2048)
+    if (
+        not isinstance(max_completion_tokens, int)
+        or isinstance(max_completion_tokens, bool)
+        or not 1 <= max_completion_tokens <= 4096
+    ):
+        raise EvaluationError("grpo.max_completion_length must be between 1 and 4096")
     plan_input: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "project": _mapping(config.get("project", {}), "project").get("name"),
@@ -1251,6 +1258,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             # turns as the GRPO recipe. It is part of the plan ID, so changing
             # the training protocol requires a new evaluation plan.
             "max_tool_calling_iterations": max_tool_iterations,
+            "max_completion_tokens": max_completion_tokens,
         },
         "scoring": scorer_identity,
         "fairness": _frozen_fairness(fairness),

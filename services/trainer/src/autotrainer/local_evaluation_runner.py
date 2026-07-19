@@ -203,8 +203,8 @@ _ORCHESTRATION_SPEC = {
     "model_residency": "one-arm-at-a-time-suite-arm-groups",
     "generation": {
         "context_tokens": CONTEXT_TOKENS,
-        "max_input_tokens": MAX_INPUT_TOKENS,
-        "max_new_tokens": MAX_NEW_TOKENS,
+        "max_input_tokens": "context-minus-frozen-completion-budget",
+        "max_new_tokens": "frozen-from-grpo-recipe",
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "seed": "frozen-trial-seed-plus-turn-index",
@@ -875,6 +875,8 @@ def _parse_tool_calls(text: str) -> tuple[str, list[_ToolCall]] | None:
 def _tool_messages_for_context(
     generator: TextGenerator,
     messages: list[dict[str, Any]],
+    *,
+    max_input_tokens: int = MAX_INPUT_TOKENS,
 ) -> tuple[list[dict[str, Any]], int]:
     """Fit tool history using exact tokenizer counts and deterministic pruning."""
 
@@ -885,7 +887,7 @@ def _tool_messages_for_context(
         )
     fitted = json.loads(json.dumps(messages))
     token_count = counter(fitted, _TOOL_SCHEMAS)
-    if token_count <= MAX_INPUT_TOKENS:
+    if token_count <= max_input_tokens:
         return fitted, token_count
 
     tool_indexes = [
@@ -895,7 +897,7 @@ def _tool_messages_for_context(
     for index in tool_indexes[:-1]:
         fitted[index]["content"] = marker
         token_count = counter(fitted, _TOOL_SCHEMAS)
-        if token_count <= MAX_INPUT_TOKENS:
+        if token_count <= max_input_tokens:
             return fitted, token_count
 
     if tool_indexes:
@@ -907,7 +909,7 @@ def _tool_messages_for_context(
             middle = (low + high) // 2
             fitted[index]["content"] = original[:middle] + "\n[Tool output truncated.]"
             candidate_tokens = counter(fitted, _TOOL_SCHEMAS)
-            if candidate_tokens <= MAX_INPUT_TOKENS:
+            if candidate_tokens <= max_input_tokens:
                 best = (json.loads(json.dumps(fitted)), candidate_tokens)
                 low = middle + 1
             else:
@@ -967,6 +969,24 @@ class BuiltinEvaluationProducer:
                 "the frozen evaluation tool-iteration limit is invalid"
             )
         self._max_tool_calling_iterations = iterations
+        completion_tokens = (
+            environment.get("max_completion_tokens", MAX_NEW_TOKENS)
+            if isinstance(environment, Mapping)
+            else MAX_NEW_TOKENS
+        )
+        if (
+            not isinstance(completion_tokens, int)
+            or isinstance(completion_tokens, bool)
+            or not 1 <= completion_tokens <= 4096
+        ):
+            raise LocalEvaluationRunnerError(
+                "the frozen evaluation completion-token limit is invalid"
+            )
+        # The completion budget is frozen from the GRPO recipe. Reserving it
+        # before fitting each tool turn keeps training and evaluation on the
+        # same 8K context contract instead of silently using a fixed default.
+        self._max_completion_tokens = completion_tokens
+        self._max_input_tokens = CONTEXT_TOKENS - completion_tokens
         self._runtimes: dict[str, ArmRuntime] = {}
         self._active_arm: str | None = None
         self._generator: TextGenerator | None = None
@@ -1113,8 +1133,12 @@ class BuiltinEvaluationProducer:
             total_output_tokens = 0
             tool_calls = 0
             for turn in range(self._max_tool_calling_iterations):
-                fitted, expected_input = _tool_messages_for_context(generator, messages)
-                remaining = MAX_NEW_TOKENS - total_output_tokens
+                fitted, expected_input = _tool_messages_for_context(
+                    generator,
+                    messages,
+                    max_input_tokens=self._max_input_tokens,
+                )
+                remaining = self._max_completion_tokens - total_output_tokens
                 if remaining <= 0:
                     break
                 try:
@@ -1138,7 +1162,7 @@ class BuiltinEvaluationProducer:
                     or input_tokens < 0
                     or output_tokens < 0
                     or input_tokens != expected_input
-                    or input_tokens > MAX_INPUT_TOKENS
+                    or input_tokens > self._max_input_tokens
                     or input_tokens + remaining > CONTEXT_TOKENS
                     or output_tokens > remaining
                 ):

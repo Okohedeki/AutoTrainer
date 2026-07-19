@@ -71,6 +71,7 @@ def _request(arm_id: str = "candidate") -> dict:
 class _FakeGenerator:
     def __init__(self) -> None:
         self.messages: list[list[dict[str, Any]]] = []
+        self.max_token_budgets: list[int] = []
         self.calls = 0
 
     def count_tokens(self, messages: list[dict[str, str]]) -> int:
@@ -121,9 +122,10 @@ class _FakeGenerator:
         top_p: float,
         seed: int | None,
     ) -> tuple[str, int, int]:
-        del max_tokens, temperature, top_p, seed
+        del temperature, top_p, seed
         input_tokens = self.count_tokens_with_tools(messages, tools)
         self.messages.append(messages)
+        self.max_token_budgets.append(max_tokens)
         call = self.calls
         self.calls += 1
         if call % 2:
@@ -468,6 +470,45 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             producer.produce(_request("reference"), root / "third" / "result.json")
             self.assertEqual(loaded, ["candidate", "reference"])
             producer.close()
+
+    def test_producer_honors_frozen_grpo_turn_and_completion_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = ArmRuntime(
+                arm_id="candidate",
+                model_id="org/candidate-9b",
+                revision=REVISION,
+                snapshot_path=root,
+                adapter_name="base",
+                adapter_path=None,
+                adapter_sha256=None,
+            )
+            generator = _FakeGenerator()
+            producer = BuiltinEvaluationProducer(
+                {"model": {}},
+                root,
+                {
+                    "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "environment": {
+                        "max_tool_calling_iterations": 1,
+                        "max_completion_tokens": 128,
+                    },
+                },
+                model_loader=lambda _spec: generator,
+                runtime_resolver=lambda _config, _root, _arm: runtime,
+                environment_factory=_FakeEnvironment,
+            )
+
+            producer.produce(_request("candidate"), root / "result.json")
+
+            # One GRPO tool turn is permitted and the generation call receives
+            # the exact completion budget frozen into the evaluation plan.
+            self.assertEqual(generator.calls, 1)
+            self.assertEqual(generator.max_token_budgets, [128])
+            self.assertEqual(
+                json.loads((root / "result.json").read_text(encoding="utf-8"))["status"],
+                "completed",
+            )
 
     def test_adapter_mutation_after_preflight_is_refused_before_model_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

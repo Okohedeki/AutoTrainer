@@ -400,9 +400,13 @@ class EvaluationPlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             config = _config(root)
+            config["grpo"]["max_tool_calling_iterations"] = 3
+            config["grpo"]["max_completion_length"] = 512
             first = build_evaluation_plan(config, root)
             second = build_evaluation_plan(config, root)
             self.assertEqual(first, second)
+            self.assertEqual(first["environment"]["max_tool_calling_iterations"], 3)
+            self.assertEqual(first["environment"]["max_completion_tokens"], 512)
             self.assertEqual(first["holdout"]["unit"], "repository")
             self.assertEqual(
                 first["holdout"]["training_repository_identities"],
