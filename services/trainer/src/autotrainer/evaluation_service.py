@@ -29,7 +29,9 @@ from .evaluation import (
     EvaluationError,
     EvaluationProgressCallback,
     RESULT_COMPONENTS,
+    build_evaluation_reports,
     load_current_plan,
+    load_validated_scored_results,
     run_command_suite,
     write_evaluation_plan,
 )
@@ -169,25 +171,22 @@ def _safe_result(value: object, trial: Mapping[str, Any] | None = None) -> dict[
 def _suite_results(
     plan: Mapping[str, Any], run_dir: Path, suite_id: str
 ) -> list[dict[str, Any]]:
-    """Read only valid, planned scored rows in deterministic trial order."""
+    """Project seal-validated scored rows in deterministic trial order."""
 
     results: list[dict[str, Any]] = []
-    scored_dir = run_dir / "scored-trials"
+    try:
+        validated = load_validated_scored_results(plan, run_dir)
+    except EvaluationError as error:
+        raise EvaluationServiceError(str(error)) from error
     for raw_trial in plan.get("trials", []):
         if not isinstance(raw_trial, Mapping) or raw_trial.get("suite_id") != suite_id:
             continue
         trial = _safe_trial(raw_trial)
         if trial is None:
             raise EvaluationServiceError("The frozen evaluation plan contains an invalid trial.")
-        path = scored_dir / f"{trial['trial_id']}.json"
-        if not path.is_file():
+        value = validated.get(trial["trial_id"])
+        if value is None:
             continue
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise EvaluationServiceError(
-                f"A scored evaluation result is unreadable: {path.name}"
-            ) from error
         result = _safe_result(value, trial)
         if (
             result is None
@@ -196,7 +195,8 @@ def _suite_results(
             or set(result["components"]) != set(RESULT_COMPONENTS)
         ):
             raise EvaluationServiceError(
-                f"A scored evaluation result does not match its frozen trial: {path.name}"
+                "A scored evaluation result does not match its frozen trial: "
+                f"{trial['trial_id']}"
             )
         results.append(result)
     return results
@@ -475,9 +475,14 @@ def run_project_evaluation(
     resume: bool = True,
     on_progress: EvaluationProgressCallback | None = None,
 ) -> dict[str, Any]:
-    """Run one command-backed suite while holding the project snapshot stable."""
+    """Run one suite with the same project and GPU ownership in every client.
 
-    with project_run_gate(config_path):
+    The GUI reserves transferable leases before it publishes a queued job. The
+    CLI enters this function directly. Both paths therefore pass through these
+    re-entrant gates, so neither can load a second 9B model onto GPU 0.
+    """
+
+    with project_run_gate(config_path), device_run_gate():
         config = _load_project(config_path)
         return run_command_suite(
             config.data,
@@ -549,22 +554,147 @@ def _review_counts(run_dir: Path, suite_id: str, expected_pairs: int, reviewers:
     }
 
 
-def _report_is_current(
-    run_dir: Path, suite_id: str, *, completed: int, total: int
-) -> bool:
-    """Accept a report marker only when its recorded completeness is current."""
+def _safe_signed_rate(value: object) -> float | None:
+    """Accept a finite comparison delta while rejecting arbitrary report data."""
 
-    path = run_dir / "reports" / f"{suite_id}.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        completeness = value.get("completeness", {})
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-        return False
-    return bool(
-        isinstance(completeness, Mapping)
-        and completeness.get("completed_trials") == completed
-        and completeness.get("expected_trials") == total
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and -1 <= number <= 1 else None
+
+
+def _safe_rate(value: object) -> float | None:
+    number = _safe_signed_rate(value)
+    return number if number is not None and number >= 0 else None
+
+
+def _safe_report_summary(
+    value: object,
+    suite_id: str,
+    *,
+    plan_id: str,
+    completed: int,
+    total: int,
+) -> dict[str, Any] | None:
+    """Project the immutable comparison report into a small localhost contract.
+
+    Reports contain model metadata and verifier details that the evaluation UI
+    does not need. This whitelist exposes only descriptive arm summaries and
+    the already-computed paired decision; the browser never reimplements the
+    statistical test or receives evidence paths.
+    """
+
+    if not isinstance(value, Mapping) or value.get("suite_id") != suite_id:
+        return None
+    completeness = value.get("completeness")
+    if not isinstance(completeness, Mapping):
+        return None
+    expected = _safe_integer(completeness.get("expected_trials"))
+    observed = _safe_integer(completeness.get("completed_trials"))
+    rate = _safe_rate(completeness.get("rate"))
+    if expected != total or observed != completed or rate is None:
+        return None
+
+    public_candidates: list[dict[str, Any]] = []
+    comparison = value.get("comparison")
+    if isinstance(comparison, Mapping):
+        raw_candidates = comparison.get("candidates")
+        if isinstance(raw_candidates, list):
+            for raw_candidate in raw_candidates:
+                if not isinstance(raw_candidate, Mapping):
+                    continue
+                candidate_id = raw_candidate.get("candidate_id")
+                label = raw_candidate.get("label")
+                rank = raw_candidate.get("rank")
+                hard_gate = raw_candidate.get("hard_gate")
+                reward = raw_candidate.get("reward")
+                if (
+                    not isinstance(candidate_id, str)
+                    or not _SAFE_ID.fullmatch(candidate_id)
+                    or not isinstance(label, str)
+                    or not isinstance(rank, int)
+                    or isinstance(rank, bool)
+                    or rank < 1
+                    or not isinstance(hard_gate, Mapping)
+                    or not isinstance(reward, Mapping)
+                ):
+                    continue
+                pass_rate = _safe_rate(hard_gate.get("pass_rate"))
+                reward_mean = _safe_rate(reward.get("mean"))
+                if pass_rate is None or reward_mean is None:
+                    continue
+                public_candidates.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "label": _redact(label, limit=120),
+                        "rank": rank,
+                        "hard_gate_pass_rate": pass_rate,
+                        "reward_mean": reward_mean,
+                    }
+                )
+
+    decision_value = value.get("decision")
+    if not isinstance(decision_value, Mapping):
+        return None
+    decision: dict[str, Any] = {
+        "metric": _redact(decision_value.get("metric", "unknown"), limit=80),
+        "observed_better": decision_value.get("observed_better") is True,
+        "verified_better": decision_value.get("verified_better") is True,
+    }
+    for name in ("candidate", "control"):
+        item = decision_value.get(name)
+        if isinstance(item, str) and _SAFE_ID.fullmatch(item):
+            decision[name] = item
+    for name in ("task_count", "minimum_tasks"):
+        item = decision_value.get(name)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            decision[name] = item
+    for name in ("delta", "minimum_delta"):
+        item = _safe_signed_rate(decision_value.get(name))
+        if item is not None:
+            decision[name] = item
+
+    interval_value = decision_value.get("confidence_interval")
+    interval = None
+    if isinstance(interval_value, Mapping):
+        low = _safe_signed_rate(interval_value.get("low"))
+        high = _safe_signed_rate(interval_value.get("high"))
+        confidence = _safe_rate(interval_value.get("confidence"))
+        method = interval_value.get("method")
+        if (
+            low is not None
+            and high is not None
+            and low <= high
+            and confidence is not None
+            and isinstance(method, str)
+        ):
+            interval = {
+                "low": low,
+                "high": high,
+                "confidence": confidence,
+                "method": _redact(method, limit=120),
+            }
+    decision["confidence_interval"] = interval
+    return {
+        "plan_id": plan_id,
+        "completeness": {
+            "expected_trials": expected,
+            "completed_trials": observed,
+            "rate": rate,
+            "fairness_passed": completeness.get("fairness_passed") is True,
+        },
+        "comparison": {
+            "winner_candidate_id": (
+                comparison.get("winner_candidate_id")
+                if isinstance(comparison, Mapping)
+                and isinstance(comparison.get("winner_candidate_id"), str)
+                and _SAFE_ID.fullmatch(str(comparison.get("winner_candidate_id")))
+                else None
+            ),
+            "candidates": public_candidates,
+        },
+        "decision": decision,
+    }
 
 
 def _suite_snapshot(
@@ -572,6 +702,7 @@ def _suite_snapshot(
     run_dir: Path,
     suite_id: str,
     job: Mapping[str, Any],
+    reports: Mapping[str, Any],
 ) -> dict[str, Any]:
     suite = plan.get("suites", {}).get(suite_id, {})
     if not isinstance(suite, Mapping):
@@ -587,9 +718,14 @@ def _suite_snapshot(
     total = len(trials)
     scored = _suite_results(plan, run_dir, suite_id)
     completed = len(scored)
-    report_exists = _report_is_current(
-        run_dir, suite_id, completed=completed, total=total
+    report = _safe_report_summary(
+        reports.get(suite_id),
+        suite_id,
+        plan_id=str(plan.get("plan_id", "")),
+        completed=completed,
+        total=total,
     )
+    report_exists = report is not None
 
     review = None
     if kind == "fable_ab":
@@ -600,6 +736,12 @@ def _suite_snapshot(
             else 1
         )
         review = _review_counts(run_dir, suite_id, total // 2, max(1, reviewers))
+        # Building the local model report may also write an incomplete Fable
+        # report. Do not let that administrative artifact reveal arm identity
+        # before the configured blind review has actually completed.
+        if not review["complete"]:
+            report = None
+            report_exists = False
 
     if total == 0:
         phase = "blocked"
@@ -655,6 +797,26 @@ def _suite_snapshot(
     trials_truncated = False
     if runner_type in {"builtin", "command"}:
         public_trials, trials_truncated = _planned_trials(trials, scored, job, suite_id)
+    public_arms: list[dict[str, str]] = []
+    if kind != "fable_ab":
+        plan_arms = plan.get("arms", {})
+        for arm_id in suite.get("arms", []):
+            arm = plan_arms.get(arm_id) if isinstance(plan_arms, Mapping) else None
+            if (
+                not isinstance(arm_id, str)
+                or not _SAFE_ID.fullmatch(arm_id)
+                or not isinstance(arm, Mapping)
+            ):
+                continue
+            label = arm.get("label")
+            role = arm.get("role")
+            public_arms.append(
+                {
+                    "id": arm_id,
+                    "label": _redact(label if isinstance(label, str) else arm_id, limit=120),
+                    "role": _redact(role if isinstance(role, str) else "unknown", limit=80),
+                }
+            )
     return {
         "id": suite_id,
         "kind": kind,
@@ -673,11 +835,41 @@ def _suite_snapshot(
         # blind-review arms stay withheld.
         "trials": public_trials,
         "trials_truncated": trials_truncated,
+        "arms": public_arms,
         "results": public_results,
         "results_truncated": len(scored) > len(public_results) and kind != "fable_ab",
         "results_withheld_for_blind_review": kind == "fable_ab" and bool(scored),
         "review": review,
+        "report": report,
     }
+
+
+def _reports_published(run_dir: Path) -> bool:
+    """A report remains an explicit action, even though its bytes are untrusted."""
+
+    reports = run_dir / "reports"
+    return reports.is_dir() and any(reports.glob("*.json"))
+
+
+def _report_inputs_key(plan: Mapping[str, Any], run_dir: Path) -> tuple[Any, ...]:
+    """Cheap cache identity; content is still fully validated on every cache miss."""
+
+    paths = list((run_dir / "scored-trials").glob("*.json"))
+    review_root = run_dir / "reviews"
+    if review_root.is_dir():
+        paths.extend(path for path in review_root.rglob("*") if path.is_file())
+    entries: list[tuple[str, int, int]] = []
+    for path in sorted(paths):
+        try:
+            stat = path.stat()
+            entries.append(
+                (path.relative_to(run_dir).as_posix(), stat.st_size, stat.st_mtime_ns)
+            )
+        except (OSError, ValueError) as error:
+            raise EvaluationServiceError(
+                "Evaluation report inputs changed while they were being inspected."
+            ) from error
+    return (str(plan.get("plan_id", "")), *entries)
 
 
 class EvaluationJobManager:
@@ -690,6 +882,9 @@ class EvaluationJobManager:
         self._record_path = config.artifact_dir / "evaluation" / "current-job.json"
         self._events_path = config.artifact_dir / "evaluation" / "events.json"
         self._worker: Thread | None = None
+        self._reports_lock = Lock()
+        self._reports_cache_key: tuple[Any, ...] | None = None
+        self._reports_cache: dict[str, Any] = {}
         self._events, self._next_event_sequence = _read_event_record(self._events_path)
         self._job = _read_job_record(self._record_path) or _idle_job()
         if self._job["status"] in _LIVE_JOB_STATUSES and not project_is_busy(
@@ -754,8 +949,29 @@ class EvaluationJobManager:
             }
         plan, run_dir = load_current_plan(config.data, config.root)
         plan_id = str(plan["plan_id"])
+        reports: dict[str, Any] = {}
+        if _reports_published(run_dir):
+            key = _report_inputs_key(plan, run_dir)
+            with self._reports_lock:
+                if key != self._reports_cache_key:
+                    # Never trust the derived JSON file. Recompute the UI
+                    # projection from sealed scored rows and frozen plan bytes;
+                    # the read-only mode leaves the workspace untouched.
+                    computed = build_evaluation_reports(
+                        config.data,
+                        config.root,
+                        write_artifacts=False,
+                    )
+                    raw_reports = computed.get("suites", {})
+                    if not isinstance(raw_reports, Mapping):
+                        raise EvaluationServiceError(
+                            "Evaluation report computation returned invalid suites."
+                        )
+                    self._reports_cache = deepcopy(dict(raw_reports))
+                    self._reports_cache_key = key
+                reports = deepcopy(self._reports_cache)
         suites = [
-            _suite_snapshot(plan, run_dir, suite_id, job)
+            _suite_snapshot(plan, run_dir, suite_id, job, reports)
             for suite_id in sorted(plan.get("suites", {}))
         ]
         return {
@@ -835,13 +1051,16 @@ class EvaluationJobManager:
             try:
                 with lease.activate("run"):
                     plan = plan_project_evaluation(self._config_path)
+                with self._reports_lock:
+                    self._reports_cache_key = None
+                    self._reports_cache = {}
                 self._job = _idle_job(plan_id=str(plan["plan_id"]))
                 _write_job_record(self._record_path, self._job)
             finally:
                 lease.release()
         return self.workspace()
 
-    def start(self, suite_id: str) -> dict[str, Any]:
+    def start(self, suite_id: str, *, resume: bool = True) -> dict[str, Any]:
         """Queue a local built-in/command producer; external suites cannot start here."""
 
         suite_name = str(suite_id).strip()
@@ -895,7 +1114,7 @@ class EvaluationJobManager:
                 self._append_event_locked("queued")
                 worker = Thread(
                     target=self._run,
-                    args=(job_id, suite_name, lease, device_lease),
+                    args=(job_id, suite_name, resume, lease, device_lease),
                     name=f"autotrainer-eval-{job_id[:8]}",
                     daemon=False,
                 )
@@ -924,6 +1143,7 @@ class EvaluationJobManager:
         self,
         job_id: str,
         suite_id: str,
+        resume: bool,
         lease: ProjectLease,
         device_lease: DeviceLease,
     ) -> None:
@@ -988,7 +1208,7 @@ class EvaluationJobManager:
                     result = run_project_evaluation(
                         self._config_path,
                         suite_id,
-                        resume=True,
+                        resume=resume,
                         on_progress=progress,
                     )
                     config = _load_project(self._config_path)
@@ -999,6 +1219,14 @@ class EvaluationJobManager:
                         raise EvaluationServiceError(
                             "The local producer returned without one trusted result per trial."
                         )
+                    # The comparison core remains the only owner of paired
+                    # bootstrap statistics. Publish its current report before
+                    # declaring the durable job complete so every client sees
+                    # the same final decision on its next read.
+                    build_evaluation_reports(config.data, config.root)
+                    with self._reports_lock:
+                        self._reports_cache_key = None
+                        self._reports_cache = {}
                     self._update(
                         job_id,
                         event_phase="completed",

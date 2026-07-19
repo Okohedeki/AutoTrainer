@@ -5,7 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from threading import Event
@@ -528,6 +528,60 @@ class TrainingServiceTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn('"recipe": "teach"', output.getvalue())
         run.assert_called_once_with(self.config_path)
+
+    def test_direct_cli_sft_owns_the_project_and_gpu(self) -> None:
+        loaded = load_config(self.config_path)
+        completed = {"status": "completed", "stage": "sft"}
+        with (
+            patch("autotrainer.cli.load_config", return_value=loaded),
+            patch(
+                "autotrainer.project_gate.project_run_gate",
+                return_value=nullcontext(),
+            ) as project_gate,
+            patch(
+                "autotrainer.device_gate.device_run_gate",
+                return_value=nullcontext(),
+            ) as device_gate,
+            patch("autotrainer.training.run_sft", return_value=completed) as run_sft,
+            redirect_stdout(StringIO()),
+        ):
+            exit_code = main(
+                ["train", "sft", "--config", str(self.config_path), "--json"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        project_gate.assert_called_once_with(self.config_path)
+        device_gate.assert_called_once_with()
+        run_sft.assert_called_once()
+
+    def test_direct_cli_dry_run_does_not_reserve_the_gpu(self) -> None:
+        loaded = load_config(self.config_path)
+        resolved = {"status": "dry_run", "dry_run": True, "recipe": {}}
+        with (
+            patch("autotrainer.cli.load_config", return_value=loaded),
+            patch(
+                "autotrainer.project_gate.project_run_gate",
+                return_value=nullcontext(),
+            ) as project_gate,
+            patch("autotrainer.device_gate.device_run_gate") as device_gate,
+            patch("autotrainer.training.run_grpo", return_value=resolved) as run_grpo,
+            redirect_stdout(StringIO()),
+        ):
+            exit_code = main(
+                [
+                    "train",
+                    "rl",
+                    "--dry-run",
+                    "--config",
+                    str(self.config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        project_gate.assert_called_once_with(self.config_path)
+        device_gate.assert_not_called()
+        run_grpo.assert_called_once()
 
 
 if __name__ == "__main__":

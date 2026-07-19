@@ -2488,9 +2488,17 @@ def _review_summary(plan: Mapping[str, Any], run_dir: Path, suite_id: str) -> di
 
 
 def build_evaluation_reports(
-    config: Mapping[str, Any], project_root: Path
+    config: Mapping[str, Any],
+    project_root: Path,
+    *,
+    write_artifacts: bool = True,
 ) -> dict[str, Any]:
-    """Report each suite separately and gate every verified improvement claim."""
+    """Compute each suite decision, optionally publishing derived report files.
+
+    Localhost clients use the pure projection so a hand-edited report can never
+    become UI evidence. CLI report commands retain the durable JSON/Markdown
+    artifacts by using the default ``write_artifacts=True``.
+    """
 
     plan, run_dir = load_current_plan(config, project_root)
     scored = _load_scored(plan, run_dir)
@@ -2526,13 +2534,14 @@ def build_evaluation_reports(
             }
             all_verified = False
             suite_reports[suite_id] = suite_report
-            _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
-            _atomic_text(
-                run_dir / "reports" / f"{suite_id}.md",
-                "# Deferred evaluation suite\n\n"
-                + "\n".join(f"- {item}" for item in blockers)
-                + "\n",
-            )
+            if write_artifacts:
+                _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
+                _atomic_text(
+                    run_dir / "reports" / f"{suite_id}.md",
+                    "# Deferred evaluation suite\n\n"
+                    + "\n".join(f"- {item}" for item in blockers)
+                    + "\n",
+                )
             continue
         payload, completeness = _suite_payload(plan, suite_id, scored)
         comparison = compare_benchmark(payload)
@@ -2609,16 +2618,17 @@ def build_evaluation_reports(
                 "paired_bootstrap_confidence": confidence
             }
         suite_reports[suite_id] = suite_report
-        _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
-        markdown = render_benchmark_markdown(comparison)
-        markdown += (
-            "\n## Decision\n\n"
-            f"- Observed better: **{str(decision['observed_better']).lower()}**\n"
-            f"- Verified better: **{str(decision['verified_better']).lower()}**\n"
-            f"- Complete trials: {completeness['completed_trials']}/{completeness['expected_trials']}\n"
-            f"- Fairness passed: **{str(completeness['fairness_passed']).lower()}**\n"
-        )
-        _atomic_text(run_dir / "reports" / f"{suite_id}.md", markdown)
+        if write_artifacts:
+            _write_json(run_dir / "reports" / f"{suite_id}.json", suite_report)
+            markdown = render_benchmark_markdown(comparison)
+            markdown += (
+                "\n## Decision\n\n"
+                f"- Observed better: **{str(decision['observed_better']).lower()}**\n"
+                f"- Verified better: **{str(decision['verified_better']).lower()}**\n"
+                f"- Complete trials: {completeness['completed_trials']}/{completeness['expected_trials']}\n"
+                f"- Fairness passed: **{str(completeness['fairness_passed']).lower()}**\n"
+            )
+            _atomic_text(run_dir / "reports" / f"{suite_id}.md", markdown)
     summary = {
         "schema_version": SCHEMA_VERSION,
         "plan_id": plan["plan_id"],
@@ -2626,8 +2636,20 @@ def build_evaluation_reports(
         "v1_success_criteria_verified": all_verified and bool(suite_reports),
         "suites": suite_reports,
     }
-    _write_json(run_dir / "summary.json", summary)
-    return {**summary, "artifact": str(run_dir / "summary.json")}
+    if write_artifacts:
+        _write_json(run_dir / "summary.json", summary)
+    return {
+        **summary,
+        "artifact": str(run_dir / "summary.json") if write_artifacts else None,
+    }
+
+
+def load_validated_scored_results(
+    plan: Mapping[str, Any], run_dir: Path
+) -> dict[str, dict[str, Any]]:
+    """Public read-only projection of sealed scored evidence for local clients."""
+
+    return _load_scored(plan, Path(run_dir))
 
 
 def export_blind_review(
@@ -3042,6 +3064,7 @@ __all__ = [
     "import_blind_reviews",
     "ingest_evaluation_results",
     "load_current_plan",
+    "load_validated_scored_results",
     "run_command_suite",
     "write_evaluation_plan",
 ]

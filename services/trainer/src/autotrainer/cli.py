@@ -655,33 +655,48 @@ def _run_train(arguments: argparse.Namespace) -> int:
         _emit(run_project_training(arguments.config), as_json=arguments.json)
         return 0
 
-    config = load_config(arguments.config, check_paths=True)
-    if arguments.train_command == "sft":
-        from .training import run_sft
+    from .device_gate import device_run_gate
+    from .project_gate import project_run_gate
 
-        output = config.resolve_path(config.data["sft"]["output_dir"])
-        result = run_sft(
-            config.data,
-            project_root=config.root,
-            output_dir=output,
-            dry_run=arguments.dry_run,
-        )
-    else:
+    def run_stage() -> dict[str, Any]:
+        # Load the YAML only after the project lease is active. Otherwise a GUI
+        # setup mutation could win the race between CLI parsing and model load.
+        config = load_config(arguments.config, check_paths=True)
+        if arguments.train_command == "sft":
+            from .training import run_sft
+
+            output = config.resolve_path(config.data["sft"]["output_dir"])
+            return run_sft(
+                config.data,
+                project_root=config.root,
+                output_dir=output,
+                dry_run=arguments.dry_run,
+            )
+
         from .training import run_grpo
 
         output = config.resolve_path(config.data["grpo"]["output_dir"])
-        result = run_grpo(
+        return run_grpo(
             config.data,
             project_root=config.root,
             output_dir=output,
             dry_run=arguments.dry_run,
         )
+
+    # Static dry-runs protect the project snapshot but do not claim a GPU they
+    # never touch. Real direct stages share GPU 0 ownership with GUI training,
+    # local evaluation, and hosting.
+    with project_run_gate(arguments.config):
+        if arguments.dry_run:
+            result = run_stage()
+        else:
+            with device_run_gate():
+                result = run_stage()
     _emit(result, as_json=arguments.json)
     return 0
 
 
 def _run_evaluate(arguments: argparse.Namespace) -> int:
-    config = load_config(arguments.config, check_paths=True)
     from .evaluation import (
         build_evaluation_plan,
         build_evaluation_reports,
@@ -690,54 +705,75 @@ def _run_evaluate(arguments: argparse.Namespace) -> int:
         import_blind_reviews,
         ingest_evaluation_results,
     )
-    from .evaluation_service import plan_project_evaluation, run_project_evaluation
+    from .evaluation_service import EvaluationJobManager, plan_project_evaluation
+    from .project_gate import project_run_gate
+
+    exit_code = 0
 
     if arguments.evaluate_command == "plan":
-        result = (
-            plan_project_evaluation(config.path)
-            if arguments.write
-            else build_evaluation_plan(config.data, config.root)
-        )
+        if arguments.write:
+            result = plan_project_evaluation(arguments.config)
+        else:
+            with project_run_gate(arguments.config):
+                config = load_config(arguments.config, check_paths=True)
+                result = build_evaluation_plan(config.data, config.root)
     elif arguments.evaluate_command == "run":
-        result = run_project_evaluation(
-            config.path,
-            arguments.suite,
-            resume=arguments.resume,
-        )
+        # Agents and humans use the same durable worker, leases, progress log,
+        # and terminal state. `close` waits for this CLI invocation without
+        # turning the browser API into a blocking endpoint.
+        manager = EvaluationJobManager(arguments.config)
+        try:
+            manager.start(arguments.suite, resume=arguments.resume)
+            manager.close()
+            result = manager.snapshot()
+        finally:
+            manager.close()
+        if result.get("status") != "completed":
+            exit_code = 3
     elif arguments.evaluate_command == "export":
-        result = export_evaluation_suite(
-            config.data,
-            config.root,
-            arguments.suite,
-            arguments.output,
-        )
+        with project_run_gate(arguments.config):
+            config = load_config(arguments.config, check_paths=True)
+            result = export_evaluation_suite(
+                config.data,
+                config.root,
+                arguments.suite,
+                arguments.output,
+            )
     elif arguments.evaluate_command == "ingest":
-        result = ingest_evaluation_results(
-            config.data,
-            config.root,
-            arguments.suite,
-            arguments.input,
-        )
+        with project_run_gate(arguments.config):
+            config = load_config(arguments.config, check_paths=True)
+            result = ingest_evaluation_results(
+                config.data,
+                config.root,
+                arguments.suite,
+                arguments.input,
+            )
     elif arguments.evaluate_command == "report":
-        result = build_evaluation_reports(config.data, config.root)
+        with project_run_gate(arguments.config):
+            config = load_config(arguments.config, check_paths=True)
+            result = build_evaluation_reports(config.data, config.root)
     elif arguments.evaluate_command == "review" and arguments.review_command == "export":
-        result = export_blind_review(
-            config.data,
-            config.root,
-            arguments.suite,
-            arguments.output,
-        )
+        with project_run_gate(arguments.config):
+            config = load_config(arguments.config, check_paths=True)
+            result = export_blind_review(
+                config.data,
+                config.root,
+                arguments.suite,
+                arguments.output,
+            )
     elif arguments.evaluate_command == "review" and arguments.review_command == "import":
-        result = import_blind_reviews(
-            config.data,
-            config.root,
-            arguments.suite,
-            arguments.input,
-        )
+        with project_run_gate(arguments.config):
+            config = load_config(arguments.config, check_paths=True)
+            result = import_blind_reviews(
+                config.data,
+                config.root,
+                arguments.suite,
+                arguments.input,
+            )
     else:
         raise ConfigError(f"unhandled evaluation command: {arguments.evaluate_command}")
     _emit(result, as_json=arguments.json)
-    return 0
+    return exit_code
 
 
 def _run_package(arguments: argparse.Namespace) -> int:

@@ -4,22 +4,32 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext, redirect_stdout
+from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import default_config, load_config, write_config  # noqa: E402
-from autotrainer.evaluation import load_current_plan  # noqa: E402
+from autotrainer.cli import main as cli_main  # noqa: E402
+from autotrainer.evaluation import (  # noqa: E402
+    _producer_fairness,
+    _seal_scored_result,
+    load_current_plan,
+)
 from autotrainer.evaluation_service import (  # noqa: E402
     EvaluationJobManager,
     EvaluationServiceError,
+    run_project_evaluation,
 )
 
 # Reuse the independently tested held-out task and compiler-provenance fixtures.
 from test_evaluation_workflow import (  # noqa: E402
+    EVALUATION_TASK_IDS,
+    IMAGE_ID,
     ORCHESTRATION,
     REVISION,
     _task,
@@ -34,6 +44,8 @@ def _project(root: Path) -> Path:
     config["evaluation"]["dataset"] = ".artifacts/compiled/rl/evaluation.jsonl"
     config["evaluation"]["repetitions"] = 1
     config["evaluation"]["seeds"] = [1701]
+    config["sft"]["enabled"] = False
+    config["environment"]["image"] = IMAGE_ID
     reference = config["evaluation"]["arms"]["reference_9b"]["model"]
     reference["id"] = "Qwen/Qwen3.5-9B"
     reference["revision"] = REVISION
@@ -44,17 +56,32 @@ def _project(root: Path) -> Path:
     adapter_value = config["evaluation"]["arms"]["autotrainer"]["adapter"]["path"]
     adapter = (root / adapter_value).resolve()
     adapter.mkdir(parents=True)
-    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": "Qwen/Qwen3.5-9B"}),
+        encoding="utf-8",
+    )
     (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
+    (adapter / "resolved_recipe.json").write_text(
+        json.dumps(
+            {
+                "stage": "grpo",
+                "model": {"id": "Qwen/Qwen3.5-9B", "revision": REVISION},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     compiled = root / ".artifacts" / "compiled" / "rl"
     compiled.mkdir(parents=True)
     (compiled / "evaluation.jsonl").write_text(
-        "".join(json.dumps(_task(task_id)) + "\n" for task_id in ("checkout", "pricing")),
+        "".join(
+            json.dumps(_task(task_id, root=root)) + "\n"
+            for task_id in EVALUATION_TASK_IDS
+        ),
         encoding="utf-8",
     )
     (compiled / "train.jsonl").write_text(
-        json.dumps(_task("training", split="train")) + "\n",
+        json.dumps(_task("training", split="train", root=root)) + "\n",
         encoding="utf-8",
     )
     _write_compile_provenance(root)
@@ -75,6 +102,8 @@ def _write_scored_results(
     callback = on_progress
     scored_dir = run_dir / "scored-trials"
     scored_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = run_dir / "raw" / suite_id
+    raw_dir.mkdir(parents=True, exist_ok=True)
     for index, trial in enumerate(trials, start=1):
         callback(
             {
@@ -92,7 +121,31 @@ def _write_scored_results(
                 "total": len(trials),
             }
         )
-        value = {
+        arm = plan["arms"][trial["arm_id"]]
+        runner = plan["suites"][suite_id]["runner"]
+        raw = {
+            "schema_version": 1,
+            "plan_id": plan["plan_id"],
+            "trial_id": trial["trial_id"],
+            "suite_id": suite_id,
+            "arm_id": trial["arm_id"],
+            "task_id": trial["task_id"],
+            "repetition": trial["repetition"],
+            "seed": trial["seed"],
+            "status": "completed",
+            "producer": {
+                "name": runner["producer"],
+                "version": runner["version"],
+                "orchestration_sha256": runner["orchestration_sha256"],
+                "model_revision": arm["model"]["revision"],
+                "adapter_sha256": arm["adapter"]["sha256"] if arm["adapter"] else None,
+                "seed_honored": True,
+                "fallback_models_used": False,
+            },
+            "usage": {},
+            "output": {},
+        }
+        unsealed = {
             "schema_version": 1,
             "plan_id": plan["plan_id"],
             "trial_id": trial["trial_id"],
@@ -102,9 +155,9 @@ def _write_scored_results(
             "repetition": trial["repetition"],
             "seed": trial["seed"],
             "status": "completed",
-            "hard_gate_passed": True,
+            "hard_gate_passed": False,
             "gate_reason": "token=supersecret",
-            "reward": 1.0,
+            "reward": 0.0,
             "components": {
                 "design_rules": 1.0,
                 "patch_quality": 1.0,
@@ -112,8 +165,16 @@ def _write_scored_results(
                 "responsive_rules": 1.0,
                 "task_tests": 1.0,
             },
-            "metadata": {"evidence": {"patch": "must-not-reach-localhost"}},
+            "metadata": {
+                "fairness": _producer_fairness(raw, trial, plan),
+                "usage": {},
+                "evidence": {},
+            },
         }
+        value = _seal_scored_result(unsealed, plan, raw)
+        (raw_dir / f"{trial['trial_id']}.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
         (scored_dir / f"{trial['trial_id']}.json").write_text(
             json.dumps(value), encoding="utf-8"
         )
@@ -153,7 +214,7 @@ class EvaluationServiceTests(unittest.TestCase):
                 self.assertEqual(fable["runner_type"], "external")
                 self.assertEqual(fable["phase"], "awaiting_external_results")
                 self.assertEqual(fable["completed"], 0)
-                self.assertEqual(fable["total"], 4)
+                self.assertEqual(fable["total"], 10)
                 self.assertEqual(fable["trials"], [])
                 self.assertEqual(fable["results"], [])
                 self.assertIn("no local run is being simulated", fable["message"])
@@ -302,17 +363,157 @@ class EvaluationServiceTests(unittest.TestCase):
                     {trial["status"] for trial in benchmark["trials"]},
                     {"completed"},
                 )
+                self.assertEqual(
+                    {arm["role"] for arm in benchmark["arms"]},
+                    {"candidate", "reference"},
+                )
+                report = benchmark["report"]
+                self.assertIsNotNone(report)
+                self.assertEqual(report["completeness"]["completed_trials"], completed["total"])
+                self.assertEqual(
+                    {item["candidate_id"] for item in report["comparison"]["candidates"]},
+                    {"autotrainer", "reference_9b"},
+                )
+                self.assertEqual(report["decision"]["delta"], 0.0)
+                self.assertEqual(
+                    report["decision"]["confidence_interval"]["confidence"],
+                    0.95,
+                )
+                fable = next(
+                    item
+                    for item in completed_workspace["suites"]
+                    if item["id"] == "fable_ab"
+                )
+                self.assertIsNone(fable["report"])
 
                 # A new backend process reads the same bounded record instead
                 # of turning a completed job back into an in-memory fiction.
+                config = load_config(config_path)
+                _plan, run_dir = load_current_plan(config.data, config.root)
+                report_path = run_dir / "reports" / "model_benchmark.json"
+                forged_report = json.loads(report_path.read_text(encoding="utf-8"))
+                forged_report["decision"]["delta"] = 1.0
+                forged_report["decision"]["verified_better"] = True
+                report_path.write_text(json.dumps(forged_report), encoding="utf-8")
+
                 restored = EvaluationJobManager(config_path)
                 try:
                     self.assertEqual(restored.snapshot(), completed)
                     self.assertEqual(restored.events(0), event_page)
+                    restored_benchmark = next(
+                        item
+                        for item in restored.workspace()["suites"]
+                        if item["id"] == "model_benchmark"
+                    )
+                    # The dashboard recomputes from sealed scores; it neither
+                    # trusts nor rewrites the forged derived report on GET.
+                    self.assertEqual(restored_benchmark["report"]["decision"]["delta"], 0.0)
+                    self.assertFalse(
+                        restored_benchmark["report"]["decision"]["verified_better"]
+                    )
+                    self.assertEqual(
+                        json.loads(report_path.read_text(encoding="utf-8"))["decision"]["delta"],
+                        1.0,
+                    )
                 finally:
                     restored.close()
             finally:
                 manager.close()
+
+    def test_workspace_rejects_a_locally_edited_sealed_score(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(Path(temporary_directory))
+            manager = EvaluationJobManager(config_path)
+            manager.plan()
+            try:
+                _write_scored_results(
+                    config_path,
+                    "model_benchmark",
+                    on_progress=lambda _event: None,
+                )
+                config = load_config(config_path)
+                plan, run_dir = load_current_plan(config.data, config.root)
+                trial = next(
+                    trial
+                    for trial in plan["trials"]
+                    if trial["suite_id"] == "model_benchmark"
+                )
+                path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
+                edited = json.loads(path.read_text(encoding="utf-8"))
+                edited["reward"] = 0.5
+                path.write_text(json.dumps(edited), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    EvaluationServiceError, "content digest does not match"
+                ):
+                    manager.workspace()
+            finally:
+                manager.close()
+
+    def test_synchronous_evaluation_uses_both_shared_run_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(Path(temporary_directory))
+            expected = {"suite_id": "model_benchmark", "total": 4}
+            with (
+                patch(
+                    "autotrainer.evaluation_service.project_run_gate",
+                    return_value=nullcontext(),
+                ) as project_gate,
+                patch(
+                    "autotrainer.evaluation_service.device_run_gate",
+                    return_value=nullcontext(),
+                ) as device_gate,
+                patch(
+                    "autotrainer.evaluation_service.run_command_suite",
+                    return_value=expected,
+                ) as runner,
+            ):
+                result = run_project_evaluation(
+                    config_path,
+                    "model_benchmark",
+                    resume=True,
+                )
+
+            self.assertEqual(result, expected)
+            project_gate.assert_called_once_with(config_path)
+            device_gate.assert_called_once_with()
+            runner.assert_called_once()
+
+    def test_agent_cli_runs_evaluation_through_the_durable_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(Path(temporary_directory))
+            manager = MagicMock()
+            manager.snapshot.return_value = {
+                "id": "a" * 32,
+                "status": "completed",
+                "phase": "completed",
+                "completed": 4,
+                "total": 4,
+            }
+            with (
+                patch(
+                    "autotrainer.evaluation_service.EvaluationJobManager",
+                    return_value=manager,
+                ) as manager_type,
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = cli_main(
+                    [
+                        "evaluate",
+                        "run",
+                        "--suite",
+                        "model_benchmark",
+                        "--resume",
+                        "--config",
+                        str(config_path),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            manager_type.assert_called_once_with(config_path.resolve())
+            manager.start.assert_called_once_with("model_benchmark", resume=True)
+            self.assertGreaterEqual(manager.close.call_count, 1)
 
     def test_failed_jobs_emit_a_redacted_durable_terminal_event(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
