@@ -66,10 +66,46 @@ class RuntimeSetupServiceTests(unittest.TestCase):
                 "build_runtime_image",
             },
         )
-        self.assertIn("torch==2.13.0", actions["install_training_packages"]["command"])
-        self.assertIn("regex==2025.10.22", actions["install_training_packages"]["command"])
+        package_command = actions["install_training_packages"]["command"]
+        self.assertIn("torch==2.13.0+cu130", package_command)
+        self.assertIn("regex==2025.10.22", package_command)
+        self.assertIn("https://download.pytorch.org/whl/cu130", package_command)
         self.assertTrue(actions["install_wsl_ubuntu"]["requires_admin"])
         self.assertEqual(actions["build_runtime_image"]["status"], "blocked")
+
+    def test_inspection_repairs_a_cpu_torch_build_when_the_nvidia_driver_is_ready(self) -> None:
+        doctor = {
+            "python": {"status": "ready", "version": "3.11.9", "expected": "3.11.x"},
+            "gpu": {
+                "status": "blocked",
+                "detail": "CUDA is not available.",
+                "driver": {"status": "ready"},
+            },
+            "packages": [{"name": "torch", "status": "ready", "expected": "2.13.0"}],
+            "sandbox": {"status": "ready"},
+            "environment_image": {"status": "ready"},
+            "sft_ready": False,
+            "rl_ready": False,
+        }
+        windows = {
+            "applicable": True,
+            "wsl_status": "ready",
+            "ubuntu_installed": True,
+            "winget_available": True,
+        }
+        with (
+            patch("autotrainer.runtime_setup_service.run_doctor", return_value=doctor),
+            patch("autotrainer.runtime_setup_service._windows_host", return_value=windows),
+            patch("autotrainer.runtime_setup_service._checkout_root", return_value=self.root),
+            patch("autotrainer.runtime_setup_service.shutil.which", return_value="tool.exe"),
+        ):
+            result = inspect_runtime_setup(self.config_path)
+
+        self.assertEqual(
+            [action["id"] for action in result["actions"]],
+            ["install_training_packages"],
+        )
+        self.assertIn("torch==2.13.0+cu130", result["actions"][0]["command"])
 
     def test_apply_uses_only_the_predeclared_command_without_a_shell(self) -> None:
         selected = {

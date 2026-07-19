@@ -24,6 +24,8 @@ from .project_gate import ProjectLease, acquire_project_lease
 
 
 _LIVE = frozenset({"queued", "running"})
+_PYTORCH_CUDA_TAG = "cu130"
+_PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
 _ACTION_IDS = frozenset(
     {
         "install_training_packages",
@@ -134,6 +136,14 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     packages_ready = all(
         item.get("status") == "ready" for item in doctor.get("packages", [])
     )
+    gpu = doctor.get("gpu", {})
+    driver = gpu.get("driver", {}) if isinstance(gpu, Mapping) else {}
+    cuda_wheel_needed = (
+        isinstance(gpu, Mapping)
+        and gpu.get("status") != "ready"
+        and isinstance(driver, Mapping)
+        and driver.get("status") == "ready"
+    )
     actions: list[dict[str, Any]] = []
     if windows["applicable"] and not windows["ubuntu_installed"]:
         actions.append(
@@ -147,9 +157,14 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
                 restart_required=True,
             )
         )
-    if not packages_ready:
+    if not packages_ready or cuda_wheel_needed:
         specifications = [
-            f"{name}=={version}" for name, version in REFERENCE_PACKAGES.items()
+            (
+                f"torch=={version}+{_PYTORCH_CUDA_TAG}"
+                if name == "torch"
+                else f"{name}=={version}"
+            )
+            for name, version in REFERENCE_PACKAGES.items()
         ]
         actions.append(
             _action(
@@ -157,7 +172,16 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
                 "Install the pinned training stack",
                 "Install or correct the exact package matrix checked by Doctor.",
                 status="available",
-                command=[sys.executable, "-m", "pip", "install", "--upgrade", *specifications],
+                command=[
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "--extra-index-url",
+                    _PYTORCH_CUDA_INDEX,
+                    *specifications,
+                ],
                 restart_required=True,
             )
         )
