@@ -668,6 +668,87 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_example_endpoints_share_guided_authoring_contract(self) -> None:
+        workspace = {
+            "examples": [
+                {
+                    "id": "repair-form-response",
+                    "source_id": "workspace",
+                    "status": "declared",
+                }
+            ]
+        }
+        with patch(
+            "autotrainer.local_api.list_authored_examples",
+            return_value=workspace,
+        ) as listed:
+            status, result = self.request("GET", "/api/v1/examples")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        listed.assert_called_once_with(self.config_path.resolve())
+
+        with patch(
+            "autotrainer.local_api.create_authored_example",
+            return_value=workspace,
+        ) as create:
+            status, result = self.request(
+                "POST",
+                "/api/v1/examples",
+                {
+                    "source_id": "workspace",
+                    "instruction": "Repair the form while preserving submit behavior.",
+                    "accepted_response": (
+                        "Implemented the validation and retained the existing submit path."
+                    ),
+                    "rights_confirmed": True,
+                },
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(result, workspace)
+        create.assert_called_once_with(
+            self.config_path.resolve(),
+            source_id="workspace",
+            instruction="Repair the form while preserving submit behavior.",
+            accepted_response=(
+                "Implemented the validation and retained the existing submit path."
+            ),
+            rights_confirmed=True,
+            example_id=None,
+        )
+
+        empty = {"removed": workspace["examples"][0], "examples": []}
+        with patch(
+            "autotrainer.local_api.remove_authored_example",
+            return_value=empty,
+        ) as remove:
+            status, result = self.request(
+                "DELETE",
+                "/api/v1/examples/repair-form-response",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, empty)
+        remove.assert_called_once_with(
+            self.config_path.resolve(),
+            example_id="repair-form-response",
+        )
+
+    def test_example_endpoint_requires_boolean_rights_confirmation(self) -> None:
+        status, result = self.request(
+            "POST",
+            "/api/v1/examples",
+            {
+                "source_id": "workspace",
+                "instruction": "Repair the form while preserving submit behavior.",
+                "accepted_response": (
+                    "Implemented the validation and retained the existing submit path."
+                ),
+                "rights_confirmed": "yes",
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_history_endpoints_share_the_review_service_contract(self) -> None:
         workspace = {
             "summary": {"reviewable_count": 1, "approved_count": 0},

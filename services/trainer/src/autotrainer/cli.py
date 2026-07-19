@@ -219,6 +219,29 @@ def build_parser() -> argparse.ArgumentParser:
     task_remove.add_argument("--split", choices=["train", "evaluation"], required=True)
     _config_argument(task_remove)
 
+    example = subparsers.add_parser(
+        "example",
+        help="author rights-confirmed supervised examples from accepted work",
+    )
+    example_sub = example.add_subparsers(dest="example_command", required=True)
+    example_list = example_sub.add_parser("list", help="list guided SFT examples")
+    _config_argument(example_list)
+    example_create = example_sub.add_parser(
+        "create",
+        help="add one accepted instruction and response tied to a locked repository",
+    )
+    example_create.add_argument("--source", dest="source_id", required=True)
+    example_create.add_argument("--instruction", required=True)
+    example_create.add_argument("--accepted-response", required=True)
+    example_create.add_argument("--rights-confirmed", action="store_true")
+    example_create.add_argument("--example-id", default=None)
+    _config_argument(example_create)
+    example_remove = example_sub.add_parser(
+        "remove", help="remove one guided SFT example"
+    )
+    example_remove.add_argument("example_id")
+    _config_argument(example_remove)
+
     history = subparsers.add_parser(
         "history", help="review small accepted Git changes as supervised examples"
     )
@@ -556,6 +579,35 @@ def _run_task(arguments: argparse.Namespace) -> int:
         task_id=arguments.task_id,
         group_id=arguments.group_id,
     )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
+def _run_example(arguments: argparse.Namespace) -> int:
+    """Expose the same provenance-aware example flow used by the GUI."""
+
+    from .example_authoring_service import (
+        create_authored_example,
+        list_authored_examples,
+        remove_authored_example,
+    )
+
+    if arguments.example_command == "list":
+        result = list_authored_examples(arguments.config)
+    elif arguments.example_command == "remove":
+        result = remove_authored_example(
+            arguments.config,
+            example_id=arguments.example_id,
+        )
+    else:
+        result = create_authored_example(
+            arguments.config,
+            source_id=arguments.source_id,
+            instruction=arguments.instruction,
+            accepted_response=arguments.accepted_response,
+            rights_confirmed=arguments.rights_confirmed,
+            example_id=arguments.example_id,
+        )
     _emit(result, as_json=arguments.json)
     return 0
 
@@ -902,6 +954,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source(arguments)
         if arguments.command == "task":
             return _run_task(arguments)
+        if arguments.command == "example":
+            return _run_example(arguments)
         if arguments.command == "history":
             return _run_history(arguments)
         if arguments.command == "curriculum":

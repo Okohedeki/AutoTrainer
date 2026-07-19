@@ -2,13 +2,18 @@ import { useEffect, useState } from "react";
 import {
   ApiClientError,
   addProjectSource,
+  createAuthoredExample,
   createAuthoredTask,
+  getAuthoredExamples,
   getAuthoredTasks,
   getProjectSources,
+  removeAuthoredExample,
   removeAuthoredTask,
   removeProjectSource,
   searchGitHubRepositories,
+  type AuthoredExample,
   type AuthoredTask,
+  type AuthoredTaskWorkspace,
   type ProjectSource,
   type RepositorySearchResult,
   type SourceMode,
@@ -90,6 +95,14 @@ export default function SourceSetupPanel({
   const [repositorySearchError, setRepositorySearchError] = useState<string | null>(null);
   const [repositorySearchEnabled, setRepositorySearchEnabled] = useState(true);
   const [authoredTasks, setAuthoredTasks] = useState<AuthoredTask[]>([]);
+  const [taskSummary, setTaskSummary] = useState<AuthoredTaskWorkspace["summary"]>();
+  const [authoredExamples, setAuthoredExamples] = useState<AuthoredExample[]>([]);
+  const [exampleSourceId, setExampleSourceId] = useState("");
+  const [exampleInstruction, setExampleInstruction] = useState("");
+  const [exampleResponse, setExampleResponse] = useState("");
+  const [exampleRightsConfirmed, setExampleRightsConfirmed] = useState(false);
+  const [exampleBusy, setExampleBusy] = useState(false);
+  const [exampleError, setExampleError] = useState<string | null>(null);
   const [taskSourceId, setTaskSourceId] = useState("");
   const [taskInstruction, setTaskInstruction] = useState("");
   const [taskWorkingDirectory, setTaskWorkingDirectory] = useState(".");
@@ -105,10 +118,16 @@ export default function SourceSetupPanel({
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([getProjectSources(controller.signal), getAuthoredTasks(controller.signal)])
-      .then(([nextSources, taskWorkspace]) => {
+    Promise.all([
+      getProjectSources(controller.signal),
+      getAuthoredTasks(controller.signal),
+      getAuthoredExamples(controller.signal),
+    ])
+      .then(([nextSources, taskWorkspace, exampleWorkspace]) => {
         setSources(nextSources);
         setAuthoredTasks(taskWorkspace.tasks);
+        setTaskSummary(taskWorkspace.summary);
+        setAuthoredExamples(exampleWorkspace.examples);
         setConnected(true);
         setError(null);
       })
@@ -122,6 +141,15 @@ export default function SourceSetupPanel({
 
   const taskSources = sources.filter((source) => authoredTaskSplit(source) !== null);
   const selectedTaskSource = taskSources.find((source) => source.id === taskSourceId) ?? null;
+  const exampleSources = sources.filter((source) => (
+    source.kind === "repository" && source.partition !== "evaluation"
+  ));
+  const selectedExampleSource = exampleSources.find((source) => source.id === exampleSourceId) ?? null;
+
+  useEffect(() => {
+    if (exampleSources.some((source) => source.id === exampleSourceId)) return;
+    setExampleSourceId(exampleSources[0]?.id ?? "");
+  }, [sources, exampleSourceId]);
 
   useEffect(() => {
     if (taskSources.some((source) => source.id === taskSourceId)) return;
@@ -243,6 +271,7 @@ export default function SourceSetupPanel({
         verifier_report_path: taskVerifierReport.trim() || ".autotrainer-verifier-report.json",
       });
       setAuthoredTasks(workspace.tasks);
+      setTaskSummary(workspace.summary);
       // Creating the first task also declares its managed task pack in YAML.
       // Refresh the source list so the GUI immediately reflects that shared state.
       setSources(await getProjectSources());
@@ -262,6 +291,7 @@ export default function SourceSetupPanel({
     try {
       const workspace = await removeAuthoredTask(task.split, task.id);
       setAuthoredTasks(workspace.tasks);
+      setTaskSummary(workspace.summary);
       setSources(await getProjectSources());
       onSourcesChanged?.();
     } catch (reason) {
@@ -278,6 +308,52 @@ export default function SourceSetupPanel({
     && taskTests.trim()
     && taskVerifierBundle.trim()
     && taskVerifierCommand.trim(),
+  );
+
+  const submitExample = async () => {
+    if (!exampleSourceId || exampleInstruction.trim().length < 20 || exampleResponse.trim().length < 20 || !exampleRightsConfirmed) return;
+    setExampleBusy(true);
+    setExampleError(null);
+    try {
+      const workspace = await createAuthoredExample({
+        source_id: exampleSourceId,
+        instruction: exampleInstruction.trim(),
+        accepted_response: exampleResponse.trim(),
+        rights_confirmed: exampleRightsConfirmed,
+      });
+      setAuthoredExamples(workspace.examples);
+      setSources(await getProjectSources());
+      setExampleInstruction("");
+      setExampleResponse("");
+      setExampleRightsConfirmed(false);
+      onSourcesChanged?.();
+    } catch (reason) {
+      setExampleError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not author that example.");
+    } finally {
+      setExampleBusy(false);
+    }
+  };
+
+  const deleteExample = async (example: AuthoredExample) => {
+    setExampleBusy(true);
+    setExampleError(null);
+    try {
+      const workspace = await removeAuthoredExample(example.id);
+      setAuthoredExamples(workspace.examples);
+      setSources(await getProjectSources());
+      onSourcesChanged?.();
+    } catch (reason) {
+      setExampleError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not remove that example.");
+    } finally {
+      setExampleBusy(false);
+    }
+  };
+
+  const exampleFormReady = Boolean(
+    exampleSourceId
+    && exampleInstruction.trim().length >= 20
+    && exampleResponse.trim().length >= 20
+    && exampleRightsConfirmed,
   );
 
   return (
@@ -364,6 +440,62 @@ export default function SourceSetupPanel({
         <div className="source-empty"><strong>No sources configured</strong><p>Add the repository or local folder that represents the work this specialist should master.</p></div>
       ) : null}
 
+      <div className="task-authoring example-authoring" aria-labelledby="example-authoring-heading">
+        <header>
+          <div>
+            <span className="eyebrow">Accepted work</span>
+            <h3 id="example-authoring-heading">Create a supervised teaching example</h3>
+            <p>Pair a concrete instruction with an accepted response from a locked training repository. AutoTrainer records provenance and compiles it into QLoRA SFT data.</p>
+          </div>
+          <span className="status-chip muted">{authoredExamples.length} authored</span>
+        </header>
+
+        {exampleError && <div className="source-error" role="alert">{exampleError}</div>}
+
+        {exampleSources.length ? (
+          <form className="task-authoring-form" onSubmit={(event) => { event.preventDefault(); void submitExample(); }}>
+            <div className="task-form-section">
+              <span className="task-form-number" aria-hidden="true">1</span>
+              <div>
+                <label htmlFor="example-source">Locked training source</label>
+                <select id="example-source" value={exampleSourceId} onChange={(event) => setExampleSourceId(event.target.value)} disabled={exampleBusy || busy !== null || disabled}>
+                  {exampleSources.map((source) => <option key={source.id} value={source.id}>{source.label}</option>)}
+                </select>
+                {selectedExampleSource && <small>Pinned at <code>{selectedExampleSource.revision}</code>. The compiled record will carry this repository identity and revision.</small>}
+              </div>
+            </div>
+            <div className="task-form-section example-copy-fields">
+              <span className="task-form-number" aria-hidden="true">2</span>
+              <div>
+                <label htmlFor="example-instruction">Instruction</label>
+                <textarea id="example-instruction" value={exampleInstruction} onChange={(event) => setExampleInstruction(event.target.value)} placeholder="Describe the concrete change or question that produced the accepted work." rows={3} disabled={exampleBusy || disabled} />
+                <label htmlFor="example-response">Accepted response</label>
+                <textarea id="example-response" value={exampleResponse} onChange={(event) => setExampleResponse(event.target.value)} placeholder="Paste the reviewed response or solution that the model should learn from." rows={6} disabled={exampleBusy || disabled} />
+              </div>
+            </div>
+            <div className="task-authoring-submit example-authoring-submit">
+              <label className="rights-confirmation"><input type="checkbox" checked={exampleRightsConfirmed} onChange={(event) => setExampleRightsConfirmed(event.target.checked)} disabled={exampleBusy || disabled} /><span>I confirm I have the right to use this accepted response for training.</span></label>
+              <button className="primary-button" type="submit" disabled={!exampleFormReady || exampleBusy || disabled}>{exampleBusy ? "Creating..." : "Create example"}</button>
+            </div>
+          </form>
+        ) : (
+          <div className="source-empty task-authoring-empty"><strong>Add a locked training repository first</strong><p>Evaluation holdouts stay isolated and cannot supply supervised examples.</p></div>
+        )}
+
+        {authoredExamples.length > 0 && (
+          <ul className="authored-task-list" aria-label="Authored supervised examples">
+            {authoredExamples.map((example) => (
+              <li key={example.id}>
+                <span>SFT</span>
+                <div><strong>{example.id}</strong><p>{example.instruction}</p><code>{example.source_id} · rights confirmed</code>{example.next_action && <small><b>{example.next_action.title}.</b> {example.next_action.detail}</small>}</div>
+                <span className="status-chip muted">{example.status}</span>
+                <button type="button" onClick={() => void deleteExample(example)} disabled={exampleBusy || disabled} aria-label={`Remove example ${example.id}`}>Remove</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       <div className="task-authoring" aria-labelledby="task-authoring-heading">
         <header>
           <div>
@@ -371,7 +503,9 @@ export default function SourceSetupPanel({
             <h3 id="task-authoring-heading">Create a practice or evaluation task</h3>
             <p>A repository supplies the locked starting state. You supply the exact instruction, commands, and hidden verifier that define success.</p>
           </div>
-          <span className="status-chip muted">{authoredTasks.length} authored</span>
+          <span className={`status-chip ${taskSummary?.evaluation_groups_remaining === 0 ? "good" : "muted"}`}>
+            {authoredTasks.length} tasks · {taskSummary?.evaluation_group_count ?? 0}/{taskSummary?.required_evaluation_groups ?? 5} held-out groups
+          </span>
         </header>
 
         {taskError && <div className="source-error" role="alert">{taskError}</div>}

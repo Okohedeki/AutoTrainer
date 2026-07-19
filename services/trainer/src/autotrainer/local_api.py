@@ -20,6 +20,11 @@ from urllib.parse import parse_qs, urlsplit
 from .config import ConfigError
 from .curriculum_service import get_curriculum_workspace
 from .evaluation_service import EvaluationJobManager
+from .example_authoring_service import (
+    create_authored_example,
+    list_authored_examples,
+    remove_authored_example,
+)
 from .github_service import GitHubSearchError, search_repositories
 from .hosting_service import HostingManager
 from .history_service import (
@@ -557,6 +562,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         list_authored_tasks(self.server.config_path),
                     )
+                elif path == f"{API_PREFIX}/examples":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        list_authored_examples(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/curriculum":
                     _query_values(query, allowed=set())
                     self._send_json(
@@ -778,6 +789,39 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                             group_id=_optional_text(payload, "group_id"),
                         ),
                     )
+                elif path == f"{API_PREFIX}/examples":
+                    _require_keys(
+                        payload,
+                        allowed={
+                            "source_id",
+                            "instruction",
+                            "accepted_response",
+                            "rights_confirmed",
+                            "example_id",
+                        },
+                        required={
+                            "source_id",
+                            "instruction",
+                            "accepted_response",
+                            "rights_confirmed",
+                        },
+                    )
+                    rights_confirmed = payload.get("rights_confirmed")
+                    if not isinstance(rights_confirmed, bool):
+                        raise ConfigError("rights_confirmed must be true or false")
+                    self._send_json(
+                        HTTPStatus.CREATED,
+                        create_authored_example(
+                            self.server.config_path,
+                            source_id=_required_text(payload, "source_id"),
+                            instruction=_required_text(payload, "instruction"),
+                            accepted_response=_required_text(
+                                payload, "accepted_response"
+                            ),
+                            rights_confirmed=rights_confirmed,
+                            example_id=_optional_text(payload, "example_id"),
+                        ),
+                    )
                 elif path == f"{API_PREFIX}/history/review":
                     _require_keys(
                         payload,
@@ -927,6 +971,19 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                             self.server.config_path,
                             split=parts[0],
                             task_id=parts[1],
+                        ),
+                    )
+                    return
+                example_prefix = f"{API_PREFIX}/examples/"
+                if path.startswith(example_prefix):
+                    example_id = path[len(example_prefix) :]
+                    if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", example_id) is None:
+                        raise ConfigError("example id is invalid")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        remove_authored_example(
+                            self.server.config_path,
+                            example_id=example_id,
                         ),
                     )
                     return

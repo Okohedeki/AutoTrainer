@@ -580,7 +580,32 @@ def compile_data(
                     value = json.loads(line)
                     if not isinstance(value, Mapping):
                         raise ValueError("record must be an object")
-                    sft_records[partition].append(normalize_sft_record(value))
+                    normalized = normalize_sft_record(value)
+                    record_source_id = str(value.get("source_id", "")).strip()
+                    if record_source_id:
+                        repository = repositories.get(record_source_id)
+                        locked = repository_locks.get(record_source_id)
+                        # Direct JSONL sources have historically used source_id
+                        # as a free-form record identifier. Bind repository
+                        # provenance only when that ID names a declared repo;
+                        # otherwise leave it explicitly unattested so later
+                        # evaluation gates can fail closed without breaking
+                        # compilation of an existing authoring dataset.
+                        if (repository is None) != (locked is None):
+                            raise ValueError(
+                                f"source_id {record_source_id!r} has an incomplete repository lock"
+                            )
+                        if repository is not None and repository.get("partition") != "train":
+                            raise ValueError(
+                                f"source_id {record_source_id!r} is not a training repository"
+                            )
+                        if repository is not None and locked is not None:
+                            normalized["source_id"] = record_source_id
+                            normalized["source_repository_identity"] = locked.get(
+                                "repository_identity"
+                            )
+                            normalized["source_revision"] = locked.get("commit")
+                    sft_records[partition].append(normalized)
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                 errors.append(f"{source_id}: cannot compile {path}:{line_number}: {error}")
         elif kind == "task_pack":

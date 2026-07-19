@@ -405,6 +405,70 @@ class CliTests(unittest.TestCase):
             task_id="repair-form",
         )
 
+    def test_example_create_delegates_to_guided_authoring_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"example": {"id": "repair-form-response"}, "examples": []}
+        with patch(
+            "autotrainer.example_authoring_service.create_authored_example",
+            return_value=expected,
+        ) as create:
+            status, payload = self._json_command(
+                [
+                    "example",
+                    "create",
+                    "--source",
+                    "workspace",
+                    "--instruction",
+                    "Repair the form while preserving submit behavior.",
+                    "--accepted-response",
+                    "Implemented validation and retained the existing submit path.",
+                    "--rights-confirmed",
+                    "--example-id",
+                    "repair-form-response",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        create.assert_called_once_with(
+            config_path,
+            source_id="workspace",
+            instruction="Repair the form while preserving submit behavior.",
+            accepted_response=(
+                "Implemented validation and retained the existing submit path."
+            ),
+            rights_confirmed=True,
+            example_id="repair-form-response",
+        )
+
+    def test_example_remove_delegates_to_guided_authoring_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"removed": {"id": "repair-form-response"}, "examples": []}
+        with patch(
+            "autotrainer.example_authoring_service.remove_authored_example",
+            return_value=expected,
+        ) as remove:
+            status, payload = self._json_command(
+                [
+                    "example",
+                    "remove",
+                    "repair-form-response",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        remove.assert_called_once_with(
+            config_path,
+            example_id="repair-form-response",
+        )
+
     def test_host_commands_delegate_without_blocking_on_model_load(self) -> None:
         config_path = Path("project/autotrainer.yaml")
         with patch("autotrainer.hosting_service.HostingManager") as manager_type:

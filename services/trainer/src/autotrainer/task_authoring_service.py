@@ -383,7 +383,28 @@ def list_authored_tasks(config_path: str | Path) -> dict[str, Any]:
                         "blockers": [f"The authored task manifest is invalid: {error}"],
                     }
                 )
-    return {"tasks": tasks}
+    train_tasks = [task for task in tasks if task.get("split") == "train"]
+    evaluation_tasks = [
+        task for task in tasks if task.get("split") == "evaluation"
+    ]
+    evaluation_groups = {
+        str(task.get("group_id", "")).strip()
+        for task in evaluation_tasks
+        if str(task.get("group_id", "")).strip()
+    }
+    required_evaluation_groups = 5
+    return {
+        "tasks": tasks,
+        "summary": {
+            "train_task_count": len(train_tasks),
+            "evaluation_task_count": len(evaluation_tasks),
+            "evaluation_group_count": len(evaluation_groups),
+            "required_evaluation_groups": required_evaluation_groups,
+            "evaluation_groups_remaining": max(
+                0, required_evaluation_groups - len(evaluation_groups)
+            ),
+        },
+    }
 
 
 def create_authored_task(

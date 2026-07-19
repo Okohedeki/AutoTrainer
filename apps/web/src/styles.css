@@ -1277,6 +1277,10 @@ textarea { font: inherit; }
 .task-verifier-fields > p code { color: #53471f; font-size: 8px; }
 .task-authoring-submit { padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .task-authoring-submit p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.example-authoring { border-top-color: #d9e3dc; }
+.example-copy-fields label:not(:first-child) { margin-top: 6px; }
+.example-authoring-submit .rights-confirmation { max-width: 650px; display: flex; align-items: flex-start; gap: 8px; color: #4f5964; font-size: 9px; font-weight: 650; line-height: 1.45; }
+.example-authoring-submit .rights-confirmation input { flex: 0 0 auto; margin-top: 2px; }
 .task-authoring-empty { margin-top: 14px; }
 .authored-task-list { margin: 14px 0 0; padding: 0; display: grid; list-style: none; border-top: 1px solid var(--line); }
 .authored-task-list li { padding: 12px 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto auto; gap: 11px; align-items: start; border-bottom: 1px solid var(--line); }

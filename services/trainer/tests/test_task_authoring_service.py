@@ -133,6 +133,11 @@ class TaskAuthoringServiceTests(unittest.TestCase):
         self.assertEqual(config.data["evaluation"]["task_pack"], "authored-evaluation-tasks")
         task_pack = next(source for source in config.sources if source["kind"] == "task_pack")
         self.assertEqual(task_pack["roles"], ["evaluation"])
+        summary = list_authored_tasks(self.config_path)["summary"]
+        self.assertEqual(summary["evaluation_task_count"], 1)
+        self.assertEqual(summary["evaluation_group_count"], 1)
+        self.assertEqual(summary["required_evaluation_groups"], 5)
+        self.assertEqual(summary["evaluation_groups_remaining"], 4)
 
     def test_rejects_reference_only_repo_moving_worktree_and_visible_verifier(self) -> None:
         source_id = self.add_repository(["reference_only"])

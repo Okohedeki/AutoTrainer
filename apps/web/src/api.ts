@@ -195,6 +195,37 @@ export type AuthoredTaskInput = {
 export type AuthoredTaskWorkspace = {
   task?: AuthoredTask;
   tasks: AuthoredTask[];
+  summary?: {
+    train_task_count: number;
+    evaluation_task_count: number;
+    evaluation_group_count: number;
+    required_evaluation_groups: number;
+    evaluation_groups_remaining: number;
+  };
+};
+
+export type AuthoredExample = {
+  id: string;
+  source_id: string;
+  instruction: string;
+  response_preview: string;
+  rights_confirmed: boolean;
+  status: "declared" | string;
+  next_action?: { title: string; detail: string };
+};
+
+export type AuthoredExampleInput = {
+  source_id: string;
+  instruction: string;
+  accepted_response: string;
+  rights_confirmed: boolean;
+  example_id?: string;
+};
+
+export type AuthoredExampleWorkspace = {
+  example?: AuthoredExample;
+  removed?: AuthoredExample;
+  examples: AuthoredExample[];
 };
 
 export type PreparationResult = {
@@ -678,6 +709,23 @@ export async function createAuthoredTask(input: AuthoredTaskInput): Promise<Auth
 
 export async function removeAuthoredTask(split: "train" | "evaluation", id: string): Promise<AuthoredTaskWorkspace> {
   return request(`/api/v1/tasks/${split}/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getAuthoredExamples(signal?: AbortSignal): Promise<AuthoredExampleWorkspace> {
+  return request("/api/v1/examples", { signal });
+}
+
+export async function createAuthoredExample(input: AuthoredExampleInput): Promise<AuthoredExampleWorkspace> {
+  return request("/api/v1/examples", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function removeAuthoredExample(id: string): Promise<AuthoredExampleWorkspace> {
+  return request(`/api/v1/examples/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }

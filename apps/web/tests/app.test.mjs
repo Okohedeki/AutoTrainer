@@ -118,7 +118,15 @@ test("Data guides users from a locked repository to an executable authored task"
   assert.match(api, /request\("\/api\/v1\/tasks", \{ signal \}\)/);
   assert.match(api, /export async function createAuthoredTask/);
   assert.match(api, /export async function removeAuthoredTask/);
+  assert.match(api, /request\("\/api\/v1\/examples", \{ signal \}\)/);
+  assert.match(api, /export async function createAuthoredExample/);
+  assert.match(api, /export async function removeAuthoredExample/);
+  assert.match(panel, /Create a supervised teaching example/);
+  assert.match(panel, /I confirm I have the right to use this accepted response for training/);
+  assert.match(panel, /createAuthoredExample/);
+  assert.match(panel, /deleteExample/);
   assert.match(panel, /Create a practice or evaluation task/);
+  assert.match(panel, /held-out groups/);
   for (const field of [
     "Locked source",
     "What should the model change",

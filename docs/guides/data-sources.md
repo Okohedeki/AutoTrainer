@@ -120,6 +120,25 @@ autotrainer history review CANDIDATE_ID --approve \
 
 The instruction must describe the real task without revealing the patch. AutoTrainer rejects stale approvals and obvious answer leakage. Only reviewed, rights-confirmed examples reach SFT compilation.
 
+The Data screen can also create a supervised example directly when the
+accepted response is already known. It stores the example in a managed JSONL
+source and binds it to the selected repository's locked identity and revision.
+Agents use the same contract through the CLI:
+
+```bash
+autotrainer example create \
+  --source owner-storefront \
+  --instruction "Make the card grid readable below 768px without changing desktop behavior." \
+  --accepted-response "Updated the base grid to one column and retained the existing desktop breakpoint, then ran the project checks." \
+  --rights-confirmed \
+  --config autotrainer.yaml
+```
+
+The source must be a pinned training repository; an evaluation holdout cannot
+supply SFT examples. `autotrainer example list` shows managed examples and
+`autotrainer example remove EXAMPLE_ID` removes one. Removing the final example
+also removes the empty managed JSONL declaration.
+
 ## SFT JSONL
 
 The direct format is one text-only conversation per line:
@@ -240,6 +259,10 @@ The presence of a repository never creates SFT rows. It contributes rows only th
 ## Holdout isolation
 
 Set `evaluation_holdout` on held-out repositories and use `split: evaluation` task packs. Split by repository or project family, not random records. A real benchmark must exclude every project that contributed source code, demonstrations, task mutations, rollouts, or checkpoint feedback to training.
+
+AutoTrainer tracks distinct evaluation `groupId` values in the Data screen and
+shows progress toward the required five independent held-out groups. Reusing a
+group ID adds task coverage but does not satisfy another independence group.
 
 The bundled evaluation task is an authoring fixture inside the AutoTrainer repository. It is useful for contract tests but is not independent evidence.
 
