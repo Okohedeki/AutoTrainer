@@ -156,6 +156,47 @@ export type SourceInput = {
   license_attribution?: string;
 };
 
+export type AuthoredTask = {
+  id: string;
+  instruction?: string;
+  source_id?: string;
+  locked_revision?: string;
+  split: "train" | "evaluation";
+  group_id?: string;
+  working_directory?: string;
+  runtime?: {
+    install: string;
+    build: string;
+    tests: string;
+    browserTests: string;
+  };
+  verifier?: { bundle: string; command: string; report_path: string };
+  manifest_path: string;
+  status: "declared" | "blocked" | string;
+  blockers: string[];
+  next_action?: { title: string; detail: string };
+};
+
+export type AuthoredTaskInput = {
+  source_id: string;
+  instruction: string;
+  working_directory: string;
+  install?: string;
+  build: string;
+  tests: string;
+  browser_tests?: string;
+  verifier_bundle: string;
+  verifier_command: string;
+  verifier_report_path?: string;
+  task_id?: string;
+  group_id?: string;
+};
+
+export type AuthoredTaskWorkspace = {
+  task?: AuthoredTask;
+  tasks: AuthoredTask[];
+};
+
 export type PreparationResult = {
   status: "ready" | "blocked";
   recipe: "teach" | "practice" | "both" | "needs_training_data";
@@ -622,6 +663,23 @@ export async function removeProjectSource(id: string): Promise<ProjectSource[]> 
     method: "DELETE",
   });
   return result.sources;
+}
+
+export async function getAuthoredTasks(signal?: AbortSignal): Promise<AuthoredTaskWorkspace> {
+  return request("/api/v1/tasks", { signal });
+}
+
+export async function createAuthoredTask(input: AuthoredTaskInput): Promise<AuthoredTaskWorkspace> {
+  return request("/api/v1/tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function removeAuthoredTask(split: "train" | "evaluation", id: string): Promise<AuthoredTaskWorkspace> {
+  return request(`/api/v1/tasks/${split}/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export async function prepareProject(): Promise<PreparationResult> {

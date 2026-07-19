@@ -583,6 +583,91 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_task_endpoints_share_guided_authoring_contract(self) -> None:
+        workspace = {
+            "tasks": [
+                {
+                    "id": "repair-form",
+                    "split": "train",
+                    "status": "declared",
+                }
+            ]
+        }
+        with patch(
+            "autotrainer.local_api.list_authored_tasks",
+            return_value=workspace,
+        ) as listed:
+            status, result = self.request("GET", "/api/v1/tasks")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        listed.assert_called_once_with(self.config_path.resolve())
+
+        with patch(
+            "autotrainer.local_api.create_authored_task",
+            return_value=workspace,
+        ) as create:
+            status, result = self.request(
+                "POST",
+                "/api/v1/tasks",
+                {
+                    "source_id": "workspace",
+                    "instruction": "Repair the form while preserving existing submit behavior.",
+                    "working_directory": "app",
+                    "build": "npm run build",
+                    "tests": "npm test",
+                    "verifier_bundle": "C:\\hidden\\form-verifier",
+                    "verifier_command": "node /autotrainer-verifier/verify.mjs",
+                },
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(result, workspace)
+        create.assert_called_once_with(
+            self.config_path.resolve(),
+            source_id="workspace",
+            instruction="Repair the form while preserving existing submit behavior.",
+            working_directory="app",
+            install=None,
+            build="npm run build",
+            tests="npm test",
+            browser_tests=None,
+            verifier_bundle="C:\\hidden\\form-verifier",
+            verifier_command="node /autotrainer-verifier/verify.mjs",
+            verifier_report_path=".autotrainer-verifier-report.json",
+            task_id=None,
+            group_id=None,
+        )
+
+        empty = {"removed": workspace["tasks"][0], "tasks": []}
+        with patch(
+            "autotrainer.local_api.remove_authored_task",
+            return_value=empty,
+        ) as remove:
+            status, result = self.request(
+                "DELETE",
+                "/api/v1/tasks/train/repair-form",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, empty)
+        remove.assert_called_once_with(
+            self.config_path.resolve(),
+            split="train",
+            task_id="repair-form",
+        )
+
+    def test_task_endpoint_rejects_missing_runtime_and_verifier_fields(self) -> None:
+        status, result = self.request(
+            "POST",
+            "/api/v1/tasks",
+            {
+                "source_id": "workspace",
+                "instruction": "Repair one concrete behavior with an executable check.",
+                "working_directory": ".",
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_history_endpoints_share_the_review_service_contract(self) -> None:
         workspace = {
             "summary": {"reviewable_count": 1, "approved_count": 0},

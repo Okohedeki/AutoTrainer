@@ -400,6 +400,17 @@ class CompilerTests(unittest.TestCase):
                 rl_row["source_repository_identity"],
                 scan["sources"][0]["repository_identity"],
             )
+            verifier_identity = rl_row["verifier_identity"]
+            self.assertEqual(verifier_identity["path"], str(verifier.resolve()))
+            self.assertRegex(verifier_identity["sha256"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(verifier_identity["files"][0]["path"], "verify.mjs")
+            self.assertEqual(
+                verifier_identity["files"][0]["bytes"],
+                len((verifier / "verify.mjs").read_bytes()),
+            )
+            self.assertRegex(
+                verifier_identity["files"][0]["sha256"], r"^[0-9a-f]{64}$"
+            )
 
     def test_approved_history_compiles_alone_and_combines_with_explicit_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

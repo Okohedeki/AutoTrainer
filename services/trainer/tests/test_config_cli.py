@@ -13,6 +13,7 @@ import yaml
 import sys
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = SERVICE_ROOT.parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.cli import main  # noqa: E402
@@ -58,6 +59,14 @@ class ConfigTests(unittest.TestCase):
             loaded = load_config(path)
             self.assertEqual(loaded.data["project"]["seed"], 42)
             self.assertEqual(loaded.root, Path(directory).resolve())
+
+    def test_bundled_frontend_example_remains_schema_valid(self) -> None:
+        config = load_config(
+            REPOSITORY_ROOT / "examples" / "frontend-expert" / "autotrainer.yaml"
+        )
+        decisions = config.data["evaluation"]["decisions"]
+        self.assertGreaterEqual(decisions["model_benchmark"]["minimum_tasks"], 5)
+        self.assertGreaterEqual(decisions["fable_ab"]["minimum_tasks"], 5)
 
 
 class CliTests(unittest.TestCase):
@@ -309,6 +318,91 @@ class CliTests(unittest.TestCase):
             exclude=["dist/**", "coverage/**", "tmp/**"],
             license_spdx="Apache-2.0",
             license_attribution="Copyright Example",
+        )
+
+    def test_task_create_delegates_to_the_shared_guided_authoring_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"task": {"id": "repair-form", "status": "declared"}, "tasks": []}
+        with patch(
+            "autotrainer.task_authoring_service.create_authored_task",
+            return_value=expected,
+        ) as create:
+            status, payload = self._json_command(
+                [
+                    "task",
+                    "create",
+                    "--source",
+                    "workspace",
+                    "--instruction",
+                    "Repair the form while preserving existing submit behavior.",
+                    "--working-directory",
+                    "app",
+                    "--install",
+                    "npm ci",
+                    "--build",
+                    "npm run build",
+                    "--tests",
+                    "npm test",
+                    "--browser-tests",
+                    "npm run test:browser",
+                    "--verifier-bundle",
+                    "C:\\hidden\\form-verifier",
+                    "--verifier-command",
+                    "node /autotrainer-verifier/verify.mjs",
+                    "--task-id",
+                    "repair-form",
+                    "--group-id",
+                    "form-family",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        create.assert_called_once_with(
+            config_path,
+            source_id="workspace",
+            instruction="Repair the form while preserving existing submit behavior.",
+            working_directory="app",
+            install="npm ci",
+            build="npm run build",
+            tests="npm test",
+            browser_tests="npm run test:browser",
+            verifier_bundle="C:\\hidden\\form-verifier",
+            verifier_command="node /autotrainer-verifier/verify.mjs",
+            verifier_report_path=".autotrainer-verifier-report.json",
+            task_id="repair-form",
+            group_id="form-family",
+        )
+
+    def test_task_remove_delegates_to_the_shared_guided_authoring_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"removed": {"id": "repair-form"}, "tasks": []}
+        with patch(
+            "autotrainer.task_authoring_service.remove_authored_task",
+            return_value=expected,
+        ) as remove:
+            status, payload = self._json_command(
+                [
+                    "task",
+                    "remove",
+                    "repair-form",
+                    "--split",
+                    "train",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        remove.assert_called_once_with(
+            config_path,
+            split="train",
+            task_id="repair-form",
         )
 
     def test_host_commands_delegate_without_blocking_on_model_load(self) -> None:

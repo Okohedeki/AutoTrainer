@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .history import HistoryError, approved_history_records
+from .integrity import IntegrityError, tree_identity
 from .manifest import TaskManifest
 from .sources import normalize_sft_record
 
@@ -621,6 +622,16 @@ def compile_data(
                     if manifest.starting_revision == "locked"
                     else manifest.starting_revision
                 )
+                verifier_bundle = _resolve(
+                    manifest_path.parent, str(manifest.verifier_bundle or "")
+                )
+                try:
+                    verifier_identity = tree_identity(verifier_bundle)
+                except IntegrityError as error:
+                    errors.append(
+                        f"{manifest.task_id}: hidden verifier cannot be frozen: {error}"
+                    )
+                    continue
                 row = {
                     "prompt": [
                         {
@@ -641,6 +652,14 @@ def compile_data(
                     # identity is what downstream holdout gates compare.
                     "source_repository_identity": locked.get("repository_identity"),
                     "source_revision": revision,
+                    # Training and evaluation now consume the same immutable
+                    # verifier ledger. The environment re-hashes it before the
+                    # canary and every scored rollout, so a live path cannot
+                    # silently change after compilation.
+                    "verifier_identity": {
+                        "path": str(verifier_bundle),
+                        **verifier_identity,
+                    },
                     "environment_backend": config["environment"]["backend"],
                     "environment_image": config["environment"]["image"],
                     "max_tool_output_chars": config["environment"].get(

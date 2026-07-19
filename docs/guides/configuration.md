@@ -275,13 +275,13 @@ evaluation:
       control: reference_9b
       metric: verified_task_success
       minimum_delta: 0.0
-      minimum_tasks: 2
+      minimum_tasks: 5
     fable_ab:
       candidate: autotrainer
       control: base_fable
       metric: blind_preference_rate
       minimum_rate: 0.5
-      minimum_tasks: 2
+      minimum_tasks: 5
 ```
 
 The candidate adapter path must point to the stage being evaluated. A project that trains only SFT should update the path/stage to its SFT output before freezing a proof plan.

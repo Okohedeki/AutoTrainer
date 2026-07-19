@@ -187,6 +187,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(source_materialize)
 
+    task = subparsers.add_parser(
+        "task",
+        help="author executable practice or held-out tasks from a locked repository",
+    )
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_list = task_sub.add_parser("list", help="list guided task manifests")
+    _config_argument(task_list)
+    task_create = task_sub.add_parser(
+        "create",
+        help="declare one task using operator-authored runtime gates and a hidden verifier",
+    )
+    task_create.add_argument("--source", dest="source_id", required=True)
+    task_create.add_argument("--instruction", required=True)
+    task_create.add_argument("--working-directory", default=".")
+    task_create.add_argument("--install", default=None)
+    task_create.add_argument("--build", required=True)
+    task_create.add_argument("--tests", required=True)
+    task_create.add_argument("--browser-tests", default=None)
+    task_create.add_argument("--verifier-bundle", required=True)
+    task_create.add_argument("--verifier-command", required=True)
+    task_create.add_argument(
+        "--verifier-report-path",
+        default=".autotrainer-verifier-report.json",
+    )
+    task_create.add_argument("--task-id", default=None)
+    task_create.add_argument("--group-id", default=None)
+    _config_argument(task_create)
+    task_remove = task_sub.add_parser("remove", help="remove one guided task manifest")
+    task_remove.add_argument("task_id")
+    task_remove.add_argument("--split", choices=["train", "evaluation"], required=True)
+    _config_argument(task_remove)
+
     history = subparsers.add_parser(
         "history", help="review small accepted Git changes as supervised examples"
     )
@@ -485,6 +517,47 @@ def _run_source(arguments: argparse.Namespace) -> int:
         scan = scan_sources(config.data, config.root, write=False)
     _emit(scan, as_json=arguments.json)
     return 0 if not scan.get("errors") else 3
+
+
+def _run_task(arguments: argparse.Namespace) -> int:
+    """Expose the same guided task contract used by the human interface."""
+
+    from .task_authoring_service import (
+        create_authored_task,
+        list_authored_tasks,
+        remove_authored_task,
+    )
+
+    if arguments.task_command == "list":
+        _emit(list_authored_tasks(arguments.config), as_json=arguments.json)
+        return 0
+    if arguments.task_command == "remove":
+        _emit(
+            remove_authored_task(
+                arguments.config,
+                split=arguments.split,
+                task_id=arguments.task_id,
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    result = create_authored_task(
+        arguments.config,
+        source_id=arguments.source_id,
+        instruction=arguments.instruction,
+        working_directory=arguments.working_directory,
+        install=arguments.install,
+        build=arguments.build,
+        tests=arguments.tests,
+        browser_tests=arguments.browser_tests,
+        verifier_bundle=arguments.verifier_bundle,
+        verifier_command=arguments.verifier_command,
+        verifier_report_path=arguments.verifier_report_path,
+        task_id=arguments.task_id,
+        group_id=arguments.group_id,
+    )
+    _emit(result, as_json=arguments.json)
+    return 0
 
 
 def _run_validate(arguments: argparse.Namespace) -> int:
@@ -827,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_model(arguments)
         if arguments.command == "source":
             return _run_source(arguments)
+        if arguments.command == "task":
+            return _run_task(arguments)
         if arguments.command == "history":
             return _run_history(arguments)
         if arguments.command == "curriculum":

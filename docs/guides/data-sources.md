@@ -142,6 +142,30 @@ A task pack supplies the pieces a repository alone lacks:
 - a hidden verifier and structured reward report;
 - a reset mechanism for every rollout.
 
+The Data screen has a four-step task form. Agents use the same service through
+the CLI:
+
+```bash
+autotrainer task create \
+  --source owner-storefront \
+  --instruction "Keep the checkout action visible at narrow widths without changing desktop behavior." \
+  --working-directory . \
+  --build "npm run build" \
+  --tests "npm test" \
+  --verifier-bundle ../private-verifiers/checkout \
+  --verifier-command "node /autotrainer-verifier/verify.mjs" \
+  --config autotrainer.yaml
+```
+
+The repository must already be pinned and configured for `practice_tasks` or
+`evaluation_holdout`. The verifier directory must already exist outside the
+editable repository. AutoTrainer writes the task manifest and declares its
+managed task pack, but reports the task as `declared` until
+`autotrainer prepare` executes the install, build, tests, and verifier canary.
+Use the Data screen's Remove action or
+`autotrainer task remove TASK_ID --split train` to discard an authored task;
+removing the final task also removes its empty managed pack declaration.
+
 Minimal shape:
 
 ```json
@@ -157,14 +181,25 @@ Minimal shape:
   },
   "runtime": {
     "workingDirectory": ".",
+    "install": "",
     "build": "npm run build",
-    "tests": "npm test"
+    "tests": "npm test",
+    "browserTests": ""
   },
   "tools": ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
   "verifier": {
     "bundle": "./verifier",
     "command": "node /autotrainer-verifier/verify.mjs",
     "reportPath": ".autotrainer-verifier-report.json"
+  },
+  "rewards": {
+    "buildGate": true,
+    "regressionGate": true,
+    "regressionSafety": 0.2,
+    "taskTests": 0.35,
+    "responsiveRules": 0.2,
+    "designRules": 0.15,
+    "patchQuality": 0.1
   },
   "limits": {
     "toolCalls": 40,
@@ -176,6 +211,9 @@ Minimal shape:
 ```
 
 `sourceId` must point to a declared repository. The editable workspace contains its locked snapshot; the verifier bundle stays outside that tree and is mounted read-only only for scoring.
+The verifier report must contain `build_passed`, `regression_pass_rate`,
+`task_pass_rate`, `responsive_pass_rate`, `design_rule_pass_rate`, and
+`code_quality_pass_rate`; Prepare validates those observed values before GRPO.
 
 ## Compile and inspect
 

@@ -112,6 +112,33 @@ test("repository search resolves names before explicit purpose and advanced scop
   assert.match(api, /body: JSON\.stringify\(input\)/);
 });
 
+test("Data guides users from a locked repository to an executable authored task", async () => {
+  const panel = await source("src/SourceSetupPanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(api, /request\("\/api\/v1\/tasks", \{ signal \}\)/);
+  assert.match(api, /export async function createAuthoredTask/);
+  assert.match(api, /export async function removeAuthoredTask/);
+  assert.match(panel, /Create a practice or evaluation task/);
+  for (const field of [
+    "Locked source",
+    "What should the model change",
+    "Working directory",
+    "Build command",
+    "Regression tests",
+    "Hidden verifier folder",
+    "Verifier command",
+    "Report path in workspace",
+  ]) assert.match(panel, new RegExp(field));
+  assert.match(panel, /repository files are not silently converted into training examples/i);
+  assert.match(panel, /AutoTrainer does not generate hidden tests or guess correctness/);
+  for (const signal of ["build_passed", "regression_pass_rate", "task_pass_rate", "responsive_pass_rate", "design_rule_pass_rate", "code_quality_pass_rate"]) assert.match(panel, new RegExp(signal));
+  assert.match(panel, /Prepare must still execute every gate/);
+  assert.match(panel, /authoredTaskSplit/);
+  assert.match(panel, /createAuthoredTask/);
+  assert.match(panel, /deleteTask/);
+  assert.match(panel, /Remove task/);
+});
+
 test("Data and Train share one truthful three-level GRPO evidence surface", async () => {
   const panel = await source("src/GrpoEvidencePanel.tsx");
   const api = await source("src/api.ts");

@@ -46,6 +46,11 @@ from .project_gate import (
     assert_project_available,
 )
 from .source_service import add_source, list_sources, remove_source
+from .task_authoring_service import (
+    create_authored_task,
+    list_authored_tasks,
+    remove_authored_task,
+)
 from .training_service import TrainingJobManager
 from .workspace_service import ProjectWorkspace
 
@@ -544,6 +549,14 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         {"sources": list_sources(self.server.config_path)},
                     )
+                elif path == f"{API_PREFIX}/tasks":
+                    _query_values(query, allowed=set())
+                    # Authored tasks are durable project artifacts, not UI-only
+                    # drafts. Agents and humans read the same service response.
+                    self._send_json(
+                        HTTPStatus.OK,
+                        list_authored_tasks(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/curriculum":
                     _query_values(query, allowed=set())
                     self._send_json(
@@ -711,6 +724,60 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                             ),
                         ),
                     )
+                elif path == f"{API_PREFIX}/tasks":
+                    _require_keys(
+                        payload,
+                        allowed={
+                            "source_id",
+                            "instruction",
+                            "working_directory",
+                            "install",
+                            "build",
+                            "tests",
+                            "browser_tests",
+                            "verifier_bundle",
+                            "verifier_command",
+                            "verifier_report_path",
+                            "task_id",
+                            "group_id",
+                        },
+                        required={
+                            "source_id",
+                            "instruction",
+                            "working_directory",
+                            "build",
+                            "tests",
+                            "verifier_bundle",
+                            "verifier_command",
+                        },
+                    )
+                    self._send_json(
+                        HTTPStatus.CREATED,
+                        create_authored_task(
+                            self.server.config_path,
+                            source_id=_required_text(payload, "source_id"),
+                            instruction=_required_text(payload, "instruction"),
+                            working_directory=_required_text(
+                                payload, "working_directory"
+                            ),
+                            install=_optional_text(payload, "install"),
+                            build=_required_text(payload, "build"),
+                            tests=_required_text(payload, "tests"),
+                            browser_tests=_optional_text(payload, "browser_tests"),
+                            verifier_bundle=_required_text(
+                                payload, "verifier_bundle"
+                            ),
+                            verifier_command=_required_text(
+                                payload, "verifier_command"
+                            ),
+                            verifier_report_path=(
+                                _optional_text(payload, "verifier_report_path")
+                                or ".autotrainer-verifier-report.json"
+                            ),
+                            task_id=_optional_text(payload, "task_id"),
+                            group_id=_optional_text(payload, "group_id"),
+                        ),
+                    )
                 elif path == f"{API_PREFIX}/history/review":
                     _require_keys(
                         payload,
@@ -845,6 +912,24 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             path = split.path
             _query_values(split.query, allowed=set())
             with self.server.context_lock:
+                task_prefix = f"{API_PREFIX}/tasks/"
+                if path.startswith(task_prefix):
+                    parts = path[len(task_prefix) :].split("/")
+                    if (
+                        len(parts) != 2
+                        or parts[0] not in {"train", "evaluation"}
+                        or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", parts[1]) is None
+                    ):
+                        raise ConfigError("task path must contain a valid split and task id")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        remove_authored_task(
+                            self.server.config_path,
+                            split=parts[0],
+                            task_id=parts[1],
+                        ),
+                    )
+                    return
                 prefix = f"{API_PREFIX}/sources/"
                 if not path.startswith(prefix) or not path[len(prefix) :]:
                     self._send_json(

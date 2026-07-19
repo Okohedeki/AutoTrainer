@@ -1,18 +1,12 @@
 schema_version: 1
-
 project:
   name: polished-frontend-9b
   seed: 42
   artifact_dir: ./.autotrainer
-
-# Pinned from the model host on 2026-07-14. Update intentionally with
-# `autotrainer lock`; never publish a run against a moving branch.
 model:
   provider: huggingface
   id: Qwen/Qwen3.5-9B
   revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
-  # Keep the large Hub snapshot on the project drive and in the same runtime
-  # environment used for training. The GUI exposes this path explicitly.
   cache_dir: ./.autotrainer/model-cache
   loader: qwen3_5_text
   trust_remote_code: false
@@ -23,95 +17,13 @@ model:
     quant_type: nf4
     double_quant: true
     compute_dtype: bfloat16
-
-sources:
-  - id: preferred-pricing-ui
-    kind: repository
-    uri: ../..
-    revision: HEAD
-    partition: train
-    roles:
-      - style
-      - rl_seed
-    include:
-      - examples/frontend-expert/fixture-site/**
-    exclude:
-      - node_modules/**
-      - dist/**
-      - "**/.autotrainer-verifier-report.json"
-      - "**/playwright-report/**"
-      - "**/test-results/**"
-    runtime:
-      preset: react-vite-tailwind
-      working_directory: examples/frontend-expert/fixture-site
-      install: cp -a /opt/autotrainer/frontend-deps/node_modules ./node_modules
-      build: npm run build
-      test: npm test
-      browser_test: npm run test:browser
-    license:
-      spdx: Apache-2.0
-      attribution: AutoTrainer frontend-expert example
-
-  - id: accepted-frontend-demonstrations
-    kind: sft_jsonl
-    uri: ./data/sft-messages.jsonl
-    partition: train
-    roles:
-      - demonstrations
-    license:
-      spdx: Apache-2.0
-      attribution: AutoTrainer frontend-expert example
-
-  - id: frontend-rl-tasks
-    kind: task_pack
-    uri: ./tasks/train
-    partition: train
-    roles:
-      - rl_tasks
-    license:
-      spdx: Apache-2.0
-      attribution: AutoTrainer frontend-expert example
-
-  # This in-repo evaluation site is an open authoring fixture, not an independent
-  # repository holdout. A different source ID does not hide that both entries
-  # resolve to the AutoTrainer Git repository, so final evaluation planning is
-  # expected to block until this source points at a genuinely separate repo.
-  - id: held-out-newsletter-site
-    kind: repository
-    uri: ../..
-    revision: HEAD
-    partition: evaluation
-    roles:
-      - evaluation
-    include:
-      - examples/frontend-expert/evaluation-site/**
-    exclude:
-      - node_modules/**
-      - dist/**
-      - "**/.autotrainer-verifier-report.json"
-      - "**/playwright-report/**"
-      - "**/test-results/**"
-    license:
-      spdx: Apache-2.0
-      attribution: AutoTrainer held-out newsletter example
-
-  - id: held-out-frontend
-    kind: task_pack
-    uri: ./tasks/evaluation
-    partition: evaluation
-    roles:
-      - evaluation
-    license:
-      spdx: Apache-2.0
-      attribution: AutoTrainer held-out evaluation tasks
-
+sources: []
 qlora:
   rank: 32
   alpha: 32
   dropout: 0.0
   bias: none
   target_modules: all-linear
-
 sft:
   enabled: true
   dataset: ./.autotrainer/compiled/sft/train.jsonl
@@ -130,7 +42,6 @@ sft:
   seed: 42
   logging_steps: 5
   save_steps: 50
-
 grpo:
   enabled: true
   algorithm: grpo
@@ -144,7 +55,7 @@ grpo:
   generation_batch_size: 2
   max_completion_length: 2048
   max_tool_calling_iterations: 8
-  learning_rate: 0.00001
+  learning_rate: 1.0e-05
   beta: 0.0
   loss_type: dapo
   bf16: true
@@ -155,7 +66,6 @@ grpo:
   top_p: 0.8
   top_k: 20
   seed: 42
-
 environment:
   factory: autotrainer.environments.frontend:FrontendEnvironment
   backend: docker
@@ -163,27 +73,22 @@ environment:
   network: none
   max_tool_output_chars: 20000
   episode_timeout_seconds: 900
-
 evaluation:
   task_pack: held-out-frontend
-  # This compiled file is reserved for the final proof suites. It is never
-  # passed to SFT or GRPO as a training-time validation dataset.
   dataset: ./.autotrainer/compiled/rl/evaluation.jsonl
   task_split: evaluation
   repetitions: 3
   seeds:
-    - 1701
-    - 1702
-    - 1703
+  - 1701
+  - 1702
+  - 1703
   holdout_unit: repository
   primary_metric: verified_task_success
   candidates:
-    - reference_9b
-    - base_fable
-    - autotrainer
+  - reference_9b
+  - base_fable
+  - autotrainer
   arms:
-    # This is the unadapted 9B benchmark. Change the model/revision here to use
-    # a different immutable 9B reference without changing the training model.
     reference_9b:
       label: Base Qwen3.5 9B reference
       role: reference
@@ -214,26 +119,24 @@ evaluation:
     model_benchmark:
       kind: model_benchmark
       arms:
-        - reference_9b
-        - autotrainer
+      - reference_9b
+      - autotrainer
       runner:
         type: command
         producer: local-model-agent
-        # Replace these three values with the exact local runner identity before
-        # writing a plan. The planner intentionally blocks placeholders.
         version: REPLACE_WITH_RUNNER_VERSION
         orchestration_sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
         argv:
-          - REPLACE_WITH_MODEL_AGENT
-          - --request
-          - "{request}"
-          - --result
-          - "{result}"
+        - REPLACE_WITH_MODEL_AGENT
+        - --request
+        - '{request}'
+        - --result
+        - '{result}'
     fable_ab:
       kind: fable_ab
       arms:
-        - base_fable
-        - autotrainer
+      - base_fable
+      - autotrainer
       runner:
         type: external
         producer: fable
@@ -246,9 +149,9 @@ evaluation:
         reviewers_per_pair: 3
   fairness:
     paired_by:
-      - task_id
-      - repetition
-      - seed
+    - task_id
+    - repetition
+    - seed
     same_task_snapshot: true
     same_instruction: true
     same_tools_and_limits: true
@@ -267,14 +170,13 @@ evaluation:
       control: reference_9b
       metric: verified_task_success
       minimum_delta: 0.0
-      minimum_tasks: 2
+      minimum_tasks: 5
     fable_ab:
       candidate: autotrainer
       control: base_fable
       metric: blind_preference_rate
       minimum_rate: 0.5
-      minimum_tasks: 2
-
+      minimum_tasks: 5
 package:
   name: polished-frontend-9b
   type: lora_adapter
@@ -282,9 +184,9 @@ package:
   output_dir: ./.autotrainer/packages/polished-frontend-9b
   merge_base_weights: false
   include:
-    - adapter
-    - system_prompt
-    - tool_schema
-    - evaluation_report
-    - source_license_manifest
-    - resolved_recipe
+  - adapter
+  - system_prompt
+  - tool_schema
+  - evaluation_report
+  - source_license_manifest
+  - resolved_recipe

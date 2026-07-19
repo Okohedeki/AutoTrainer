@@ -1246,6 +1246,49 @@ textarea { font: inherit; }
 .source-submit-row p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .source-cards li > div > small { color: var(--muted); font-size: 9px; line-height: 1.45; }
 
+/* Guided executable-task authoring stays in Data beside repository intent. */
+.task-authoring { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.task-authoring > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.task-authoring > header h3 { margin: 4px 0 0; font-size: 13px; }
+.task-authoring > header p { max-width: 650px; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.task-authoring-form { margin-top: 15px; display: grid; gap: 0; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.task-form-section { padding: 14px; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 11px; border-bottom: 1px solid var(--line); }
+.task-form-number { width: 23px; height: 23px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: #242c34; font: 750 9px/1 "SFMono-Regular", Consolas, monospace; }
+.task-form-section > div { min-width: 0; display: grid; gap: 7px; }
+.task-form-section label { color: #4f5964; font-size: 10px; font-weight: 750; }
+.task-form-section label > span { display: block; margin-bottom: 6px; }
+.task-form-section input,
+.task-form-section select,
+.task-form-section textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: #fff; font: 10px/1.45 inherit; }
+.task-form-section select,
+.task-form-section input { min-height: 38px; }
+.task-form-section textarea { resize: vertical; }
+.task-form-section small { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.task-form-section small code { color: #4d5760; font-size: 8px; }
+.task-runtime-fields,
+.task-verifier-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px !important; }
+.task-runtime-fields > label:first-child,
+.task-runtime-fields > details,
+.task-verifier-fields > label:first-child,
+.task-verifier-fields > p { grid-column: 1 / -1; }
+.task-runtime-fields .advanced-options { margin-top: 2px; }
+.task-runtime-optional { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.task-verifier-fields > p { margin: 0; padding: 10px; border-left: 3px solid #c5a64b; color: #665a36; background: #fffbeb; font-size: 9px; line-height: 1.5; }
+.task-verifier-fields > p code { color: #53471f; font-size: 8px; }
+.task-authoring-submit { padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.task-authoring-submit p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.task-authoring-empty { margin-top: 14px; }
+.authored-task-list { margin: 14px 0 0; padding: 0; display: grid; list-style: none; border-top: 1px solid var(--line); }
+.authored-task-list li { padding: 12px 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto auto; gap: 11px; align-items: start; border-bottom: 1px solid var(--line); }
+.authored-task-list li > span:first-child { padding-top: 3px; color: var(--muted); font: 750 8px/1 "SFMono-Regular", Consolas, monospace; }
+.authored-task-list li > div { min-width: 0; display: grid; gap: 3px; }
+.authored-task-list strong { font-size: 10px; }
+.authored-task-list p { margin: 0; color: #515b65; font-size: 9px; line-height: 1.45; }
+.authored-task-list code,
+.authored-task-list small { color: var(--muted); font-size: 8px; line-height: 1.4; }
+.authored-task-list button { padding: 3px 0; border: 0; color: var(--muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
+.authored-task-list button:hover:not(:disabled) { color: var(--danger); }
+
 /* Shared live telemetry */
 .telemetry-chart { margin-top: 13px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #fbfcfd; }
 .telemetry-chart > header { min-height: 62px; padding: 12px 13px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: #fff; }
@@ -1489,6 +1532,9 @@ textarea { font: inherit; }
   .projects-workspace,
   .source-purpose-options,
   .source-advanced-grid,
+  .task-runtime-fields,
+  .task-runtime-optional,
+  .task-verifier-fields,
   .grpo-overview-grid,
   .grpo-detail-grid,
   .training-output-grid,
@@ -1510,6 +1556,11 @@ textarea { font: inherit; }
   .project-list li > button { grid-column: 2 / -1; justify-self: start; }
   .source-submit-row { align-items: stretch; flex-direction: column; }
   .source-submit-row .primary-button { width: 100%; }
+  .task-authoring > header,
+  .task-authoring-submit { align-items: stretch; flex-direction: column; }
+  .task-authoring-submit .primary-button { width: 100%; }
+  .authored-task-list li { grid-template-columns: 36px minmax(0, 1fr) auto; }
+  .authored-task-list li > button { grid-column: 2 / -1; justify-self: start; }
   .granularity-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .granularity-switch button { width: 100%; }
   .grpo-outcome-distribution li { grid-template-columns: 1fr; gap: 6px; }

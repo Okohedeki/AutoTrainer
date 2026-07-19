@@ -5,6 +5,7 @@ import inspect
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -69,6 +70,96 @@ class TrainingDependencyContractTests(unittest.TestCase):
         autotrainer_source = inspect.getsource(run_grpo)
         before_trainer = autotrainer_source.split("trainer = GRPOTrainer", 1)[0]
         self.assertNotIn("get_training_chat_template", before_trainer)
+
+    def test_real_grpo_trainer_initializes_and_renders_every_environment_tool(self) -> None:
+        """Exercise TRL's actual environment probe and tool-schema rendering path."""
+
+        from datasets import Dataset
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import (
+            GPT2Config,
+            GPT2LMHeadModel,
+            PreTrainedTokenizerFast,
+        )
+        from trl import GRPOConfig, GRPOTrainer
+        from trl.chat_template_utils import qwen3_5_nothink_chat_template
+
+        from autotrainer.environments.frontend import FrontendEnvironment
+
+        backend = Tokenizer(
+            WordLevel(
+                vocab={"<unk>": 0, "<pad>": 1, "<eos>": 2},
+                unk_token="<unk>",
+            )
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+            pad_token="<pad>",
+            eos_token="<eos>",
+        )
+        tokenizer.chat_template = qwen3_5_nothink_chat_template
+        tokenizer.padding_side = "left"
+        model = GPT2LMHeadModel(
+            GPT2Config(
+                vocab_size=len(tokenizer),
+                n_positions=64,
+                n_embd=16,
+                n_layer=1,
+                n_head=1,
+                bos_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        )
+        prompt = [
+            {"role": "system", "content": "Use the tools."},
+            {"role": "user", "content": "Inspect and repair the fixture."},
+        ]
+        dataset = Dataset.from_list(
+            [{"prompt": prompt, "task_id": "environment-contract"}]
+        )
+
+        with tempfile.TemporaryDirectory() as output:
+            trainer = GRPOTrainer(
+                model=model,
+                args=GRPOConfig(
+                    output_dir=str(Path(output) / "trainer"),
+                    per_device_train_batch_size=1,
+                    gradient_accumulation_steps=2,
+                    num_generations=2,
+                    generation_batch_size=2,
+                    max_completion_length=8,
+                    max_steps=1,
+                    use_vllm=False,
+                    bf16=False,
+                    fp16=False,
+                    report_to="none",
+                    remove_unused_columns=False,
+                ),
+                train_dataset=dataset,
+                processing_class=tokenizer,
+                environment_factory=FrontendEnvironment,
+            )
+            self.assertEqual(
+                {tool.__name__ for tool in trainer.tools},
+                {
+                    "apply_patch",
+                    "list_files",
+                    "read_file",
+                    "run_check",
+                    "search_code",
+                },
+            )
+            # Schema conversion is lazy in TRL 1.8. Force the exact path used
+            # immediately before generation; malformed Args documentation used
+            # to raise DocstringParsingException here.
+            trainer._batch_environments = [None]
+            prompt_ids, images, multimodal_fields = trainer._tokenize_prompts([prompt])
+            self.assertTrue(prompt_ids[0])
+            self.assertIsNone(images)
+            self.assertEqual(multimodal_fields, {})
 
     def test_peft_can_record_the_immutable_base_revision(self) -> None:
         from peft import LoraConfig

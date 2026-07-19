@@ -2,9 +2,13 @@ import { useEffect, useState } from "react";
 import {
   ApiClientError,
   addProjectSource,
+  createAuthoredTask,
+  getAuthoredTasks,
   getProjectSources,
+  removeAuthoredTask,
   removeProjectSource,
   searchGitHubRepositories,
+  type AuthoredTask,
   type ProjectSource,
   type RepositorySearchResult,
   type SourceMode,
@@ -52,6 +56,14 @@ function compactStars(value: number) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
+function authoredTaskSplit(source: ProjectSource): "train" | "evaluation" | null {
+  if (source.kind !== "repository") return null;
+  const selected = displayedModes(source);
+  if (selected.includes("practice_tasks")) return "train";
+  if (selected.includes("evaluation_holdout")) return "evaluation";
+  return null;
+}
+
 // Purpose is required because a repository is not training data by itself.
 // Accepted changes and practice tasks may be combined; reference and holdout
 // stay exclusive so one source cannot silently leak into evaluation.
@@ -77,12 +89,26 @@ export default function SourceSetupPanel({
   const [repositorySearching, setRepositorySearching] = useState(false);
   const [repositorySearchError, setRepositorySearchError] = useState<string | null>(null);
   const [repositorySearchEnabled, setRepositorySearchEnabled] = useState(true);
+  const [authoredTasks, setAuthoredTasks] = useState<AuthoredTask[]>([]);
+  const [taskSourceId, setTaskSourceId] = useState("");
+  const [taskInstruction, setTaskInstruction] = useState("");
+  const [taskWorkingDirectory, setTaskWorkingDirectory] = useState(".");
+  const [taskInstall, setTaskInstall] = useState("");
+  const [taskBuild, setTaskBuild] = useState("");
+  const [taskTests, setTaskTests] = useState("");
+  const [taskBrowserTests, setTaskBrowserTests] = useState("");
+  const [taskVerifierBundle, setTaskVerifierBundle] = useState("");
+  const [taskVerifierCommand, setTaskVerifierCommand] = useState("node /autotrainer-verifier/verify.mjs");
+  const [taskVerifierReport, setTaskVerifierReport] = useState(".autotrainer-verifier-report.json");
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    getProjectSources(controller.signal)
-      .then((next) => {
-        setSources(next);
+    Promise.all([getProjectSources(controller.signal), getAuthoredTasks(controller.signal)])
+      .then(([nextSources, taskWorkspace]) => {
+        setSources(nextSources);
+        setAuthoredTasks(taskWorkspace.tasks);
         setConnected(true);
         setError(null);
       })
@@ -93,6 +119,14 @@ export default function SourceSetupPanel({
       });
     return () => controller.abort();
   }, []);
+
+  const taskSources = sources.filter((source) => authoredTaskSplit(source) !== null);
+  const selectedTaskSource = taskSources.find((source) => source.id === taskSourceId) ?? null;
+
+  useEffect(() => {
+    if (taskSources.some((source) => source.id === taskSourceId)) return;
+    setTaskSourceId(taskSources[0]?.id ?? "");
+  }, [sources, taskSourceId]);
 
   useEffect(() => {
     if (connected !== true || !repositorySearchEnabled || !shouldSearchGitHub(value)) {
@@ -191,6 +225,61 @@ export default function SourceSetupPanel({
     }
   };
 
+  const submitTask = async () => {
+    if (!taskSourceId || taskInstruction.trim().length < 20 || !taskBuild.trim() || !taskTests.trim() || !taskVerifierBundle.trim() || !taskVerifierCommand.trim()) return;
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const workspace = await createAuthoredTask({
+        source_id: taskSourceId,
+        instruction: taskInstruction.trim(),
+        working_directory: taskWorkingDirectory.trim() || ".",
+        ...(taskInstall.trim() ? { install: taskInstall.trim() } : {}),
+        build: taskBuild.trim(),
+        tests: taskTests.trim(),
+        ...(taskBrowserTests.trim() ? { browser_tests: taskBrowserTests.trim() } : {}),
+        verifier_bundle: taskVerifierBundle.trim(),
+        verifier_command: taskVerifierCommand.trim(),
+        verifier_report_path: taskVerifierReport.trim() || ".autotrainer-verifier-report.json",
+      });
+      setAuthoredTasks(workspace.tasks);
+      // Creating the first task also declares its managed task pack in YAML.
+      // Refresh the source list so the GUI immediately reflects that shared state.
+      setSources(await getProjectSources());
+      setTaskInstruction("");
+      setTaskError(null);
+      onSourcesChanged?.();
+    } catch (reason) {
+      setTaskError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not author that task.");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  const deleteTask = async (task: AuthoredTask) => {
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const workspace = await removeAuthoredTask(task.split, task.id);
+      setAuthoredTasks(workspace.tasks);
+      setSources(await getProjectSources());
+      onSourcesChanged?.();
+    } catch (reason) {
+      setTaskError(reason instanceof ApiClientError ? reason.message : "AutoTrainer could not remove that task.");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  const taskFormReady = Boolean(
+    taskSourceId
+    && taskInstruction.trim().length >= 20
+    && taskBuild.trim()
+    && taskTests.trim()
+    && taskVerifierBundle.trim()
+    && taskVerifierCommand.trim(),
+  );
+
   return (
     <section className="panel setup-step source-setup" aria-labelledby="source-setup-heading" data-tour="sources">
       <header className="step-heading source-setup-header">
@@ -274,6 +363,94 @@ export default function SourceSetupPanel({
       ) : connected !== false ? (
         <div className="source-empty"><strong>No sources configured</strong><p>Add the repository or local folder that represents the work this specialist should master.</p></div>
       ) : null}
+
+      <div className="task-authoring" aria-labelledby="task-authoring-heading">
+        <header>
+          <div>
+            <span className="eyebrow">Executable work</span>
+            <h3 id="task-authoring-heading">Create a practice or evaluation task</h3>
+            <p>A repository supplies the locked starting state. You supply the exact instruction, commands, and hidden verifier that define success.</p>
+          </div>
+          <span className="status-chip muted">{authoredTasks.length} authored</span>
+        </header>
+
+        {taskError && <div className="source-error" role="alert">{taskError}</div>}
+
+        {taskSources.length ? (
+          <form className="task-authoring-form" onSubmit={(event) => { event.preventDefault(); void submitTask(); }}>
+            <div className="task-form-section">
+              <span className="task-form-number" aria-hidden="true">1</span>
+              <div>
+                <label htmlFor="task-source">Locked source</label>
+                <select id="task-source" value={taskSourceId} onChange={(event) => setTaskSourceId(event.target.value)} disabled={taskBusy || busy !== null || disabled}>
+                  {taskSources.map((source) => (
+                    <option key={source.id} value={source.id}>{source.label} · {authoredTaskSplit(source) === "train" ? "GRPO practice" : "held-out evaluation"}</option>
+                  ))}
+                </select>
+                {selectedTaskSource && <small>Pinned at <code>{selectedTaskSource.revision}</code>. The selected repository purpose fixes this task to the {authoredTaskSplit(selectedTaskSource)} split.</small>}
+              </div>
+            </div>
+
+            <div className="task-form-section">
+              <span className="task-form-number" aria-hidden="true">2</span>
+              <div>
+                <label htmlFor="task-instruction">What should the model change?</label>
+                <textarea id="task-instruction" value={taskInstruction} onChange={(event) => setTaskInstruction(event.target.value)} placeholder="Describe one observable change, its constraints, and what must remain working." rows={3} disabled={taskBusy || disabled} />
+                <small>Use one concrete task. This instruction is the prompt; repository files are not silently converted into training examples.</small>
+              </div>
+            </div>
+
+            <div className="task-form-section">
+              <span className="task-form-number" aria-hidden="true">3</span>
+              <div className="task-runtime-fields">
+                <label htmlFor="task-workdir"><span>Working directory</span><input id="task-workdir" value={taskWorkingDirectory} onChange={(event) => setTaskWorkingDirectory(event.target.value)} placeholder="." disabled={taskBusy || disabled} /></label>
+                <label htmlFor="task-build"><span>Build command</span><input id="task-build" value={taskBuild} onChange={(event) => setTaskBuild(event.target.value)} placeholder="npm run build" disabled={taskBusy || disabled} /></label>
+                <label htmlFor="task-tests"><span>Regression tests</span><input id="task-tests" value={taskTests} onChange={(event) => setTaskTests(event.target.value)} placeholder="npm test" disabled={taskBusy || disabled} /></label>
+                <details className="advanced-options">
+                  <summary>Install and browser commands</summary>
+                  <div className="task-runtime-optional">
+                    <label htmlFor="task-install"><span>Install command</span><input id="task-install" value={taskInstall} onChange={(event) => setTaskInstall(event.target.value)} placeholder="Leave blank if the runtime image supplies dependencies" disabled={taskBusy || disabled} /></label>
+                    <label htmlFor="task-browser-tests"><span>Browser tests</span><input id="task-browser-tests" value={taskBrowserTests} onChange={(event) => setTaskBrowserTests(event.target.value)} placeholder="npm run test:browser" disabled={taskBusy || disabled} /></label>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <div className="task-form-section">
+              <span className="task-form-number" aria-hidden="true">4</span>
+              <div className="task-verifier-fields">
+                <label htmlFor="task-verifier-bundle"><span>Hidden verifier folder</span><input id="task-verifier-bundle" value={taskVerifierBundle} onChange={(event) => setTaskVerifierBundle(event.target.value)} placeholder="C:\\path\\outside\\the\\repository\\verifier" disabled={taskBusy || disabled} /></label>
+                <label htmlFor="task-verifier-command"><span>Verifier command</span><input id="task-verifier-command" value={taskVerifierCommand} onChange={(event) => setTaskVerifierCommand(event.target.value)} disabled={taskBusy || disabled} /></label>
+                <label htmlFor="task-verifier-report"><span>Report path in workspace</span><input id="task-verifier-report" value={taskVerifierReport} onChange={(event) => setTaskVerifierReport(event.target.value)} disabled={taskBusy || disabled} /></label>
+                <p>The verifier stays outside the editable repository. Its JSON report must contain <code>build_passed</code>, <code>regression_pass_rate</code>, <code>task_pass_rate</code>, <code>responsive_pass_rate</code>, <code>design_rule_pass_rate</code>, and <code>code_quality_pass_rate</code>. AutoTrainer does not generate hidden tests or guess correctness.</p>
+              </div>
+            </div>
+
+            <div className="task-authoring-submit">
+              <p>Creating this task declares its manifest. <strong>Prepare must still execute every gate</strong> before training is ready.</p>
+              <button className="primary-button" type="submit" disabled={!taskFormReady || taskBusy || disabled}>{taskBusy ? "Creating..." : "Create task"}</button>
+            </div>
+          </form>
+        ) : (
+          <div className="source-empty task-authoring-empty">
+            <strong>Choose a task-capable repository first</strong>
+            <p>Add a repository as “Executable tasks → GRPO” for practice, or as an isolated evaluation holdout. Reference-only code cannot become a task.</p>
+          </div>
+        )}
+
+        {authoredTasks.length > 0 && (
+          <ul className="authored-task-list" aria-label="Authored executable tasks">
+            {authoredTasks.map((task) => (
+              <li key={`${task.split}-${task.id}`}>
+                <span>{task.split === "train" ? "GRPO" : "EVAL"}</span>
+                <div><strong>{task.id}</strong><p>{task.instruction || task.blockers[0]}</p><code>{task.source_id || "unknown source"} · {task.working_directory || "."}</code>{task.next_action && <small><b>{task.next_action.title}.</b> {task.next_action.detail}</small>}</div>
+                <span className={`status-chip ${task.status === "blocked" ? "danger" : "muted"}`}>{task.status}</span>
+                <button type="button" onClick={() => void deleteTask(task)} disabled={taskBusy || disabled} aria-label={`Remove task ${task.id}`}>Remove</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }
