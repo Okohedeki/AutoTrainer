@@ -61,6 +61,7 @@ class FrontendEnvironment:
         self._tool_calls_by_name: dict[str, int] = {}
         self._max_output_chars = 12_000
         self._install_result: CheckResult | None = None
+        self._install_untracked_paths: set[str] = set()
         self._check_results: dict[str, CheckResult] = {}
         self._started_at: float | None = None
         self._deadline: float | None = None
@@ -96,6 +97,13 @@ class FrontendEnvironment:
                 )
             install = manifest.runtime_commands.get("install", "").strip()
             self._install_result = self._run_named_check("install", install)
+            if self._install_result.configured:
+                # Dependency installation commonly materializes large ignored or
+                # untracked trees such as node_modules. They are trusted setup
+                # output, not policy edits, and some container-created shims
+                # cannot even be opened by the Windows host Git client. Remember
+                # the exact post-install paths so patch capture never stages them.
+                self._install_untracked_paths = self._list_untracked_paths()
             if self._install_result.timed_out:
                 self._finish_timeout(self._install_result, "install")
             install_status = self._install_result.status.replace("_", " ")
@@ -550,6 +558,7 @@ class FrontendEnvironment:
         self._tool_calls = 0
         self._tool_calls_by_name = {}
         self._install_result = None
+        self._install_untracked_paths = set()
         self._check_results = {}
         self._latest_diff = ""
         self._last_result = None
@@ -795,14 +804,25 @@ class FrontendEnvironment:
 
     def _capture_unified_diff(self) -> str:
         workspace = self._require_workspace()
-        intent = self._run_git(
-            workspace,
-            "add",
-            "--intent-to-add",
-            "--all",
+        candidate_paths = sorted(
+            self._list_untracked_paths() - self._install_untracked_paths
         )
-        if intent.returncode:
-            raise RuntimeError(f"could not prepare unified diff: {intent.stderr.strip()}")
+        if candidate_paths:
+            # Feed literal NUL-delimited pathspecs through stdin. This preserves
+            # policy-created files without traversing or hashing install output.
+            pathspecs = "".join(f"{path}\0" for path in candidate_paths)
+            intent = self._run_git(
+                workspace,
+                "add",
+                "--intent-to-add",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+                input_value=pathspecs,
+            )
+            if intent.returncode:
+                raise RuntimeError(
+                    f"could not prepare unified diff: {intent.stderr.strip()}"
+                )
         diff = self._run_git(
             workspace,
             "diff",
@@ -815,6 +835,21 @@ class FrontendEnvironment:
             raise RuntimeError(f"could not capture unified diff: {diff.stderr.strip()}")
         self._check_deadline()
         return diff.stdout
+
+    def _list_untracked_paths(self) -> set[str]:
+        workspace = self._require_workspace()
+        result = self._run_git(
+            workspace,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"could not enumerate untracked files: {result.stderr.strip()}"
+            )
+        return {path for path in result.stdout.split("\0") if path}
 
     def _load_manifest(self, row: Mapping[str, Any]) -> tuple[Mapping[str, Any], Path]:
         if isinstance(row.get("manifest"), Mapping):

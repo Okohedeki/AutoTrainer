@@ -630,6 +630,54 @@ class SnapshotIsolationTests(unittest.TestCase):
                         )
 
 
+class DiffCaptureTests(unittest.TestCase):
+    def test_excludes_install_artifacts_but_includes_policy_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            workspace.mkdir()
+            subprocess.run(
+                ["git", "init", "--quiet", str(workspace)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            tracked = workspace / "app.css"
+            tracked.write_text(".cards { display: grid; }\n", encoding="utf-8")
+            SnapshotIsolationTests._git(workspace, "add", "--all")
+            SnapshotIsolationTests._git(
+                workspace,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            )
+
+            generated = workspace / "node_modules" / ".bin" / "tool"
+            generated.parent.mkdir(parents=True)
+            generated.write_text("generated setup output\n", encoding="utf-8")
+
+            environment = FrontendEnvironment()
+            environment._workspace = workspace
+            environment._temporary_root = workspace.parent
+            environment._install_untracked_paths = environment._list_untracked_paths()
+
+            generated.write_text("changed generated output\n", encoding="utf-8")
+            tracked.write_text(".cards { grid-template-columns: 1fr; }\n", encoding="utf-8")
+            (workspace / "policy-created.css").write_text(
+                ".cards { gap: 1rem; }\n", encoding="utf-8"
+            )
+
+            diff = environment._capture_unified_diff()
+
+            self.assertIn("app.css", diff)
+            self.assertIn("policy-created.css", diff)
+            self.assertNotIn("node_modules", diff)
+
+
 class EpisodeFinalizationTests(unittest.TestCase):
     def prepare_environment(
         self,
