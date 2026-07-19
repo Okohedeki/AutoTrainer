@@ -23,6 +23,7 @@ from autotrainer.local_evaluation_runner import (  # noqa: E402
     SOURCE_PROTOCOL_IDENTITY,
     LocalEvaluationRunnerError,
     _locked_source_context,
+    _prompt_with_environment_observation,
     _TOOL_SCHEMAS,
     _sha256_tree,
     _source_protocol_identity,
@@ -46,6 +47,16 @@ def _request(arm_id: str = "candidate") -> dict:
         "seed": 1701,
         "runner": {"type": "builtin", **builtin_runner_identity()},
         "task": {
+            "prompt": [
+                {
+                    "role": "system",
+                    "content": "Use the bounded tools and preserve regressions.",
+                },
+                {
+                    "role": "user",
+                    "content": "Repair the responsive card without changing its copy.",
+                },
+            ],
             "source_path": "unused-by-injected-context",
             "source_revision": "d" * 40,
             "manifest": {
@@ -154,7 +165,7 @@ class _FakeEnvironment:
 
     def reset(self, **task_row: object) -> str:
         del task_row
-        return "Task: repair the responsive card. Inspect, patch, and check it."
+        return "\n\nEnvironment state:\nLocked source: storefront@revision."
 
     def list_files(self, path: str = ".") -> str:
         del path
@@ -183,6 +194,19 @@ class _FakeEnvironment:
 
 
 class LocalEvaluationRunnerTests(unittest.TestCase):
+    def test_evaluation_mirrors_trl_reset_append_without_repeating_instruction(self) -> None:
+        task = _request()["task"]
+        observation = "\n\nEnvironment state:\nLocked source: storefront@revision."
+
+        messages = _prompt_with_environment_observation(task, observation)
+
+        self.assertEqual(messages[-1]["role"], "user")
+        self.assertEqual(
+            messages[-1]["content"],
+            "Repair the responsive card without changing its copy." + observation,
+        )
+        self.assertEqual(messages[-1]["content"].count("Repair the responsive card"), 1)
+
     def test_evaluation_uses_the_exact_grpo_tool_schemas(self) -> None:
         try:
             from transformers.utils import get_json_schema
@@ -455,7 +479,8 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             token_count = generators["candidate"].count_tokens_with_tools(messages, [])
             self.assertLessEqual(token_count + MAX_NEW_TOKENS, CONTEXT_TOKENS)
             rendered = json.dumps(messages)
-            self.assertIn("repair the responsive card", rendered)
+            self.assertIn("Repair the responsive card", rendered)
+            self.assertEqual(rendered.count("Repair the responsive card"), 1)
             self.assertNotIn("hidden-secret-verifier", rendered)
             self.assertNotIn("hidden_weight", rendered)
             result = json.loads(first.read_text(encoding="utf-8"))

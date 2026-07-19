@@ -76,6 +76,36 @@ class PolicyToolSurfaceTests(unittest.TestCase):
                 self.assertEqual(set(properties), expected)
 
 
+class ResetPromptContractTests(unittest.TestCase):
+    def test_reset_returns_a_separated_observation_without_repeating_the_prompt(self) -> None:
+        manifest = TaskManifest.from_mapping(executable_manifest())
+
+        class ResetOnlyEnvironment(FrontendEnvironment):
+            def _initialize(self, task_row: Mapping[str, Any]) -> tuple[TaskManifest, str]:
+                del task_row
+                return manifest, "a" * 40
+
+            def _run_named_check(self, name: str, command: str) -> CheckResult:
+                del command
+                return CheckResult(
+                    name=name,
+                    configured=False,
+                    status="not_configured",
+                    passed=None,
+                    returncode=None,
+                    timed_out=False,
+                    duration_seconds=0.0,
+                    stdout="",
+                    stderr="",
+                )
+
+        observation = ResetOnlyEnvironment().reset()
+
+        self.assertTrue(observation.startswith("\n\nEnvironment state:\n"))
+        self.assertNotIn(manifest.instruction, observation)
+        self.assertEqual((manifest.instruction + observation).count(manifest.instruction), 1)
+
+
 def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[str, Any]:
     return {
         "version": "1.0",

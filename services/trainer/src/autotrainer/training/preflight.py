@@ -77,6 +77,13 @@ def run_grpo_environment_canary(
         observation = reset(**row)
         if not isinstance(observation, str) or not observation.strip():
             raise TrainingRuntimeError("GRPO environment reset must return a text observation")
+        # TRL appends reset output directly to the last prompt message. Require
+        # a visible boundary so custom environments cannot glue observation
+        # text onto the operator's instruction or repeat it ambiguously.
+        if not observation.startswith("\n\n"):
+            raise TrainingRuntimeError(
+                "GRPO environment reset observation must begin with a blank-line separator"
+            )
         reward = get_reward()
     except TrainingRuntimeError:
         raise

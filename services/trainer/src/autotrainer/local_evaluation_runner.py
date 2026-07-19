@@ -44,14 +44,6 @@ TOP_P = 0.9
 
 MAX_TOOL_CALLING_ITERATIONS = 8
 
-_SYSTEM_PROMPT = (
-    "You are AutoTrainer's local held-out coding agent. Inspect the locked "
-    "repository with the provided bounded tools, apply the smallest focused "
-    "patch that satisfies the task, and run useful named checks. Network access "
-    "is disabled and no shell tool exists. Do not describe hidden reasoning. "
-    "After a patch has been applied, finish with the single word DONE."
-)
-
 # Keep this schema code-owned and frozen in the runner identity. It mirrors the
 # five public methods on FrontendEnvironment, which TRL exposes during GRPO.
 _TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -199,7 +191,7 @@ _ORCHESTRATION_SPEC = {
     "version": PRODUCER_VERSION,
     "strategy": "native-qwen-multiturn-environment-tools",
     "source": "locked-disposable-environment",
-    "prompt": {"system": _SYSTEM_PROMPT},
+    "prompt": "frozen-compiled-conversation-plus-trl-reset-observation",
     "model_residency": "one-arm-at-a-time-suite-arm-groups",
     "generation": {
         "context_tokens": CONTEXT_TOKENS,
@@ -935,6 +927,40 @@ def _tool_call_message(prefix: str, calls: Sequence[_ToolCall]) -> dict[str, Any
     }
 
 
+def _prompt_with_environment_observation(
+    task_row: Mapping[str, Any], observation: str
+) -> list[dict[str, Any]]:
+    """Mirror TRL's environment reset append for the frozen compiled prompt."""
+
+    prompt = task_row.get("prompt")
+    if not isinstance(prompt, list) or not prompt:
+        raise LocalEvaluationRunnerError(
+            "the frozen task row has no conversational prompt"
+        )
+    messages = json.loads(json.dumps(prompt))
+    if not all(
+        isinstance(message, dict)
+        and isinstance(message.get("role"), str)
+        and isinstance(message.get("content"), str)
+        for message in messages
+    ):
+        raise LocalEvaluationRunnerError(
+            "the frozen task row contains an invalid conversational prompt"
+        )
+    if messages[-1]["role"] != "user":
+        raise LocalEvaluationRunnerError(
+            "the frozen task prompt must end with a user message"
+        )
+    if not observation.startswith("\n\n"):
+        raise LocalEvaluationRunnerError(
+            "the environment reset observation must begin with a message separator"
+        )
+    # TRL 1.8 appends reset output to the final message. Reproducing that exact
+    # operation keeps held-out evaluation aligned with GRPO prompt semantics.
+    messages[-1]["content"] += observation
+    return messages
+
+
 class BuiltinEvaluationProducer:
     """Run the GRPO tool surface with one persistent, locally cached arm."""
 
@@ -1125,10 +1151,7 @@ class BuiltinEvaluationProducer:
                 raise LocalEvaluationRunnerError(
                     "the evaluation environment reset did not return text"
                 )
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": observation},
-            ]
+            messages = _prompt_with_environment_observation(task_row, observation)
             total_input_tokens = 0
             total_output_tokens = 0
             tool_calls = 0

@@ -34,16 +34,19 @@ class FakeEnvironment:
         task_pass_rate: float = 0.0,
         failed_check: str | None = None,
         reset_error: Exception | None = None,
+        separated_observation: bool = True,
     ) -> None:
         self.task_pass_rate = task_pass_rate
         self.failed_check = failed_check
         self.reset_error = reset_error
+        self.separated_observation = separated_observation
         self.last_result = None
 
     def reset(self, **row: object) -> str:
         if self.reset_error is not None:
             raise self.reset_error
-        return f"Task: {row['task_id']}"
+        prefix = "\n\n" if self.separated_observation else ""
+        return f"{prefix}Environment state: {row['task_id']}"
 
     def get_reward(self) -> float:
         checks = {
@@ -100,6 +103,13 @@ class TrainingPreflightTests(unittest.TestCase):
                 factory=lambda: FakeEnvironment(
                     reset_error=RuntimeError("container unavailable")
                 ),
+            )
+
+    def test_canary_rejects_an_observation_glued_to_the_compiled_prompt(self) -> None:
+        with self.assertRaisesRegex(TrainingRuntimeError, "blank-line separator"):
+            run_grpo_environment_canary(
+                self.recipe,
+                factory=lambda: FakeEnvironment(separated_observation=False),
             )
 
     def test_canary_rejects_failed_verifier(self) -> None:

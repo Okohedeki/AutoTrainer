@@ -98,9 +98,12 @@ class FrontendEnvironment:
             if self._install_result.timed_out:
                 self._finish_timeout(self._install_result, "install")
             install_status = self._install_result.status.replace("_", " ")
+            # TRL appends this string directly to the final user message with
+            # ``+=``. Begin with an explicit separator and do not repeat the
+            # instruction already present in the compiled prompt.
             return (
-                f"Task: {manifest.instruction}\n"
-                f"Source: {manifest.source_id}@{revision}\n"
+                "\n\nEnvironment state:\n"
+                f"Locked source: {manifest.source_id}@{revision}\n"
                 f"Install: {install_status}. Network access is disabled. "
                 "Inspect the repository, apply a focused patch, and run named checks."
             )
