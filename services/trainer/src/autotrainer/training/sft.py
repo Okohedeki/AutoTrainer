@@ -16,14 +16,19 @@ from .common import (
     as_serializable,
     base_recipe,
     bool_value,
+    claim_fresh_output_directory,
     float_value,
     get_section,
     inspect_sft_dataset,
     int_value,
+    mark_output_directory_complete,
     resolve_input_file,
-    validate_sft_token_lengths,
     validate_reference_dependencies,
+    validate_fresh_output_directory,
+    validate_sft_token_lengths,
     validate_single_gpu,
+    verify_dataset_identity,
+    verify_saved_adapter_provenance,
 )
 
 
@@ -119,10 +124,14 @@ def resolve_sft_recipe(
         "save_steps": int_value(section, "save_steps", 50, "sft"),
         "save_total_limit": int_value(section, "save_total_limit", 2, "sft"),
     }
+    validate_fresh_output_directory(Path(recipe["output_dir"]))
     return as_serializable(recipe)
 
 
 def _load_json_dataset(load_dataset: Any, description: Mapping[str, Any]) -> Any:
+    # Re-hash at the last boundary before Datasets opens the path.  A recipe is
+    # provenance only if mutation after dry-run is rejected at execution time.
+    verify_dataset_identity(description)
     return load_dataset("json", data_files=description["path"], split="train")
 
 
@@ -168,8 +177,7 @@ def run_sft(
         ) from error
 
     runtime = validate_single_gpu(torch)
-    destination = Path(recipe["output_dir"])
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["sft"]
@@ -227,6 +235,8 @@ def run_sft(
         model = get_peft_model(
             base_model,
             LoraConfig(
+                base_model_name_or_path=model_recipe["id"],
+                revision=model_recipe["revision"],
                 task_type=qlora["task_type"],
                 target_modules=qlora["target_modules"],
                 r=qlora["rank"],
@@ -285,10 +295,18 @@ def run_sft(
         train_output = trainer.train()
         trainer.save_model(str(destination))
         tokenizer.save_pretrained(str(destination))
+        # PEFT's adapter_config.json is the handoff contract for GRPO.  Refuse
+        # to publish an adapter if the exact base snapshot was not persisted.
+        verify_saved_adapter_provenance(
+            destination,
+            model_recipe["id"],
+            model_recipe["revision"],
+        )
         (destination / "resolved_recipe.json").write_text(
             json.dumps(recipe, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        mark_output_directory_complete(destination)
     except TrainingRuntimeError:
         raise
     except torch.cuda.OutOfMemoryError as error:

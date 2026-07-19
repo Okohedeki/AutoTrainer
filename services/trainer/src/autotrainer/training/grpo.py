@@ -17,6 +17,7 @@ from .common import (
     as_serializable,
     base_recipe,
     bool_value,
+    claim_fresh_output_directory,
     choice_value,
     float_value,
     get_section,
@@ -24,11 +25,16 @@ from .common import (
     inspect_adapter,
     inspect_grpo_dataset,
     int_value,
+    mark_output_directory_complete,
     resolve_input_directory,
     resolve_input_file,
     validate_factory_path,
+    validate_fresh_output_directory,
     validate_reference_dependencies,
     validate_single_gpu,
+    verify_adapter_tree_identity,
+    verify_dataset_identity,
+    verify_saved_adapter_provenance,
 )
 
 
@@ -231,10 +237,14 @@ def resolve_grpo_recipe(
         "save_steps": int_value(section, "save_steps", 50, "grpo"),
         "save_total_limit": int_value(section, "save_total_limit", 2, "grpo"),
     }
+    validate_fresh_output_directory(Path(recipe["output_dir"]))
     return as_serializable(recipe)
 
 
 def _load_json_dataset(load_dataset: Any, description: Mapping[str, Any]) -> Any:
+    # The static recipe locks exact bytes; enforce that lock immediately before
+    # the dataset library receives the path.
+    verify_dataset_identity(description)
     return load_dataset("json", data_files=description["path"], split="train")
 
 
@@ -298,8 +308,7 @@ def run_grpo(
                 lambda event: on_event({"stage": "grpo", **dict(event)})
             )
         return environment
-    destination = Path(recipe["output_dir"])
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["grpo"]
@@ -354,6 +363,8 @@ def run_grpo(
             policy = get_peft_model(
                 base_model,
                 LoraConfig(
+                    base_model_name_or_path=model_recipe["id"],
+                    revision=model_recipe["revision"],
                     task_type=qlora["task_type"],
                     target_modules=qlora["target_modules"],
                     r=qlora["rank"],
@@ -363,6 +374,9 @@ def run_grpo(
                 ),
             )
         else:
+            # Re-hash the complete adapter at the last boundary before PEFT
+            # opens it.  Matching adapter_config.json alone cannot bind weights.
+            verify_adapter_tree_identity(stage["start_from"]["adapter"])
             policy = PeftModel.from_pretrained(
                 base_model,
                 stage["start_from"]["adapter"]["path"],
@@ -433,10 +447,16 @@ def run_grpo(
         train_output = trainer.train()
         trainer.save_model(str(destination))
         tokenizer.save_pretrained(str(destination))
+        verify_saved_adapter_provenance(
+            destination,
+            model_recipe["id"],
+            model_recipe["revision"],
+        )
         (destination / "resolved_recipe.json").write_text(
             json.dumps(recipe, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        mark_output_directory_complete(destination)
     except TrainingRuntimeError:
         raise
     except torch.cuda.OutOfMemoryError as error:

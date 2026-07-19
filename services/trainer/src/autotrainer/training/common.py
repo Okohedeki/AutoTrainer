@@ -8,6 +8,8 @@ not have the training extras installed.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib
 import inspect
 import json
@@ -22,6 +24,7 @@ from ..sources import normalize_sft_record
 SUPPORTED_SCHEMA_VERSION = 1
 SUPPORTED_MODEL_ID = "Qwen/Qwen3.5-9B"
 SUPPORTED_MODEL_CLASS = "Qwen3_5ForCausalLM"
+IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}")
 
 REFERENCE_DEPENDENCIES: dict[str, str] = {
     "torch": "2.13.0",
@@ -173,6 +176,97 @@ def resolve_output_dir(output_dir: Path, project_root: Path) -> Path:
     return path
 
 
+def validate_fresh_output_directory(path: Path) -> None:
+    """Statically reject output that already contains another run's bytes."""
+
+    destination = Path(path)
+    if not destination.exists():
+        return
+    if not destination.is_dir():
+        raise TrainingConfigurationError(f"output_dir is not a directory: {destination}")
+    try:
+        has_entries = next(destination.iterdir(), None) is not None
+    except OSError as error:
+        raise TrainingConfigurationError(
+            f"Could not inspect output_dir before training: {destination}: {error}"
+        ) from error
+    if has_entries:
+        raise TrainingConfigurationError(
+            "output_dir must be empty for an immutable training run; "
+            f"choose a fresh path instead of reusing {destination}"
+        )
+
+
+def claim_fresh_output_directory(path: Path) -> Path:
+    """Claim an empty destination so a run can never reuse stale checkpoints.
+
+    Existing empty directories are accepted because project setup may create
+    them in advance.  The exclusive claim file closes the race between that
+    emptiness check and the trainer's first checkpoint write.  A failed run is
+    intentionally left claimed; callers must choose a new run directory rather
+    than accidentally resume a partial adapter with different inputs.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir()
+    except FileExistsError:
+        if not destination.is_dir():
+            raise TrainingConfigurationError(
+                f"output_dir is not a directory: {destination}"
+            )
+        try:
+            has_entries = next(destination.iterdir(), None) is not None
+        except OSError as error:
+            raise TrainingRuntimeError(
+                f"Could not inspect output_dir before training: {destination}: {error}"
+            ) from error
+        if has_entries:
+            raise TrainingConfigurationError(
+                "output_dir must be empty for an immutable training run; "
+                f"choose a fresh path instead of reusing {destination}"
+            )
+
+    claim = destination / ".autotrainer-run-claim.json"
+    payload = {
+        "policy": "immutable-fresh-run-v1",
+        "status": "running",
+    }
+    try:
+        # Exclusive creation makes simultaneous direct API callers fail closed,
+        # even when they bypass the CLI's project and GPU leases.
+        with claim.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except FileExistsError as error:
+        raise TrainingConfigurationError(
+            "output_dir is already claimed by another or an incomplete run; "
+            f"choose a fresh path instead of reusing {destination}"
+        ) from error
+    return destination
+
+
+def mark_output_directory_complete(path: Path) -> None:
+    """Atomically mark a claimed output as a completed immutable artifact."""
+
+    destination = Path(path)
+    claim = destination / ".autotrainer-run-claim.json"
+    if not claim.is_file():
+        raise TrainingRuntimeError(f"Training output lost its run claim: {claim}")
+    temporary = claim.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(
+            {"policy": "immutable-fresh-run-v1", "status": "completed"},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(claim)
+
+
 def resolve_input_file(value: Any, project_root: Path, field: str) -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise TrainingConfigurationError(f"{field} must be a local JSON or JSONL path")
@@ -220,7 +314,7 @@ def resolve_model_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], lis
             "model.thinking must remain false in the supported 24 GB recipe"
         )
     warnings: list[str] = []
-    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
+    if not IMMUTABLE_REVISION.fullmatch(revision):
         warnings.append(
             "model.revision is mutable; replace it with a resolved Hugging Face commit SHA "
             "before a benchmark or published run"
@@ -336,6 +430,8 @@ def base_recipe(
 
 
 def _first_json_record(path: Path) -> Mapping[str, Any]:
+    """Read the first object for executable preflights that need one task."""
+
     try:
         if path.suffix.lower() == ".jsonl":
             with path.open("r", encoding="utf-8") as handle:
@@ -407,7 +503,8 @@ def _validate_messages(value: Any, field: str, *, require_assistant: bool) -> No
 
 
 def inspect_sft_dataset(path: Path) -> dict[str, Any]:
-    record = _first_json_record(path)
+    records = _json_records(path)
+    record = records[0][1]
     _reject_multimodal(record)
     try:
         normalized = normalize_sft_record(record)
@@ -424,6 +521,7 @@ def inspect_sft_dataset(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
         "format": "conversational-prompt-completion",
+        **dataset_file_identity(path, record_count=len(records)),
         "first_record_fields": sorted(str(key) for key in record),
     }
 
@@ -459,6 +557,54 @@ def _json_records(path: Path) -> list[tuple[int, Mapping[str, Any]]]:
     if not records:
         raise TrainingConfigurationError(f"dataset is empty: {path}")
     return records
+
+
+def dataset_file_identity(path: Path, *, record_count: int | None = None) -> dict[str, Any]:
+    """Return the byte-level identity bound into a resolved training recipe."""
+
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise TrainingConfigurationError(f"Could not read dataset {path}: {error}") from error
+    if record_count is None:
+        record_count = len(_json_records(path))
+    return {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "record_count": record_count,
+    }
+
+
+def verify_dataset_identity(description: Mapping[str, Any]) -> None:
+    """Fail when dataset bytes changed after the recipe was resolved.
+
+    Stage loaders call this immediately before handing the path to Datasets.
+    This turns the recipe digest into an enforced input lock instead of merely
+    descriptive provenance.
+    """
+
+    path = Path(str(description.get("path", "")))
+    required = ("sha256", "bytes", "record_count")
+    missing = [field for field in required if field not in description]
+    if missing:
+        raise TrainingRuntimeError(
+            f"Resolved dataset identity is incomplete for {path}: missing {missing}"
+        )
+    try:
+        current = dataset_file_identity(path)
+    except TrainingConfigurationError as error:
+        raise TrainingRuntimeError(str(error)) from error
+    expected_sha = str(description["sha256"])
+    unchanged = (
+        hmac.compare_digest(current["sha256"], expected_sha)
+        and current["bytes"] == description["bytes"]
+        and current["record_count"] == description["record_count"]
+    )
+    if not unchanged:
+        raise TrainingRuntimeError(
+            "Dataset changed after recipe resolution; refusing to train on unbound bytes: "
+            f"{path}"
+        )
 
 
 def validate_sft_token_lengths(
@@ -549,7 +695,7 @@ def inspect_grpo_dataset(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
         "format": "conversational-prompts",
-        "record_count": len(records),
+        **dataset_file_identity(path, record_count=len(records)),
         "first_record_fields": sorted(str(key) for key in first_record),
     }
 
@@ -696,19 +842,130 @@ def inspect_adapter(path: Path, expected_model_id: str, expected_revision: str) 
             f"adapter={base_model!r}, recipe={expected_model_id!r}"
         )
     peft_type = adapter_config.get("peft_type")
-    if peft_type not in {None, "LORA"}:
+    if peft_type != "LORA":
         raise TrainingConfigurationError(
             f"grpo.start_from must be a LoRA adapter; found peft_type={peft_type!r}"
         )
     adapter_revision = adapter_config.get("revision")
-    if adapter_revision and adapter_revision != expected_revision:
+    if not isinstance(adapter_revision, str) or not IMMUTABLE_REVISION.fullmatch(
+        adapter_revision
+    ):
+        raise TrainingConfigurationError(
+            "The GRPO input adapter must record an immutable base-model revision"
+        )
+    if not IMMUTABLE_REVISION.fullmatch(expected_revision):
+        raise TrainingConfigurationError(
+            "model.revision must be immutable before continuing a saved adapter"
+        )
+    if adapter_revision.lower() != expected_revision.lower():
         raise TrainingConfigurationError(
             "The GRPO input adapter base revision does not match model.revision: "
             f"adapter={adapter_revision!r}, recipe={expected_revision!r}"
+        )
+    if not any(
+        (path / filename).is_file()
+        for filename in ("adapter_model.safetensors", "adapter_model.bin")
+    ):
+        raise TrainingConfigurationError(
+            "grpo.start_from is missing adapter_model.safetensors or adapter_model.bin"
         )
     return {
         "path": str(path),
         "base_model_name_or_path": base_model,
         "revision": adapter_revision,
-        "peft_type": peft_type or "LORA",
+        "peft_type": peft_type,
+        "tree": adapter_tree_identity(path),
     }
+
+
+def adapter_tree_identity(path: Path) -> dict[str, Any]:
+    """Hash every adapter artifact with deterministic path and size framing."""
+
+    root = Path(path)
+    hasher = hashlib.sha256(b"autotrainer-adapter-tree-v1\0")
+    file_count = 0
+    byte_count = 0
+    try:
+        entries = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+        for entry in entries:
+            relative = entry.relative_to(root).as_posix()
+            if entry.is_symlink():
+                raise TrainingConfigurationError(
+                    f"Adapter trees cannot contain symbolic links: {entry}"
+                )
+            if entry.is_dir():
+                continue
+            if not entry.is_file():
+                raise TrainingConfigurationError(
+                    f"Adapter trees may contain only regular files: {entry}"
+                )
+            path_bytes = relative.encode("utf-8")
+            size = entry.stat().st_size
+            hasher.update(len(path_bytes).to_bytes(8, "big"))
+            hasher.update(path_bytes)
+            hasher.update(size.to_bytes(8, "big"))
+            bytes_read = 0
+            with entry.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    bytes_read += len(chunk)
+                    hasher.update(chunk)
+            if bytes_read != size:
+                raise TrainingConfigurationError(
+                    f"Adapter file changed while its identity was computed: {entry}"
+                )
+            file_count += 1
+            byte_count += bytes_read
+    except OSError as error:
+        raise TrainingConfigurationError(
+            f"Could not compute adapter tree identity for {root}: {error}"
+        ) from error
+    if file_count == 0:
+        raise TrainingConfigurationError(f"Adapter directory is empty: {root}")
+    return {
+        "sha256": hasher.hexdigest(),
+        "bytes": byte_count,
+        "file_count": file_count,
+    }
+
+
+def verify_adapter_tree_identity(description: Mapping[str, Any]) -> None:
+    """Reject an input adapter changed after the GRPO recipe was resolved."""
+
+    path = Path(str(description.get("path", "")))
+    expected = description.get("tree")
+    if not isinstance(expected, Mapping):
+        raise TrainingRuntimeError(
+            f"Resolved adapter identity is missing for {path}"
+        )
+    try:
+        current = adapter_tree_identity(path)
+    except TrainingConfigurationError as error:
+        raise TrainingRuntimeError(str(error)) from error
+    required = ("sha256", "bytes", "file_count")
+    if any(field not in expected for field in required):
+        raise TrainingRuntimeError(
+            f"Resolved adapter identity is incomplete for {path}"
+        )
+    unchanged = (
+        hmac.compare_digest(str(current["sha256"]), str(expected["sha256"]))
+        and current["bytes"] == expected["bytes"]
+        and current["file_count"] == expected["file_count"]
+    )
+    if not unchanged:
+        raise TrainingRuntimeError(
+            "Adapter changed after recipe resolution; refusing to load unbound bytes: "
+            f"{path}"
+        )
+
+
+def verify_saved_adapter_provenance(
+    path: Path, expected_model_id: str, expected_revision: str
+) -> dict[str, Any]:
+    """Require PEFT to persist the immutable base identity after saving."""
+
+    try:
+        return inspect_adapter(path, expected_model_id, expected_revision)
+    except TrainingConfigurationError as error:
+        raise TrainingRuntimeError(
+            f"Saved LoRA adapter provenance is incomplete or inconsistent: {error}"
+        ) from error

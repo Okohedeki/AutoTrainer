@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
@@ -16,13 +16,24 @@ from autotrainer.training import (  # noqa: E402
     run_grpo,
     run_sft,
 )
-from autotrainer.training.common import validate_sft_token_lengths  # noqa: E402
+from autotrainer.training.common import (  # noqa: E402
+    claim_fresh_output_directory,
+    validate_sft_token_lengths,
+    verify_adapter_tree_identity,
+)
+from autotrainer.training.grpo import (  # noqa: E402
+    _load_json_dataset as load_grpo_json_dataset,
+)
+from autotrainer.training.sft import (  # noqa: E402
+    _load_json_dataset as load_sft_json_dataset,
+)
 
 
 class TrainingRecipeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.project_root = Path(self.temporary_directory.name)
+        self.revision = "a" * 40
         data_directory = self.project_root / "data"
         data_directory.mkdir()
         self.sft_dataset = data_directory / "sft.jsonl"
@@ -56,12 +67,13 @@ class TrainingRecipeTests(unittest.TestCase):
             json.dumps(
                 {
                     "base_model_name_or_path": "Qwen/Qwen3.5-9B",
-                    "revision": "main",
+                    "revision": self.revision,
                     "peft_type": "LORA",
                 }
             ),
             encoding="utf-8",
         )
+        (self.adapter / "adapter_model.safetensors").write_bytes(b"adapter-weights")
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -71,7 +83,7 @@ class TrainingRecipeTests(unittest.TestCase):
             "schema_version": 1,
             "model": {
                 "id": "Qwen/Qwen3.5-9B",
-                "revision": "main",
+                "revision": self.revision,
                 "text_only": True,
                 "trust_remote_code": False,
                 "thinking": False,
@@ -109,6 +121,10 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(
             result["recipe"]["sft"]["dataset"]["path"], str(self.sft_dataset)
         )
+        dataset = result["recipe"]["sft"]["dataset"]
+        self.assertEqual(dataset["record_count"], 1)
+        self.assertEqual(dataset["bytes"], self.sft_dataset.stat().st_size)
+        self.assertEqual(len(dataset["sha256"]), 64)
         self.assertTrue(result["recipe"]["model"]["local_files_only"])
         self.assertEqual(
             result["recipe"]["model"]["cache_dir"],
@@ -164,9 +180,11 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertGreater(report["longest_token_count"], 60)
 
     def test_real_sft_rejects_mutable_model_before_dependency_imports(self) -> None:
+        config = self.config()
+        config["model"]["revision"] = "main"
         with self.assertRaisesRegex(RuntimeError, "immutable downloaded"):
             run_sft(
-                self.config(),
+                config,
                 project_root=self.project_root,
                 output_dir=Path("artifacts/sft-output"),
                 dry_run=False,
@@ -209,6 +227,92 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
         self.assertEqual(recipe["grpo"]["dataset"]["record_count"], 1)
+        self.assertEqual(
+            recipe["grpo"]["dataset"]["bytes"], self.grpo_dataset.stat().st_size
+        )
+        self.assertEqual(len(recipe["grpo"]["dataset"]["sha256"]), 64)
+        self.assertEqual(recipe["grpo"]["sft_adapter"]["tree"]["file_count"], 2)
+        self.assertEqual(len(recipe["grpo"]["sft_adapter"]["tree"]["sha256"]), 64)
+
+    def test_stage_loaders_reject_dataset_mutation_after_resolution(self) -> None:
+        sft_recipe = run_sft(
+            self.config(),
+            project_root=self.project_root,
+            output_dir=Path("artifacts/sft-output"),
+            dry_run=True,
+        )["recipe"]
+        grpo_recipe = run_grpo(
+            self.config(),
+            project_root=self.project_root,
+            output_dir=Path("artifacts/grpo-output"),
+            dry_run=True,
+        )["recipe"]
+        self.sft_dataset.write_text(
+            self.sft_dataset.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+        self.grpo_dataset.write_text(
+            self.grpo_dataset.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+
+        loader = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "Dataset changed"):
+            load_sft_json_dataset(loader, sft_recipe["sft"]["dataset"])
+        with self.assertRaisesRegex(RuntimeError, "Dataset changed"):
+            load_grpo_json_dataset(loader, grpo_recipe["grpo"]["dataset"])
+        loader.assert_not_called()
+
+    def test_adapter_tree_mutation_is_rejected_before_peft_load(self) -> None:
+        recipe = run_grpo(
+            self.config(),
+            project_root=self.project_root,
+            output_dir=Path("artifacts/grpo-output"),
+            dry_run=True,
+        )["recipe"]
+        description = recipe["grpo"]["start_from"]["adapter"]
+        (self.adapter / "adapter_model.safetensors").write_bytes(b"changed")
+
+        with self.assertRaisesRegex(RuntimeError, "Adapter changed"):
+            verify_adapter_tree_identity(description)
+
+    def test_adapter_revision_provenance_is_mandatory(self) -> None:
+        config_path = self.adapter / "adapter_config.json"
+        adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
+        adapter_config.pop("revision")
+        config_path.write_text(json.dumps(adapter_config), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            TrainingConfigurationError, "immutable base-model revision"
+        ):
+            resolve_grpo_recipe(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+            )
+
+    def test_nonempty_output_directory_cannot_be_reused(self) -> None:
+        destination = self.project_root / "artifacts" / "existing-output"
+        destination.mkdir(parents=True)
+        (destination / "checkpoint.bin").write_bytes(b"old run")
+
+        with self.assertRaisesRegex(TrainingConfigurationError, "must be empty"):
+            run_sft(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=destination,
+                dry_run=True,
+            )
+
+    def test_empty_output_directory_receives_an_exclusive_run_claim(self) -> None:
+        destination = self.project_root / "artifacts" / "new-output"
+        destination.mkdir(parents=True)
+        claim_fresh_output_directory(destination)
+
+        claim = destination / ".autotrainer-run-claim.json"
+        self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["status"], "running")
+        with self.assertRaisesRegex(TrainingConfigurationError, "must be empty"):
+            claim_fresh_output_directory(destination)
 
     def test_grpo_recipe_validates_every_compiled_row(self) -> None:
         malformed = {
