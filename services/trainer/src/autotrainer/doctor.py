@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import json
 import platform
 import shutil
 import subprocess
@@ -128,6 +129,51 @@ def _torch_gpu_check() -> dict[str, Any]:
     return {"status": "ready", **details}
 
 
+def _blocked_python_runtime(detail: str) -> dict[str, Any]:
+    packages = [
+        {
+            "name": name,
+            "status": "import-error",
+            "expected": version,
+            "detail": detail[:240],
+        }
+        for name, version in REFERENCE_PACKAGES.items()
+    ]
+    return {
+        "packages": packages,
+        "gpu": {"status": "blocked", "detail": detail[:240]},
+    }
+
+
+def _probe_python_runtime() -> dict[str, Any]:
+    """Import native training packages in a child so GUI repairs stay unlocked."""
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "autotrainer.runtime_probe"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return _blocked_python_runtime(f"training runtime probe failed: {error}")
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        return _blocked_python_runtime(
+            f"training runtime probe exited {completed.returncode}: {detail}"
+        )
+    try:
+        result = json.loads(completed.stdout)
+        packages = result["packages"]
+        gpu = result["gpu"]
+        if not isinstance(packages, list) or not isinstance(gpu, dict):
+            raise TypeError("probe result has invalid fields")
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        return _blocked_python_runtime(f"training runtime probe was invalid: {error}")
+    return {"packages": packages, "gpu": gpu}
+
+
 def run_doctor(
     *,
     environment_backend: str = "docker",
@@ -135,8 +181,9 @@ def run_doctor(
 ) -> dict[str, Any]:
     """Inspect every prerequisite a selected local V1 run can verify early."""
 
-    packages = [_package_check(name, version) for name, version in REFERENCE_PACKAGES.items()]
-    gpu = _torch_gpu_check()
+    runtime = _probe_python_runtime()
+    packages = runtime["packages"]
+    gpu = runtime["gpu"]
     # Driver output is diagnostic only. The readiness decision uses PyTorch's
     # CUDA visibility because it honors CUDA_VISIBLE_DEVICES exactly as the
     # stage runner will.

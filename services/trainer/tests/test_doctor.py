@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -58,14 +60,16 @@ class DoctorTests(unittest.TestCase):
             {"name": "docker", "status": "error", "detail": "image not found"},
         ]
         with (
-            patch("autotrainer.doctor._package_check", return_value=package),
             patch(
-                "autotrainer.doctor._torch_gpu_check",
+                "autotrainer.doctor._probe_python_runtime",
                 return_value={
-                    "status": "ready",
-                    "device_count": 1,
-                    "vram_gib": 24.0,
-                    "bf16_supported": True,
+                    "packages": [package],
+                    "gpu": {
+                        "status": "ready",
+                        "device_count": 1,
+                        "vram_gib": 24.0,
+                        "bf16_supported": True,
+                    },
                 },
             ),
             patch("autotrainer.doctor._command_check", side_effect=commands),
@@ -82,10 +86,9 @@ class DoctorTests(unittest.TestCase):
     def test_python_version_is_part_of_readiness(self) -> None:
         package = {"name": "package", "status": "ready"}
         with (
-            patch("autotrainer.doctor._package_check", return_value=package),
             patch(
-                "autotrainer.doctor._torch_gpu_check",
-                return_value={"status": "ready"},
+                "autotrainer.doctor._probe_python_runtime",
+                return_value={"packages": [package], "gpu": {"status": "ready"}},
             ),
             patch(
                 "autotrainer.doctor._command_check",
@@ -99,6 +102,28 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(result["sft_ready"])
         self.assertFalse(result["rl_ready"])
         self.assertEqual(result["python"]["status"], "unsupported")
+
+    def test_native_runtime_checks_run_in_a_short_lived_child(self) -> None:
+        payload = {
+            "packages": [{"name": "torch", "status": "ready"}],
+            "gpu": {"status": "ready", "device_count": 1},
+        }
+        completed = subprocess.CompletedProcess(
+            [sys.executable, "-m", "autotrainer.runtime_probe"],
+            0,
+            json.dumps(payload),
+            "",
+        )
+        with patch("autotrainer.doctor.subprocess.run", return_value=completed) as run:
+            from autotrainer.doctor import _probe_python_runtime
+
+            result = _probe_python_runtime()
+
+        self.assertEqual(result, payload)
+        self.assertEqual(
+            run.call_args.args[0],
+            [sys.executable, "-m", "autotrainer.runtime_probe"],
+        )
 
     def test_cli_requires_rl_readiness_when_grpo_is_enabled(self) -> None:
         doctor = {"sft_ready": True, "rl_ready": False}
