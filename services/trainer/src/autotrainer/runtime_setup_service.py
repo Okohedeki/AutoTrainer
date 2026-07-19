@@ -32,6 +32,7 @@ _ACTION_IDS = frozenset(
     {
         "install_training_packages",
         "remove_incompatible_torchaudio",
+        "remove_broken_vllm",
         "install_wsl_ubuntu",
         "install_docker_desktop",
         "build_runtime_image",
@@ -165,6 +166,22 @@ def _incompatible_torchaudio(doctor: Mapping[str, Any]) -> dict[str, str] | None
     return {"installed": audio_version, "torch": torch_version}
 
 
+def _broken_optional_vllm(doctor: Mapping[str, Any]) -> str | None:
+    """Return the installed optional vLLM version when it breaks TRL import."""
+
+    packages = doctor.get("packages", [])
+    if not any(
+        "vllm" in str(item.get("detail", "")).casefold()
+        for item in packages
+        if isinstance(item, Mapping)
+    ):
+        return None
+    try:
+        return importlib.metadata.version("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     """Return Doctor evidence plus only the fixed actions relevant now."""
 
@@ -214,6 +231,20 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
                 ),
                 status="available",
                 command=[sys.executable, "-m", "pip", "uninstall", "--yes", "torchaudio"],
+            )
+        )
+    broken_vllm = _broken_optional_vllm(doctor)
+    if broken_vllm is not None:
+        actions.append(
+            _action(
+                "remove_broken_vllm",
+                "Remove broken optional vLLM package",
+                (
+                    f"Remove vLLM {broken_vllm}; its unavailable native extension prevents "
+                    "TRL from loading, and AutoTrainer's pinned one-GPU path disables vLLM."
+                ),
+                status="available",
+                command=[sys.executable, "-m", "pip", "uninstall", "--yes", "vllm"],
             )
         )
     if not packages_ready or cuda_wheel_needed:
