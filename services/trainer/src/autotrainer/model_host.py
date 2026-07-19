@@ -71,6 +71,27 @@ class TextGenerator(Protocol):
         seed: int | None,
     ) -> tuple[str, int, int]: ...
 
+    def count_tokens_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> int:
+        """Return the native tool-template input length used by GRPO."""
+        ...
+
+    def generate_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        seed: int | None,
+    ) -> tuple[str, int, int]:
+        """Generate one native tool-loop turn with the training chat template."""
+        ...
+
 
 def _require_context_fit(
     prompt_tokens: int,
@@ -198,18 +219,30 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
     class TransformersGenerator:
         """Thin synchronous generator guarded by the HTTP server's GPU lock."""
 
-        def count_tokens(self, messages: list[dict[str, str]]) -> int:
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+        @staticmethod
+        def _render(
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+        ) -> str:
+            options: dict[str, Any] = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            if tools is not None:
+                # This is the same native Qwen tool template and no-thinking
+                # setting that TRL's environment_factory path receives during
+                # GRPO. Evaluation must measure the behavior that was trained.
+                options.update(tools=tools, enable_thinking=False)
+            return tokenizer.apply_chat_template(messages, **options)
+
+        @staticmethod
+        def _count_rendered(prompt: str) -> int:
             inputs = tokenizer(prompt, return_tensors="pt")
             return int(inputs["input_ids"].shape[-1])
 
-        def generate(
-            self,
-            messages: list[dict[str, str]],
+        @staticmethod
+        def _generate_rendered(
+            prompt: str,
             *,
             max_tokens: int,
             temperature: float,
@@ -219,11 +252,6 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
             if seed is not None:
                 torch.manual_seed(seed)
                 torch.cuda.manual_seed_all(seed)
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
             prompt_tokens = int(inputs["input_ids"].shape[-1])
             _require_context_fit(
@@ -247,6 +275,51 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
                 tokenizer.decode(generated, skip_special_tokens=True),
                 prompt_tokens,
                 completion_tokens,
+            )
+
+        def count_tokens(self, messages: list[dict[str, str]]) -> int:
+            return self._count_rendered(self._render(messages))
+
+        def count_tokens_with_tools(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+        ) -> int:
+            return self._count_rendered(self._render(messages, tools))
+
+        def generate(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            max_tokens: int,
+            temperature: float,
+            top_p: float,
+            seed: int | None,
+        ) -> tuple[str, int, int]:
+            return self._generate_rendered(
+                self._render(messages),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
+            )
+
+        def generate_with_tools(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            max_tokens: int,
+            temperature: float,
+            top_p: float,
+            seed: int | None,
+        ) -> tuple[str, int, int]:
+            return self._generate_rendered(
+                self._render(messages, tools),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
             )
 
     return TransformersGenerator()

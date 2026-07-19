@@ -1,10 +1,10 @@
-"""Built-in, local-only patch producer for the model benchmark.
+"""Built-in, local-only agent producer for the model benchmark.
 
-The producer is deliberately smaller than a general coding agent.  It reads a
-bounded view of the exact Git tree frozen by the evaluation plan, asks one
-locally cached model for a unified patch, and writes the existing untrusted
-result envelope.  :mod:`autotrainer.evaluation` remains the trust boundary: it
-replays that patch in the disposable environment and computes every score.
+The producer runs the same bounded repository tools used by GRPO.  A model can
+inspect the locked checkout, apply a patch, and run only manifest-declared
+checks. :mod:`autotrainer.evaluation` remains the trust boundary: it replays
+the resulting patch in a second disposable environment and computes every
+score from the frozen verifier.
 
 One producer instance keeps a model loaded while all pending trials for that
 arm run.  The suite orchestrator groups trials by arm, then calls ``close``
@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
 from .model_host import HostSpec, TextGenerator
-from .training.common import REFERENCE_DEPENDENCIES
+from .training.common import REFERENCE_DEPENDENCIES, import_factory
 
 
 PRODUCER_NAME = "autotrainer-local-patch"
@@ -42,19 +42,153 @@ MAX_INPUT_TOKENS = CONTEXT_TOKENS - MAX_NEW_TOKENS
 TEMPERATURE = 0.2
 TOP_P = 0.9
 
+MAX_TOOL_CALLING_ITERATIONS = 8
+
 _SYSTEM_PROMPT = (
-    "You are AutoTrainer's local held-out code-patch producer. "
-    "Return only one valid unified Git diff beginning with 'diff --git'. "
-    "Use repository-relative paths, make the smallest focused change that satisfies "
-    "the instruction, and preserve unrelated behavior. You have no network and no "
-    "interactive tools in this V1 runner; use only the frozen source shown below. "
-    "Do not wrap the diff in Markdown and do not add prose."
+    "You are AutoTrainer's local held-out coding agent. Inspect the locked "
+    "repository with the provided bounded tools, apply the smallest focused "
+    "patch that satisfies the task, and run useful named checks. Network access "
+    "is disabled and no shell tool exists. Do not describe hidden reasoning. "
+    "After a patch has been applied, finish with the single word DONE."
 )
-_USER_PROMPT_TEMPLATE = (
-    "Task instruction:\n{instruction}\n\n"
-    "Public runtime commands (these run only after you submit the patch):\n"
-    "{runtime}\n\n{source_context}"
-)
+
+# Keep this schema code-owned and frozen in the runner identity. It mirrors the
+# five public methods on FrontendEnvironment, which TRL exposes during GRPO.
+_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List editable repository files below a relative directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Repository-relative directory to inspect. Use ``.`` for the "
+                            "editable repository root."
+                        ),
+                    }
+                },
+            },
+            "return": {
+                "type": "string",
+                "description": (
+                    "A bounded newline-delimited list of repository-relative file paths."
+                ),
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read an inclusive, one-indexed line range from a UTF-8 text file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-relative path to the text file.",
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "First one-indexed line to return.",
+                    },
+                    "end": {
+                        "type": "integer",
+                        "description": "Last one-indexed line to return, inclusive.",
+                    },
+                },
+                "required": ["path"],
+            },
+            "return": {
+                "type": "string",
+                "description": (
+                    "Bounded numbered lines, or a short validation error visible to the\n"
+                    "    policy."
+                ),
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": (
+                "Search text files for a literal query and return bounded line matches."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Literal case-insensitive text to find.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-relative file or directory to search.",
+                    },
+                },
+                "required": ["query"],
+            },
+            "return": {
+                "type": "string",
+                "description": "Bounded ``path:line: text`` matches, or ``no matches``.",
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Apply a unified diff after path and Git safety checks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": (
+                            "Complete unified diff whose paths stay inside the editable "
+                            "repository."
+                        ),
+                    }
+                },
+                "required": ["patch"],
+            },
+            "return": {
+                "type": "string",
+                "description": (
+                    "A bounded success message or the reason the patch was rejected."
+                ),
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_check",
+            "description": "Run one trusted check declared by the task author.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "check": {
+                        "type": "string",
+                        "description": (
+                            "Check name: ``build``, ``tests``, or ``browserTests``."
+                        ),
+                    }
+                },
+                "required": ["check"],
+            },
+            "return": {
+                "type": "string",
+                "description": "A bounded pass/fail summary with captured command output.",
+            },
+        },
+    },
+]
 
 # This document is the human-readable meaning of the runner fingerprint.  The
 # final identity also hashes the installed implementation files and declared
@@ -63,19 +197,9 @@ _USER_PROMPT_TEMPLATE = (
 _ORCHESTRATION_SPEC = {
     "producer": PRODUCER_NAME,
     "version": PRODUCER_VERSION,
-    "strategy": "single-pass-full-context-unified-diff",
-    "source": {
-        "git_object_database_only": True,
-        "max_files": MAX_SOURCE_FILES,
-        "max_paths": MAX_SOURCE_PATHS,
-        "max_chars": MAX_SOURCE_CHARS,
-        "max_file_chars": MAX_FILE_CHARS,
-        "max_blob_bytes": MAX_SOURCE_BLOB_BYTES,
-    },
-    "prompt": {
-        "system": _SYSTEM_PROMPT,
-        "user_template": _USER_PROMPT_TEMPLATE,
-    },
+    "strategy": "native-qwen-multiturn-environment-tools",
+    "source": "locked-disposable-environment",
+    "prompt": {"system": _SYSTEM_PROMPT},
     "model_residency": "one-arm-at-a-time-suite-arm-groups",
     "generation": {
         "context_tokens": CONTEXT_TOKENS,
@@ -83,13 +207,17 @@ _ORCHESTRATION_SPEC = {
         "max_new_tokens": MAX_NEW_TOKENS,
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
-        "seed": "frozen-trial-seed",
-        "tools": [],
+        "seed": "frozen-trial-seed-plus-turn-index",
+        "tools": _TOOL_SCHEMAS,
+        "max_tool_calling_iterations": "frozen-from-grpo-recipe",
+        "thinking": False,
     },
-    "output": "unified-git-diff-only",
+    "output": "environment-applied-unified-git-diff",
 }
 
 _SOURCE_PROTOCOL_FILES = (
+    "environment.py",
+    "environments/frontend.py",
     "evaluation.py",
     "local_evaluation_runner.py",
     "model_host.py",
@@ -204,7 +332,7 @@ class Producer(Protocol):
 
 ModelLoader = Callable[[HostSpec], TextGenerator]
 RuntimeResolver = Callable[[Mapping[str, Any], Path, Mapping[str, Any]], ArmRuntime]
-ContextBuilder = Callable[[Mapping[str, Any]], str]
+EnvironmentFactory = Callable[[], Any]
 
 
 def builtin_runner_identity() -> dict[str, Any]:
@@ -351,6 +479,34 @@ def resolve_arm_runtime(
                 f"Evaluation arm {arm_id!r} adapter changed after its plan was frozen. "
                 "Freeze a new evaluation plan before running it."
             )
+        try:
+            adapter_config = json.loads(
+                (adapter_path / "adapter_config.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LocalEvaluationRunnerError(
+                f"Evaluation arm {arm_id!r} adapter metadata is unreadable: {error}"
+            ) from error
+        if not isinstance(adapter_config, Mapping) or adapter_config.get(
+            "base_model_name_or_path"
+        ) != model_id:
+            raise LocalEvaluationRunnerError(
+                f"Evaluation arm {arm_id!r} adapter does not belong to {model_id!r}"
+            )
+        adapter_revision = adapter_config.get("revision")
+        if adapter_revision is not None and str(adapter_revision).lower() != revision:
+            raise LocalEvaluationRunnerError(
+                f"Evaluation arm {arm_id!r} adapter base revision does not match "
+                "the frozen model revision"
+            )
+        provenance = adapter.get("training_provenance")
+        if isinstance(provenance, Mapping) and provenance.get("status") == "verified":
+            recipe_path = _project_path(root, provenance.get("path"))
+            expected_recipe_digest = str(provenance.get("sha256", "")).lower()
+            if not recipe_path.is_file() or _sha256_file(recipe_path) != expected_recipe_digest:
+                raise LocalEvaluationRunnerError(
+                    f"Evaluation arm {arm_id!r} training provenance changed after plan creation"
+                )
 
     return ArmRuntime(
         arm_id=arm_id,
@@ -558,110 +714,6 @@ def _locked_source_context(task: Mapping[str, Any]) -> str:
     )
 
 
-def _prompt_messages(task: Mapping[str, Any], source_context: str) -> list[dict[str, str]]:
-    """Build the public prompt without verifier paths, weights, or hidden tests."""
-
-    manifest = task.get("manifest")
-    if not isinstance(manifest, Mapping):
-        raise LocalEvaluationRunnerError("the evaluation request has no task manifest")
-    task_section = manifest.get("task")
-    runtime = manifest.get("runtime")
-    if not isinstance(task_section, Mapping) or not isinstance(runtime, Mapping):
-        raise LocalEvaluationRunnerError("the evaluation request has an invalid task manifest")
-    instruction = str(task_section.get("instruction", "")).strip()
-    if not instruction:
-        raise LocalEvaluationRunnerError("the evaluation request has no instruction")
-
-    public_runtime = {
-        key: str(runtime.get(key, ""))
-        for key in ("workingDirectory", "install", "build", "tests", "browserTests")
-        if runtime.get(key) is not None
-    }
-    user_content = _USER_PROMPT_TEMPLATE.format(
-        instruction=instruction,
-        runtime=json.dumps(public_runtime, indent=2, sort_keys=True),
-        source_context=source_context,
-    )
-    return [
-        {
-            "role": "system",
-            "content": _SYSTEM_PROMPT,
-        },
-        {"role": "user", "content": user_content},
-    ]
-
-
-def _message_token_count(
-    generator: TextGenerator, messages: list[dict[str, str]]
-) -> int:
-    """Count exactly when supported, with a conservative byte fallback.
-
-    Byte length is an upper bound for ordinary byte-backed tokenizers, while a
-    fixed allowance covers the chat template's role and control tokens. The
-    fallback intentionally admits less source rather than risking a silent
-    context overflow with a custom injected generator.
-    """
-
-    counter = getattr(generator, "count_tokens", None)
-    if callable(counter):
-        value = counter(messages)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise LocalEvaluationRunnerError(
-                "the local tokenizer returned an invalid prompt token count"
-            )
-        return value
-    encoded_bytes = sum(
-        len(message["role"].encode("utf-8"))
-        + len(message["content"].encode("utf-8"))
-        for message in messages
-    )
-    return encoded_bytes + 256
-
-
-def _fit_prompt_messages(
-    generator: TextGenerator,
-    task: Mapping[str, Any],
-    source_context: str,
-) -> tuple[list[dict[str, str]], int]:
-    """Fit the public source to the explicit 8K input-plus-output budget."""
-
-    messages = _prompt_messages(task, source_context)
-    token_count = _message_token_count(generator, messages)
-    if token_count <= MAX_INPUT_TOKENS:
-        return messages, token_count
-
-    marker = "\n[AutoTrainer truncated source context to fit the frozen token budget]\n"
-    empty_messages = _prompt_messages(task, marker)
-    if _message_token_count(generator, empty_messages) > MAX_INPUT_TOKENS:
-        raise LocalEvaluationRunnerError(
-            "the task instruction and runner prompt exceed the 8K evaluation context budget"
-        )
-
-    # Tokenization is not perfectly proportional to characters. Binary search
-    # the deterministic prefix using the exact loaded tokenizer, then verify
-    # once more before generation.
-    low = 0
-    high = len(source_context)
-    best_messages = empty_messages
-    best_tokens = _message_token_count(generator, empty_messages)
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = source_context[:middle] + marker
-        candidate_messages = _prompt_messages(task, candidate)
-        candidate_tokens = _message_token_count(generator, candidate_messages)
-        if candidate_tokens <= MAX_INPUT_TOKENS:
-            best_messages = candidate_messages
-            best_tokens = candidate_tokens
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best_tokens + MAX_NEW_TOKENS > CONTEXT_TOKENS:
-        raise LocalEvaluationRunnerError(
-            "the fitted evaluation prompt exceeds the frozen model context budget"
-        )
-    return best_messages, best_tokens
-
-
 def _unified_patch(text: str) -> str | None:
     """Extract one unified diff without treating explanation text as evidence."""
 
@@ -706,8 +758,183 @@ def _default_model_loader(spec: HostSpec) -> TextGenerator:
     return _load_generator(spec)
 
 
+@dataclass(frozen=True, slots=True)
+class _ToolCall:
+    """One parsed native Qwen tool request; reasoning is intentionally absent."""
+
+    name: str
+    arguments: dict[str, Any]
+
+
+_TOOL_BLOCK = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+_FUNCTION_BLOCK = re.compile(
+    r"\s*<function=([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</function>\s*",
+    re.DOTALL,
+)
+_PARAMETER_BLOCK = re.compile(
+    r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>\s*\n?(.*?)\n?\s*</parameter>",
+    re.DOTALL,
+)
+
+_TOOL_ARGUMENTS: dict[str, tuple[set[str], set[str]]] = {
+    "list_files": (set(), {"path"}),
+    "read_file": ({"path"}, {"start", "end"}),
+    "search_code": ({"query"}, {"path"}),
+    "apply_patch": ({"patch"}, set()),
+    "run_check": ({"check"}, set()),
+}
+
+
+def _parse_tool_calls(text: str) -> tuple[str, list[_ToolCall]] | None:
+    """Parse Qwen's native XML call format without retaining model reasoning."""
+
+    matches = list(_TOOL_BLOCK.finditer(text))
+    if not matches:
+        if "<tool_call" in text or "</tool_call>" in text:
+            raise LocalEvaluationRunnerError("the model emitted a malformed tool call")
+        return None
+    if text[matches[-1].end() :].strip():
+        raise LocalEvaluationRunnerError("the model added text after a tool call")
+    for previous, current in zip(matches, matches[1:]):
+        if text[previous.end() : current.start()].strip():
+            raise LocalEvaluationRunnerError("the model added text between tool calls")
+
+    calls: list[_ToolCall] = []
+    for match in matches:
+        function = _FUNCTION_BLOCK.fullmatch(match.group(1))
+        if function is None:
+            raise LocalEvaluationRunnerError("the model emitted a malformed function call")
+        name = function.group(1)
+        contract = _TOOL_ARGUMENTS.get(name)
+        if contract is None:
+            raise LocalEvaluationRunnerError(f"the model requested unknown tool {name!r}")
+
+        body = function.group(2)
+        arguments: dict[str, Any] = {}
+        cursor = 0
+        for parameter in _PARAMETER_BLOCK.finditer(body):
+            if body[cursor : parameter.start()].strip():
+                raise LocalEvaluationRunnerError(
+                    f"tool {name!r} contains malformed parameter markup"
+                )
+            key = parameter.group(1)
+            if key in arguments:
+                raise LocalEvaluationRunnerError(
+                    f"tool {name!r} repeats parameter {key!r}"
+                )
+            raw = parameter.group(2).strip()
+            if key in {"start", "end"}:
+                try:
+                    arguments[key] = int(raw)
+                except ValueError as error:
+                    raise LocalEvaluationRunnerError(
+                        f"tool {name!r} parameter {key!r} must be an integer"
+                    ) from error
+            else:
+                # Native templates usually emit strings without JSON quotes,
+                # but accepting a properly quoted string avoids passing quote
+                # characters into repository paths.
+                if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+                    try:
+                        decoded = json.loads(raw)
+                    except json.JSONDecodeError:
+                        decoded = raw
+                    arguments[key] = decoded if isinstance(decoded, str) else raw
+                else:
+                    arguments[key] = raw
+            cursor = parameter.end()
+        if body[cursor:].strip():
+            raise LocalEvaluationRunnerError(
+                f"tool {name!r} contains malformed parameter markup"
+            )
+        required, optional = contract
+        missing = sorted(required - set(arguments))
+        unknown = sorted(set(arguments) - required - optional)
+        if missing or unknown:
+            detail = []
+            if missing:
+                detail.append("missing " + ", ".join(missing))
+            if unknown:
+                detail.append("unknown " + ", ".join(unknown))
+            raise LocalEvaluationRunnerError(
+                f"tool {name!r} has invalid arguments ({'; '.join(detail)})"
+            )
+        if name == "run_check" and arguments["check"] not in {
+            "build",
+            "tests",
+            "browserTests",
+        }:
+            raise LocalEvaluationRunnerError("run_check requested an unsupported check")
+        calls.append(_ToolCall(name=name, arguments=arguments))
+
+    # The prefix may contain native thinking text. It is needed only to render
+    # the next turn and is never written to the evidence directory.
+    return text[: matches[0].start()].strip(), calls
+
+
+def _tool_messages_for_context(
+    generator: TextGenerator,
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Fit tool history using exact tokenizer counts and deterministic pruning."""
+
+    counter = getattr(generator, "count_tokens_with_tools", None)
+    if not callable(counter):
+        raise LocalEvaluationRunnerError(
+            "the loaded model runtime does not support the GRPO tool chat template"
+        )
+    fitted = json.loads(json.dumps(messages))
+    token_count = counter(fitted, _TOOL_SCHEMAS)
+    if token_count <= MAX_INPUT_TOKENS:
+        return fitted, token_count
+
+    tool_indexes = [
+        index for index, message in enumerate(fitted) if message.get("role") == "tool"
+    ]
+    marker = "[Earlier bounded tool output omitted to fit the frozen context.]"
+    for index in tool_indexes[:-1]:
+        fitted[index]["content"] = marker
+        token_count = counter(fitted, _TOOL_SCHEMAS)
+        if token_count <= MAX_INPUT_TOKENS:
+            return fitted, token_count
+
+    if tool_indexes:
+        index = tool_indexes[-1]
+        original = str(fitted[index].get("content", ""))
+        low, high = 0, len(original)
+        best: tuple[list[dict[str, Any]], int] | None = None
+        while low <= high:
+            middle = (low + high) // 2
+            fitted[index]["content"] = original[:middle] + "\n[Tool output truncated.]"
+            candidate_tokens = counter(fitted, _TOOL_SCHEMAS)
+            if candidate_tokens <= MAX_INPUT_TOKENS:
+                best = (json.loads(json.dumps(fitted)), candidate_tokens)
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best is not None:
+            return best
+    raise LocalEvaluationRunnerError(
+        "the task and native tool history exceed the frozen 8K evaluation context"
+    )
+
+
+def _tool_call_message(prefix: str, calls: Sequence[_ToolCall]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": prefix,
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            }
+            for call in calls
+        ],
+    }
+
+
 class BuiltinEvaluationProducer:
-    """Generate untrusted patches with one persistent, locally cached arm."""
+    """Run the GRPO tool surface with one persistent, locally cached arm."""
 
     def __init__(
         self,
@@ -717,17 +944,79 @@ class BuiltinEvaluationProducer:
         *,
         model_loader: ModelLoader | None = None,
         runtime_resolver: RuntimeResolver = resolve_arm_runtime,
-        context_builder: ContextBuilder = _locked_source_context,
+        environment_factory: EnvironmentFactory | None = None,
     ) -> None:
         self._config = config
         self._root = Path(project_root).expanduser().resolve()
         self._plan = plan
         self._model_loader = model_loader or _default_model_loader
         self._runtime_resolver = runtime_resolver
-        self._context_builder = context_builder
+        self._environment_factory = environment_factory or self._resolve_environment_factory()
+        environment = plan.get("environment")
+        iterations = (
+            environment.get("max_tool_calling_iterations", MAX_TOOL_CALLING_ITERATIONS)
+            if isinstance(environment, Mapping)
+            else MAX_TOOL_CALLING_ITERATIONS
+        )
+        if (
+            not isinstance(iterations, int)
+            or isinstance(iterations, bool)
+            or not 1 <= iterations <= 32
+        ):
+            raise LocalEvaluationRunnerError(
+                "the frozen evaluation tool-iteration limit is invalid"
+            )
+        self._max_tool_calling_iterations = iterations
         self._runtimes: dict[str, ArmRuntime] = {}
         self._active_arm: str | None = None
         self._generator: TextGenerator | None = None
+
+    def _resolve_environment_factory(self) -> EnvironmentFactory:
+        environment = self._plan.get("environment")
+        if not isinstance(environment, Mapping):
+            environment = self._config.get("environment")
+        if not isinstance(environment, Mapping):
+            raise LocalEvaluationRunnerError(
+                "the frozen evaluation plan has no environment contract"
+            )
+        factory_path = environment.get("factory")
+        try:
+            return import_factory(str(factory_path or ""))
+        except Exception as error:
+            raise LocalEvaluationRunnerError(
+                f"the frozen evaluation environment factory is unavailable: {error}"
+            ) from error
+
+    @staticmethod
+    def _validate_environment(environment: Any) -> dict[str, Callable[..., str]]:
+        tools: dict[str, Callable[..., str]] = {}
+        for schema in _TOOL_SCHEMAS:
+            name = str(schema["function"]["name"])
+            method = getattr(environment, name, None)
+            if not callable(method):
+                raise LocalEvaluationRunnerError(
+                    f"the evaluation environment is missing GRPO tool {name!r}"
+                )
+            tools[name] = method
+        if not callable(getattr(environment, "reset", None)):
+            raise LocalEvaluationRunnerError("the evaluation environment has no reset method")
+        if not callable(getattr(environment, "_export_patch_for_evaluation", None)):
+            raise LocalEvaluationRunnerError(
+                "the evaluation environment cannot export an untrusted patch safely"
+            )
+        return tools
+
+    def _private_task_row(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        task_id = str(request.get("task_id", ""))
+        rows = self._plan.get("task_rows")
+        if isinstance(rows, Mapping) and isinstance(rows.get(task_id), Mapping):
+            return rows[task_id]
+        # This fallback exists for injected unit environments only. Canonical
+        # plans always retain the private row locally while requests stay public.
+        task = request.get("task")
+        if isinstance(task, Mapping):
+            return task
+        raise LocalEvaluationRunnerError(f"frozen task row is missing for {task_id!r}")
 
     def preflight(self, arm_ids: Sequence[str]) -> None:
         """Resolve every exact snapshot before producing any partial benchmark."""
@@ -780,7 +1069,7 @@ class BuiltinEvaluationProducer:
         return self._generator
 
     def produce(self, request: Mapping[str, Any], result_path: Path) -> None:
-        """Generate a patch and write the existing schema-v1 result envelope."""
+        """Run one native tool episode and write the schema-v1 result envelope."""
 
         arm_id = str(request.get("arm_id", ""))
         task = request.get("task")
@@ -800,38 +1089,88 @@ class BuiltinEvaluationProducer:
             self.preflight([arm_id])
             runtime = self._runtimes[arm_id]
         generator = self._select_arm(arm_id)
-        source_context = self._context_builder(task)
-        messages, _input_budget = _fit_prompt_messages(
-            generator, task, source_context
-        )
+        generate_turn = getattr(generator, "generate_with_tools", None)
+        if not callable(generate_turn):
+            raise LocalEvaluationRunnerError(
+                "the loaded model runtime does not support native GRPO tools"
+            )
+
+        environment = self._environment_factory()
+        tools = self._validate_environment(environment)
+        task_row = self._private_task_row(request)
         started = time.monotonic()
         try:
-            output_text, input_tokens, output_tokens = generator.generate(
-                messages,
-                max_tokens=MAX_NEW_TOKENS,
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                seed=int(request.get("seed", 0)),
-            )
-        except Exception as error:
-            raise LocalEvaluationRunnerError(
-                f"Local generation failed for evaluation arm {arm_id!r}: {error}"
-            ) from error
-        if (
-            not isinstance(input_tokens, int)
-            or isinstance(input_tokens, bool)
-            or not isinstance(output_tokens, int)
-            or isinstance(output_tokens, bool)
-            or input_tokens < 0
-            or output_tokens < 0
-            or input_tokens > MAX_INPUT_TOKENS
-            or input_tokens + output_tokens > CONTEXT_TOKENS
-        ):
-            raise LocalEvaluationRunnerError(
-                "the local generator exceeded the frozen 8K evaluation context budget"
-            )
+            observation = environment.reset(**dict(task_row))
+            if not isinstance(observation, str):
+                raise LocalEvaluationRunnerError(
+                    "the evaluation environment reset did not return text"
+                )
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": observation},
+            ]
+            total_input_tokens = 0
+            total_output_tokens = 0
+            tool_calls = 0
+            for turn in range(self._max_tool_calling_iterations):
+                fitted, expected_input = _tool_messages_for_context(generator, messages)
+                remaining = MAX_NEW_TOKENS - total_output_tokens
+                if remaining <= 0:
+                    break
+                try:
+                    output_text, input_tokens, output_tokens = generate_turn(
+                        fitted,
+                        _TOOL_SCHEMAS,
+                        max_tokens=remaining,
+                        temperature=TEMPERATURE,
+                        top_p=TOP_P,
+                        seed=int(request.get("seed", 0)) + turn,
+                    )
+                except Exception as error:
+                    raise LocalEvaluationRunnerError(
+                        f"Local generation failed for evaluation arm {arm_id!r}: {error}"
+                    ) from error
+                if (
+                    not isinstance(input_tokens, int)
+                    or isinstance(input_tokens, bool)
+                    or not isinstance(output_tokens, int)
+                    or isinstance(output_tokens, bool)
+                    or input_tokens < 0
+                    or output_tokens < 0
+                    or input_tokens != expected_input
+                    or input_tokens > MAX_INPUT_TOKENS
+                    or input_tokens + remaining > CONTEXT_TOKENS
+                    or output_tokens > remaining
+                ):
+                    raise LocalEvaluationRunnerError(
+                        "the local generator exceeded the frozen 8K evaluation context budget"
+                    )
+                total_input_tokens += input_tokens
+                total_output_tokens += output_tokens
+                try:
+                    parsed = _parse_tool_calls(output_text)
+                except LocalEvaluationRunnerError:
+                    # A malformed or unavailable tool request is model output,
+                    # not an infrastructure outage. Preserve failures-score-zero
+                    # semantics and export only work already applied safely.
+                    break
+                if parsed is None:
+                    break
+                prefix, calls = parsed
+                messages = fitted
+                messages.append(_tool_call_message(prefix, calls))
+                for call in calls:
+                    tool_calls += 1
+                    result = tools[call.name](**call.arguments)
+                    messages.append({"role": "tool", "content": str(result)})
+            exported = environment._export_patch_for_evaluation()
+            patch = _unified_patch(exported)
+        finally:
+            cleanup = getattr(environment, "_cleanup", None)
+            if callable(cleanup):
+                cleanup()
+
         elapsed = round(time.monotonic() - started, 6)
-        patch = _unified_patch(output_text)
         output: dict[str, str] = {}
         if patch is not None:
             Path(result_path).parent.mkdir(parents=True, exist_ok=True)
@@ -859,9 +1198,9 @@ class BuiltinEvaluationProducer:
                 "fallback_models_used": False,
             },
             "usage": {
-                "input_tokens": int(input_tokens),
-                "output_tokens": int(output_tokens),
-                "tool_calls": 0,
+                "input_tokens": int(total_input_tokens),
+                "output_tokens": int(total_output_tokens),
+                "tool_calls": tool_calls,
                 "wall_time_seconds": elapsed,
             },
             "output": output,

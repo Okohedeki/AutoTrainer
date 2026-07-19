@@ -273,6 +273,22 @@ class FrontendEnvironment:
 
         return self._finalize().reward
 
+    def _export_patch_for_evaluation(self) -> str:
+        """Return the current untrusted diff without running the hidden scorer.
+
+        The leading underscore keeps this method off TRL's policy-visible tool
+        surface. The evaluation orchestrator replays these exact bytes in a
+        second fresh environment, so generation never learns verifier details.
+        """
+
+        if self._manifest is None:
+            raise RuntimeError("environment reset must run before exporting a patch")
+        try:
+            self._check_deadline()
+            return self._capture_unified_diff()
+        finally:
+            self._cleanup()
+
     def _finalize(self) -> EpisodeResult:
         """Evaluate the current patch, capture evidence, and clean the workspace."""
 

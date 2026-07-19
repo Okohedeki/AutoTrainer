@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 
@@ -22,6 +23,7 @@ from autotrainer.local_evaluation_runner import (  # noqa: E402
     SOURCE_PROTOCOL_IDENTITY,
     LocalEvaluationRunnerError,
     _locked_source_context,
+    _TOOL_SCHEMAS,
     _sha256_tree,
     _source_protocol_identity,
     builtin_runner_identity,
@@ -68,7 +70,7 @@ def _request(arm_id: str = "candidate") -> dict:
 
 class _FakeGenerator:
     def __init__(self) -> None:
-        self.messages: list[list[dict[str, str]]] = []
+        self.messages: list[list[dict[str, Any]]] = []
         self.calls = 0
 
     def count_tokens(self, messages: list[dict[str, str]]) -> int:
@@ -101,8 +103,105 @@ class _FakeGenerator:
             64,
         )
 
+    def count_tokens_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> int:
+        del tools
+        return 64 + len(json.dumps(messages, sort_keys=True)) // 8
+
+    def generate_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        seed: int | None,
+    ) -> tuple[str, int, int]:
+        del max_tokens, temperature, top_p, seed
+        input_tokens = self.count_tokens_with_tools(messages, tools)
+        self.messages.append(messages)
+        call = self.calls
+        self.calls += 1
+        if call % 2:
+            return "DONE", input_tokens, 1
+        return (
+            "<tool_call>\n"
+            "<function=apply_patch>\n"
+            "<parameter=patch>\n"
+            "diff --git a/src/card.css b/src/card.css\n"
+            "--- a/src/card.css\n"
+            "+++ b/src/card.css\n"
+            "@@ -1 +1 @@\n"
+            "-.card{display:block}\n"
+            "+.card{display:grid}\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>",
+            input_tokens,
+            64,
+        )
+
+
+class _FakeEnvironment:
+    def __init__(self) -> None:
+        self.patch = ""
+
+    def reset(self, **task_row: object) -> str:
+        del task_row
+        return "Task: repair the responsive card. Inspect, patch, and check it."
+
+    def list_files(self, path: str = ".") -> str:
+        del path
+        return "src/card.css"
+
+    def read_file(self, path: str, start: int = 1, end: int = 200) -> str:
+        del path, start, end
+        return "1: .card{display:block}"
+
+    def search_code(self, query: str, path: str = ".") -> str:
+        del query, path
+        return "src/card.css:1: .card{display:block}"
+
+    def apply_patch(self, patch: str) -> str:
+        self.patch = patch
+        return "patch applied"
+
+    def run_check(self, check: str) -> str:
+        return f"{check} passed"
+
+    def _export_patch_for_evaluation(self) -> str:
+        return self.patch
+
+    def _cleanup(self) -> None:
+        return None
+
 
 class LocalEvaluationRunnerTests(unittest.TestCase):
+    def test_evaluation_uses_the_exact_grpo_tool_schemas(self) -> None:
+        try:
+            from transformers.utils import get_json_schema
+        except ImportError:
+            self.skipTest("transformers is available in the pinned training extra")
+
+        from autotrainer.environments.frontend import FrontendEnvironment
+
+        environment = FrontendEnvironment()
+        generated = [
+            get_json_schema(getattr(environment, name))
+            for name in (
+                "list_files",
+                "read_file",
+                "search_code",
+                "apply_patch",
+                "run_check",
+            )
+        ]
+        self.assertEqual(generated, _TOOL_SCHEMAS)
+
     def test_source_context_reads_the_frozen_commit_not_the_working_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory) / "repository"
@@ -292,7 +391,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             ):
                 resolve_arm_runtime({"model": {}}, root, arm)
 
-    def test_producer_fits_prompt_and_reuses_one_loaded_arm(self) -> None:
+    def test_producer_uses_grpo_tools_and_reuses_one_loaded_arm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             adapter_path = root / "adapter"
@@ -339,7 +438,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 plan,
                 model_loader=load,
                 runtime_resolver=resolve,
-                context_builder=lambda _task: "x" * 50_000,
+                environment_factory=_FakeEnvironment,
             )
             producer.preflight(["reference", "candidate"])
 
@@ -349,19 +448,19 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             producer.produce(_request("candidate"), second)
 
             self.assertEqual(loaded, ["candidate"])
-            self.assertEqual(generators["candidate"].calls, 2)
+            self.assertEqual(generators["candidate"].calls, 4)
             messages = generators["candidate"].messages[0]
-            token_count = generators["candidate"].count_tokens(messages)
+            token_count = generators["candidate"].count_tokens_with_tools(messages, [])
             self.assertLessEqual(token_count + MAX_NEW_TOKENS, CONTEXT_TOKENS)
-            rendered = "\n".join(item["content"] for item in messages)
-            self.assertIn("truncated source context", rendered)
+            rendered = json.dumps(messages)
+            self.assertIn("repair the responsive card", rendered)
             self.assertNotIn("hidden-secret-verifier", rendered)
             self.assertNotIn("hidden_weight", rendered)
             result = json.loads(first.read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["producer"]["adapter_sha256"], adapter_digest)
             self.assertFalse(result["producer"]["fallback_models_used"])
-            self.assertEqual(result["usage"]["tool_calls"], 0)
+            self.assertEqual(result["usage"]["tool_calls"], 1)
             self.assertTrue((first.parent / "patch.diff").is_file())
 
             # Switching arms releases the candidate before the reference load;
@@ -393,7 +492,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 {"arms": {"candidate": {"id": "candidate", "model": {}}}},
                 model_loader=lambda spec: loads.append(spec) or _FakeGenerator(),
                 runtime_resolver=lambda _config, _root, _arm: runtime,
-                context_builder=lambda _task: "small source",
+                environment_factory=_FakeEnvironment,
             )
             producer.preflight(["candidate"])
             weights.write_bytes(b"mutated")
@@ -406,7 +505,9 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
 
     def test_generator_usage_cannot_exceed_frozen_context(self) -> None:
         class MisreportingGenerator(_FakeGenerator):
-            def generate(self, *args: object, **kwargs: object) -> tuple[str, int, int]:
+            def generate_with_tools(
+                self, *args: object, **kwargs: object
+            ) -> tuple[str, int, int]:
                 return "diff --git a/a b/a\n", MAX_INPUT_TOKENS + 1, 1
 
         with tempfile.TemporaryDirectory() as directory:
@@ -426,7 +527,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 {"arms": {"candidate": {"id": "candidate", "model": {}}}},
                 model_loader=lambda _spec: MisreportingGenerator(),
                 runtime_resolver=lambda _config, _root, _arm: runtime,
-                context_builder=lambda _task: "small source",
+                environment_factory=_FakeEnvironment,
             )
             producer.preflight(["candidate"])
             with self.assertRaisesRegex(

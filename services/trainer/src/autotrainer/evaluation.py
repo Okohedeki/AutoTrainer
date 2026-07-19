@@ -1191,6 +1191,14 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         }
 
     environment = _mapping(config.get("environment", {}), "environment")
+    grpo = _mapping(config.get("grpo", {}), "grpo")
+    max_tool_iterations = grpo.get("max_tool_calling_iterations", 8)
+    if (
+        not isinstance(max_tool_iterations, int)
+        or isinstance(max_tool_iterations, bool)
+        or not 1 <= max_tool_iterations <= 32
+    ):
+        raise EvaluationError("grpo.max_tool_calling_iterations must be between 1 and 32")
     plan_input: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "project": _mapping(config.get("project", {}), "project").get("name"),
@@ -1239,6 +1247,10 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             # Human-readable tag remains visible, but execution consumes the
             # immutable runtime_reference frozen alongside it.
             "image_identity": container_image,
+            # The built-in benchmark runs the same number of native tool-loop
+            # turns as the GRPO recipe. It is part of the plan ID, so changing
+            # the training protocol requires a new evaluation plan.
+            "max_tool_calling_iterations": max_tool_iterations,
         },
         "scoring": scorer_identity,
         "fairness": _frozen_fairness(fairness),
