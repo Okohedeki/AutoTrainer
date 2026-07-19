@@ -360,16 +360,20 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: HTTPStatus, payload: Mapping[str, Any]) -> None:
         body = (json.dumps(dict(payload), default=str) + "\n").encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        origin = self._cors_origin()
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.end_headers()
-        self.wfile.write(body)
+        # React development mode intentionally aborts the first request while
+        # replaying effects. A client disappearing during a response is not an
+        # application failure and must not trigger a second, empty 500 reply.
+        with suppress(BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            origin = self._cors_origin()
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.end_headers()
+            self.wfile.write(body)
 
     def _read_json(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "0")

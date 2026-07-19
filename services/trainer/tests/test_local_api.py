@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http import HTTPStatus
 from http.client import HTTPConnection
 import json
 import sys
@@ -15,7 +16,7 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.github_service import GitHubSearchError  # noqa: E402
-from autotrainer.local_api import create_local_api_server  # noqa: E402
+from autotrainer.local_api import create_local_api_server, LocalApiHandler  # noqa: E402
 from autotrainer.model_service import ModelSearchError  # noqa: E402
 from autotrainer.project_gate import (  # noqa: E402
     acquire_project_lease,
@@ -58,6 +59,21 @@ class LocalApiTests(unittest.TestCase):
         self.connection.request(method, path, body=body, headers=request_headers)
         response = self.connection.getresponse()
         return response.status, json.loads(response.read().decode("utf-8"))
+
+    def test_disconnected_client_does_not_trigger_a_second_error_response(self) -> None:
+        handler = object.__new__(LocalApiHandler)
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler._cors_origin = Mock(return_value=None)
+        handler.wfile = Mock()
+        handler.wfile.write.side_effect = ConnectionAbortedError()
+
+        handler._handle(
+            lambda: handler._send_json(HTTPStatus.OK, {"status": "ok"})
+        )
+
+        handler.send_response.assert_called_once_with(HTTPStatus.OK)
 
     def test_model_catalog_and_current_status_share_one_contract(self) -> None:
         status, catalog = self.request("GET", "/api/v1/models")
