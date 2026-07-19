@@ -535,6 +535,84 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 "completed",
             )
 
+    def test_rejected_tool_call_stays_inside_the_trial_and_can_be_corrected(self) -> None:
+        class RecoveringGenerator(_FakeGenerator):
+            def generate_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                max_tokens: int,
+                temperature: float,
+                top_p: float,
+                seed: int | None,
+            ) -> tuple[str, int, int]:
+                del temperature, top_p, seed
+                input_tokens = self.count_tokens_with_tools(messages, tools)
+                self.messages.append(messages)
+                self.max_token_budgets.append(max_tokens)
+                call = self.calls
+                self.calls += 1
+                if call == 0:
+                    return (
+                        "<tool_call><function=read_file>"
+                        "<parameter=path>../host-secret</parameter>"
+                        "</function></tool_call>",
+                        input_tokens,
+                        20,
+                    )
+                if call == 1:
+                    return (
+                        "<tool_call><function=apply_patch><parameter=patch>\n"
+                        "diff --git a/src/card.css b/src/card.css\n"
+                        "--- a/src/card.css\n+++ b/src/card.css\n"
+                        "@@ -1 +1 @@\n-.card{display:block}\n+.card{display:grid}\n"
+                        "</parameter></function></tool_call>",
+                        input_tokens,
+                        64,
+                    )
+                return "DONE", input_tokens, 1
+
+        class RejectingEnvironment(_FakeEnvironment):
+            def read_file(self, path: str, start: int = 1, end: int = 200) -> str:
+                del start, end
+                if path.startswith(".."):
+                    raise RuntimeError("private host path must not be exposed")
+                return super().read_file(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = ArmRuntime(
+                arm_id="candidate",
+                model_id="org/candidate-9b",
+                revision=REVISION,
+                snapshot_path=root,
+                adapter_name="base",
+                adapter_path=None,
+                adapter_sha256=None,
+            )
+            generator = RecoveringGenerator()
+            producer = BuiltinEvaluationProducer(
+                {"model": {}},
+                root,
+                {
+                    "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "environment": {"max_tool_calling_iterations": 3},
+                },
+                model_loader=lambda _spec: generator,
+                runtime_resolver=lambda _config, _root, _arm: runtime,
+                environment_factory=RejectingEnvironment,
+            )
+
+            producer.produce(_request("candidate"), root / "result.json")
+
+            result = json.loads((root / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(generator.calls, 3)
+            rendered = json.dumps(generator.messages)
+            self.assertIn("Tool error (RuntimeError)", rendered)
+            self.assertNotIn("private host path must not be exposed", rendered)
+
     def test_adapter_mutation_after_preflight_is_refused_before_model_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

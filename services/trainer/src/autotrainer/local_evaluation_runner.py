@@ -203,6 +203,7 @@ _ORCHESTRATION_SPEC = {
         "tools": _TOOL_SCHEMAS,
         "max_tool_calling_iterations": "frozen-from-grpo-recipe",
         "thinking": False,
+        "tool_errors": "bounded-observation-not-suite-failure",
     },
     "output": "environment-applied-unified-git-diff",
 }
@@ -927,6 +928,18 @@ def _tool_call_message(prefix: str, calls: Sequence[_ToolCall]) -> dict[str, Any
     }
 
 
+def _tool_error_observation(error: Exception) -> str:
+    """Turn a model-caused rejected tool call into a bounded safe observation."""
+
+    # Training treats tool exceptions as observations instead of aborting the
+    # trainer. Evaluation does the same, but does not echo exception text that
+    # could contain a host path or other private runtime detail.
+    return (
+        f"Tool error ({type(error).__name__}): the bounded environment rejected "
+        "this request. Correct the arguments or choose another declared tool."
+    )
+
+
 def _prompt_with_environment_observation(
     task_row: Mapping[str, Any], observation: str
 ) -> list[dict[str, Any]]:
@@ -1155,6 +1168,7 @@ class BuiltinEvaluationProducer:
             total_input_tokens = 0
             total_output_tokens = 0
             tool_calls = 0
+            environment_hard_failed = False
             for turn in range(self._max_tool_calling_iterations):
                 fitted, expected_input = _tool_messages_for_context(
                     generator,
@@ -1208,9 +1222,33 @@ class BuiltinEvaluationProducer:
                 messages.append(_tool_call_message(prefix, calls))
                 for call in calls:
                     tool_calls += 1
-                    result = tools[call.name](**call.arguments)
+                    try:
+                        result = tools[call.name](**call.arguments)
+                    except Exception as error:
+                        # Invalid paths, disabled tools, and exhausted tool
+                        # budgets are policy behavior. Keep them inside this
+                        # trial instead of misreporting them as suite outages.
+                        result = _tool_error_observation(error)
+                        last_result = getattr(environment, "last_result", None)
+                        environment_hard_failed = bool(
+                            getattr(last_result, "hard_gate_reason", None)
+                        )
                     messages.append({"role": "tool", "content": str(result)})
-            exported = environment._export_patch_for_evaluation()
+            try:
+                exported = environment._export_patch_for_evaluation()
+            except Exception:
+                # A deadline finalizes and cleans the supported environment
+                # before raising to the tool loop. Its structured result still
+                # retains the exact bounded diff; use that failed-trial evidence
+                # instead of turning model behavior into a suite outage.
+                last_result = getattr(environment, "last_result", None)
+                captured_diff = getattr(last_result, "unified_diff", None)
+                if not isinstance(captured_diff, str):
+                    raise
+                exported = captured_diff
+                environment_hard_failed = bool(
+                    getattr(last_result, "hard_gate_reason", None)
+                )
             patch = _unified_patch(exported)
         finally:
             cleanup = getattr(environment, "_cleanup", None)
@@ -1234,7 +1272,11 @@ class BuiltinEvaluationProducer:
             "task_id": request.get("task_id"),
             "repetition": request.get("repetition"),
             "seed": request.get("seed"),
-            "status": "completed" if patch is not None else "failed",
+            "status": (
+                "completed"
+                if patch is not None and not environment_hard_failed
+                else "failed"
+            ),
             "producer": {
                 "name": PRODUCER_NAME,
                 "version": PRODUCER_VERSION,
