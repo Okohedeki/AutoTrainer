@@ -185,19 +185,30 @@ autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
 
 The built-in runner compares the pinned Qwythos reference and the candidate adapter one arm at a time on the same task matrix. Results are generated, stored, applied, and scored with the trusted verifier. The GUI graphs actual build, regression, task, responsive, design, and patch-quality evidence as trials complete.
 
-Fable is a separate external suite. Its missing runtime or placeholder identity does not block the local model benchmark. When a pinned Fable setup exists:
+Fable is a separate external suite. Its missing runtime or placeholder identity
+does not block the local model benchmark. The Evaluate screen now manages the
+complete exchange: supply the real Fable runtime or orchestration bundle and
+version, let AutoTrainer hash and pin those bytes, then use the ordered actions
+to export requests, ingest results, manage blind review, and build the report.
+
+Agents use the same workflow:
 
 ```bash
-autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
-# Produce results with the separately pinned Fable setup.
-autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
-autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
+autotrainer fable pin --version 1.4.2 --runtime ../pinned-fable-bundle --config autotrainer.yaml
+autotrainer fable export --config autotrainer.yaml
+# Run the exported requests with the separately supplied Fable runtime.
+autotrainer fable ingest ../fable-results --config autotrainer.yaml
+autotrainer fable review-export --config autotrainer.yaml
 # Collect blind reviewer rows.
-autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
-autotrainer evaluate report --config autotrainer.yaml
+autotrainer fable review-import ../reviews.jsonl --config autotrainer.yaml
+autotrainer fable report --config autotrainer.yaml
 ```
 
-AutoTrainer does not bundle or emulate Fable.
+Requests and blind packets are written below the project's managed evaluation
+exchange directory. Returned producer scores are ignored: AutoTrainer validates
+the frozen producer identity and re-scores each patch locally. AutoTrainer does
+not bundle or emulate Fable; it handles attaching, pinning, and auditing the
+real external runtime and its returned evidence.
 
 ## 5. Serve
 

@@ -10,6 +10,7 @@ import {
   type EvaluationTrial,
   type EvaluationWorkspace,
 } from "./api";
+import FableWorkflowPanel from "./FableWorkflowPanel";
 import TelemetryChart, { type ChartPoint, type ChartSeries } from "./TelemetryChart";
 
 const liveStatuses = new Set(["queued", "running"]);
@@ -191,7 +192,6 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   }, []);
 
   const benchmark = useMemo(() => workspace?.suites.find((suite) => suite.id === "model_benchmark"), [workspace]);
-  const fable = useMemo(() => workspace?.suites.find((suite) => suite.id === "fable_ab"), [workspace]);
   const results = benchmark?.results ?? [];
   const arms = benchmark?.arms ?? [];
   const trials = benchmark?.trials ?? workspace?.plan?.trials ?? workspace?.job.planned_trials ?? [];
@@ -336,10 +336,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
         <ResultRows results={results} />
       </article>
 
-      <article className="panel external-proof-strip">
-        <div><p className="panel-kicker">External comparison</p><h2>Fable A/B remains separate</h2><p>AutoTrainer never simulates Fable. This state advances only after externally generated work returns and passes local verification.</p></div>
-        <dl><div><dt>Status</dt><dd>{phaseLabel(fable?.phase || "not ready")}</dd></div><div><dt>Verified</dt><dd>{fable ? `${fable.completed} / ${fable.total}` : "-"}</dd></div><div><dt>Blind reviews</dt><dd>{fable?.review ? `${fable.review.review_count} / ${fable.review.required_reviews}` : "-"}</dd></div></dl>
-      </article>
+      <FableWorkflowPanel />
     </section>
   );
 }

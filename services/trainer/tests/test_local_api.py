@@ -784,6 +784,62 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(result, job)
         start.assert_called_once_with("install_training_packages")
 
+    def test_fable_endpoints_share_managed_external_workflow(self) -> None:
+        workspace = {
+            "status": "needs_pin",
+            "runner": {"pinned": False},
+            "actions": [],
+            "job": {"status": "idle"},
+        }
+        with patch.object(
+            self.server.fable,
+            "workspace",
+            return_value=workspace,
+        ) as inspected:
+            status, result = self.request("GET", "/api/v1/fable")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        inspected.assert_called_once_with()
+
+        pinned = {**workspace, "status": "in_progress", "runner": {"pinned": True}}
+        with (
+            patch(
+                "autotrainer.local_api.pin_fable_runner",
+                return_value=pinned,
+            ) as pin,
+            patch.object(
+                self.server.fable,
+                "workspace",
+                return_value=pinned,
+            ),
+        ):
+            status, result = self.request(
+                "POST",
+                "/api/v1/fable/pin",
+                {"version": "1.4.2", "runtime_path": "C:\\fable\\runtime"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, pinned)
+        pin.assert_called_once_with(
+            self.config_path.resolve(),
+            version="1.4.2",
+            runtime_path="C:\\fable\\runtime",
+        )
+
+        job = {"id": "b" * 32, "action_id": "ingest", "status": "queued"}
+        with patch.object(self.server.fable, "start", return_value=job) as start:
+            status, result = self.request(
+                "POST",
+                "/api/v1/fable/action",
+                {"action_id": "ingest", "input_path": "C:\\fable\\results"},
+            )
+        self.assertEqual(status, 202)
+        self.assertEqual(result, job)
+        start.assert_called_once_with(
+            "ingest",
+            input_path="C:\\fable\\results",
+        )
+
     def test_history_endpoints_share_the_review_service_contract(self) -> None:
         workspace = {
             "summary": {"reviewable_count": 1, "approved_count": 0},

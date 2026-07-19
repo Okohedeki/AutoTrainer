@@ -512,6 +512,63 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload, expected)
         apply.assert_called_once_with(config_path, "build_runtime_image")
 
+    def test_fable_pin_delegates_to_managed_external_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        runtime_path = Path("external/fable-runtime")
+        expected = {"status": "in_progress", "runner": {"pinned": True}}
+        with patch(
+            "autotrainer.fable_service.pin_fable_runner",
+            return_value=expected,
+        ) as pin:
+            status, payload = self._json_command(
+                [
+                    "fable",
+                    "pin",
+                    "--version",
+                    "1.4.2",
+                    "--runtime",
+                    str(runtime_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        pin.assert_called_once_with(
+            config_path,
+            version="1.4.2",
+            runtime_path=runtime_path,
+        )
+
+    def test_fable_ingest_delegates_to_managed_external_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        input_path = Path("external/fable-results")
+        expected = {"ingested_count": 10}
+        with patch(
+            "autotrainer.fable_service.run_fable_action",
+            return_value=expected,
+        ) as run:
+            status, payload = self._json_command(
+                [
+                    "fable",
+                    "ingest",
+                    str(input_path),
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        run.assert_called_once_with(
+            config_path,
+            "ingest",
+            input_path=input_path,
+        )
+
     def test_host_commands_delegate_without_blocking_on_model_load(self) -> None:
         config_path = Path("project/autotrainer.yaml")
         with patch("autotrainer.hosting_service.HostingManager") as manager_type:

@@ -20,7 +20,8 @@ The remaining work is real 9B execution and evidence. Service/UI tests and dry r
 - Durable observed training telemetry and GUI graphs.
 - Frozen evaluation plans, durable trial evidence, trusted local verification, and live rubric graphs.
 - Built-in text-only benchmark producer comparing the pinned Qwythos reference with the candidate.
-- Deferred external Fable request/ingest/blind-review/report contracts.
+- Managed external Fable pin, request export, background ingest/local scoring,
+  blind-review, and separate-report workflow.
 - Exclusive cross-project GPU coordination for Train, Evaluate, and Host.
 - A separate loopback model process with `/v1/models` and non-streaming `/v1/chat/completions`.
 
@@ -44,7 +45,10 @@ The local model benchmark reference is:
 
 The built-in producer owns the text prompt, bounded source context, offline 4-bit loading path, and result envelope. Its frozen identity includes evaluator code and dependency versions. It loads one arm at a time on GPU 0 and re-verifies patches locally.
 
-Fable remains an external second proof. Placeholder Fable version/digest marks only that suite deferred; it does not block the local model benchmark.
+Fable remains an external second proof. The Evaluate screen accepts the real
+runtime or orchestration bundle, computes its digest, and replaces the
+placeholder transactionally. Until that happens, only the Fable suite is
+deferred; the local model benchmark remains available.
 
 ## Path to a verified V1
 
@@ -104,16 +108,19 @@ Acceptance:
 
 ### 5. Complete the external Fable proof
 
-First replace the placeholder Fable version and orchestration digest with a real pinned setup. Then:
+Use the Evaluate screen's managed Fable exchange, or the equivalent agent
+commands. AutoTrainer computes the digest from the supplied runtime bytes and
+owns the export locations:
 
 ```bash
-autotrainer evaluate export --suite fable_ab --output ./fable-requests --config autotrainer.yaml
-# Produce outputs using the separately pinned Fable runtime.
-autotrainer evaluate ingest --suite fable_ab ./fable-results --config autotrainer.yaml
-autotrainer evaluate review export --suite fable_ab --output ./blind-review --config autotrainer.yaml
+autotrainer fable pin --version VERSION --runtime ../pinned-fable-bundle --config autotrainer.yaml
+autotrainer fable export --config autotrainer.yaml
+# Produce outputs using the supplied, now-pinned Fable runtime.
+autotrainer fable ingest ../fable-results --config autotrainer.yaml
+autotrainer fable review-export --config autotrainer.yaml
 # Collect complete blind reviewer rows.
-autotrainer evaluate review import --suite fable_ab ./reviews.jsonl --config autotrainer.yaml
-autotrainer evaluate report --config autotrainer.yaml
+autotrainer fable review-import ../reviews.jsonl --config autotrainer.yaml
+autotrainer fable report --config autotrainer.yaml
 ```
 
 Acceptance: producer identity matches the frozen plan, patches pass local verification, review completeness holds, and the Fable decision meets its declared rule.

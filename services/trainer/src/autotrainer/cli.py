@@ -375,6 +375,40 @@ def build_parser() -> argparse.ArgumentParser:
     review_import.add_argument("--suite", required=True)
     _config_argument(review_import)
 
+    fable = subparsers.add_parser(
+        "fable",
+        help="pin and complete the managed external Fable comparison",
+    )
+    fable_sub = fable.add_subparsers(dest="fable_command", required=True)
+    fable_status = fable_sub.add_parser("status", help="inspect the Fable exchange")
+    _config_argument(fable_status)
+    fable_pin = fable_sub.add_parser(
+        "pin",
+        help="hash a supplied Fable runtime or orchestration bundle",
+    )
+    fable_pin.add_argument("--version", required=True)
+    fable_pin.add_argument("--runtime", type=Path, required=True)
+    _config_argument(fable_pin)
+    for action, help_text in (
+        ("export", "freeze and export verifier-free requests"),
+        ("review-export", "export counterbalanced blind review pairs"),
+        ("report", "build the separate Fable decision report"),
+    ):
+        command = fable_sub.add_parser(action, help=help_text)
+        _config_argument(command)
+    fable_ingest = fable_sub.add_parser(
+        "ingest",
+        help="ingest external result envelopes through trusted local scoring",
+    )
+    fable_ingest.add_argument("input", type=Path)
+    _config_argument(fable_ingest)
+    fable_review_import = fable_sub.add_parser(
+        "review-import",
+        help="import blind reviewer choices",
+    )
+    fable_review_import.add_argument("input", type=Path)
+    _config_argument(fable_review_import)
+
     package = subparsers.add_parser(
         "package", help="assemble the evaluated LoRA adapter and audit artifacts"
     )
@@ -943,6 +977,36 @@ def _run_evaluate(arguments: argparse.Namespace) -> int:
     return exit_code
 
 
+def _run_fable(arguments: argparse.Namespace) -> int:
+    from .fable_service import (
+        inspect_fable_workflow,
+        pin_fable_runner,
+        run_fable_action,
+    )
+
+    if arguments.fable_command == "status":
+        result = inspect_fable_workflow(arguments.config)
+    elif arguments.fable_command == "pin":
+        result = pin_fable_runner(
+            arguments.config,
+            version=arguments.version,
+            runtime_path=arguments.runtime,
+        )
+    else:
+        action_id = arguments.fable_command.replace("-", "_")
+        result = run_fable_action(
+            arguments.config,
+            action_id,
+            input_path=(
+                arguments.input
+                if arguments.fable_command in {"ingest", "review-import"}
+                else None
+            ),
+        )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def _run_package(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config, check_paths=True)
     from .packaging import build_adapter_package
@@ -1020,6 +1084,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_train(arguments)
         if arguments.command in {"evaluate", "benchmark"}:
             return _run_evaluate(arguments)
+        if arguments.command == "fable":
+            return _run_fable(arguments)
         if arguments.command == "package":
             return _run_package(arguments)
         if arguments.command == "host":

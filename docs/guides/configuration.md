@@ -299,7 +299,12 @@ The built-in runner owns its prompt/loader protocol. Its identity includes the i
 
 Single-GPU execution is truthful: pair positions are counterbalanced for analysis, but trials run in a frozen grouped order so only one 9B arm is loaded at a time. The legacy `randomize_arm_order: true` fairness form remains readable for older projects; new configs use the explicit policies above.
 
-Fable placeholders make only `fable_ab` deferred. They do not block planning or running `model_benchmark`. Replace them only when a real, pinned Fable producer exists.
+Fable placeholders make only `fable_ab` deferred. They do not block planning
+or running `model_benchmark`. In Evaluate, **Hash and pin** computes the
+orchestration digest from a supplied runtime file or directory and updates
+these fields transactionally. The equivalent agent command is
+`autotrainer fable pin --version VERSION --runtime PATH`; users do not need to
+calculate or paste a digest.
 
 ### Evaluation evidence
 

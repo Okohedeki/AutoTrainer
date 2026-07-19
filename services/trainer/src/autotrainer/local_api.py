@@ -25,6 +25,7 @@ from .example_authoring_service import (
     list_authored_examples,
     remove_authored_example,
 )
+from .fable_service import FableWorkflowManager, pin_fable_runner
 from .github_service import GitHubSearchError, search_repositories
 from .hosting_service import HostingManager
 from .history_service import (
@@ -191,6 +192,7 @@ class LocalApiServer(ThreadingHTTPServer):
         self.evaluation = EvaluationJobManager(config_path)
         self.hosting = HostingManager(config_path)
         self.runtime_setup = RuntimeSetupManager(config_path)
+        self.fable = FableWorkflowManager(config_path)
 
     @property
     def config_path(self) -> Path:
@@ -210,6 +212,7 @@ class LocalApiServer(ThreadingHTTPServer):
             or self.evaluation.snapshot().get("status") in {"queued", "running"}
             or self.hosting.snapshot().get("status") in {"loading", "live"}
             or self.runtime_setup.snapshot().get("status") in {"queued", "running"}
+            or self.fable.snapshot().get("status") in {"queued", "running"}
         ):
             raise ProjectBusyError(
                 "Stop the active project job or model host before switching projects."
@@ -230,6 +233,8 @@ class LocalApiServer(ThreadingHTTPServer):
             constructed.append(hosting)
             runtime_setup = RuntimeSetupManager(target)
             constructed.append(runtime_setup)
+            fable = FableWorkflowManager(target)
+            constructed.append(fable)
             selected = self.workspace.select_project(project_id)
         except Exception:
             # A constructor can fail after earlier managers opened resources.
@@ -238,12 +243,20 @@ class LocalApiServer(ThreadingHTTPServer):
                 with suppress(Exception):
                     manager.close()  # type: ignore[attr-defined]
             raise
-        old_download, old_training, old_evaluation, old_hosting, old_runtime_setup = (
+        (
+            old_download,
+            old_training,
+            old_evaluation,
+            old_hosting,
+            old_runtime_setup,
+            old_fable,
+        ) = (
             self.model_download,
             self.training,
             self.evaluation,
             self.hosting,
             self.runtime_setup,
+            self.fable,
         )
         (
             self.model_download,
@@ -251,16 +264,19 @@ class LocalApiServer(ThreadingHTTPServer):
             self.evaluation,
             self.hosting,
             self.runtime_setup,
+            self.fable,
         ) = (
             model_download,
             training,
             evaluation,
             hosting,
             runtime_setup,
+            fable,
         )
         # The new context is already published. Cleanup failures in an idle
         # old manager must not turn a successful switch into a failed POST.
         for manager in (
+            old_fable,
             old_runtime_setup,
             old_hosting,
             old_evaluation,
@@ -321,6 +337,7 @@ class LocalApiServer(ThreadingHTTPServer):
             # At most one long project job can own the shared lease.  Joining
             # both managers keeps shutdown honest whichever lifecycle owns it.
             self.hosting.close()
+            self.fable.close()
             self.runtime_setup.close()
             self.evaluation.close()
             self.training.close()
@@ -593,6 +610,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         self.server.runtime_setup.workspace(),
+                    )
+                elif path == f"{API_PREFIX}/fable":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        self.server.fable.workspace(),
                     )
                 elif path == f"{API_PREFIX}/curriculum":
                     _query_values(query, allowed=set())
@@ -896,6 +919,34 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.ACCEPTED,
                         self.server.runtime_setup.start(
                             _required_text(payload, "action_id")
+                        ),
+                    )
+                elif path == f"{API_PREFIX}/fable/pin":
+                    _require_keys(
+                        payload,
+                        allowed={"version", "runtime_path"},
+                        required={"version", "runtime_path"},
+                    )
+                    pin_fable_runner(
+                        self.server.config_path,
+                        version=_required_text(payload, "version"),
+                        runtime_path=_required_text(payload, "runtime_path"),
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        self.server.fable.workspace(),
+                    )
+                elif path == f"{API_PREFIX}/fable/action":
+                    _require_keys(
+                        payload,
+                        allowed={"action_id", "input_path"},
+                        required={"action_id"},
+                    )
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        self.server.fable.start(
+                            _required_text(payload, "action_id"),
+                            input_path=_optional_text(payload, "input_path"),
                         ),
                     )
                 elif path == f"{API_PREFIX}/training/start":

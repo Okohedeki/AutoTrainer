@@ -102,7 +102,12 @@ The `model_benchmark` suite uses AutoTrainer's built-in text-only producer. It:
 
 Arms are grouped so only one 9B model occupies the GPU. Analysis positions remain deterministically counterbalanced; V1 does not claim per-trial GPU arm randomization.
 
-The `fable_ab` suite is external. AutoTrainer can freeze/export its requests, ingest envelopes, locally verify patches, manage blind-review rows, and report a decision. It does not include a Fable runtime. Placeholder Fable identity is marked deferred and does not block the built-in local model benchmark.
+The `fable_ab` suite is external. AutoTrainer can hash and pin a supplied Fable
+runtime bundle, freeze/export its requests, background-ingest envelopes,
+locally verify patches, manage blind-review rows, and report a separate
+decision. It does not include or emulate a Fable runtime. Placeholder Fable
+identity is marked deferred and does not block the built-in local model
+benchmark.
 
 ## GPU coordination
 

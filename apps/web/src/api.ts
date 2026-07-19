@@ -282,6 +282,48 @@ export type RuntimeSetupWorkspace = {
   job: RuntimeSetupJob;
 };
 
+export type FableAction = {
+  id: "export" | "ingest" | "review_export" | "review_import" | "report";
+  title: string;
+  detail: string;
+  status: "available" | "blocked" | "complete";
+  input_required: boolean;
+};
+
+export type FableJob = {
+  id: string | null;
+  action_id: FableAction["id"] | null;
+  status: "idle" | "queued" | "running" | "completed" | "failed";
+  message: string;
+};
+
+export type FableWorkspace = {
+  status: "needs_pin" | "in_progress" | "report_ready";
+  runner: {
+    producer: "fable";
+    version?: string;
+    orchestration_sha256?: string;
+    pinned: boolean;
+    receipt_matches: boolean;
+    runtime_path?: string | null;
+  };
+  exchange?: {
+    plan_id: string;
+    trial_count: number;
+    scored_count: number;
+    requests_exported: boolean;
+    request_path?: string | null;
+    blind_pairs_exported: boolean;
+    blind_review_path?: string | null;
+    reviews_imported: boolean;
+    report_ready: boolean;
+    report_path?: string | null;
+  } | null;
+  actions: FableAction[];
+  next_action: FableAction | null;
+  job: FableJob;
+};
+
 export type HistoryFile = {
   path: string;
   status: string;
@@ -783,6 +825,27 @@ export async function applyRuntimeSetup(actionId: RuntimeSetupAction["id"]): Pro
   return request("/api/v1/runtime/setup", {
     method: "POST",
     body: JSON.stringify({ action_id: actionId }),
+  });
+}
+
+export async function getFableWorkspace(signal?: AbortSignal): Promise<FableWorkspace> {
+  return request("/api/v1/fable", { signal });
+}
+
+export async function pinFableRunner(version: string, runtimePath: string): Promise<FableWorkspace> {
+  return request("/api/v1/fable/pin", {
+    method: "POST",
+    body: JSON.stringify({ version, runtime_path: runtimePath }),
+  });
+}
+
+export async function runFableAction(
+  actionId: FableAction["id"],
+  inputPath?: string,
+): Promise<FableJob> {
+  return request("/api/v1/fable/action", {
+    method: "POST",
+    body: JSON.stringify({ action_id: actionId, ...(inputPath ? { input_path: inputPath } : {}) }),
   });
 }
 
