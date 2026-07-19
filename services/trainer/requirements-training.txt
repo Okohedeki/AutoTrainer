@@ -1,6 +1,7 @@
 # Install the matching CUDA build of PyTorch from https://pytorch.org/get-started/locally/ first.
 # These are the reference versions used by the one-GPU Hugging Face backend.
 torch==2.13.0
+torchvision==0.28.0
 transformers==5.13.1
 trl==1.8.0
 peft==0.19.1

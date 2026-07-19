@@ -68,6 +68,7 @@ class RuntimeSetupServiceTests(unittest.TestCase):
         )
         package_command = actions["install_training_packages"]["command"]
         self.assertIn("torch==2.13.0+cu130", package_command)
+        self.assertIn("torchvision==0.28.0+cu130", package_command)
         self.assertIn("regex==2025.10.22", package_command)
         self.assertIn("https://download.pytorch.org/whl/cu130", package_command)
         self.assertTrue(actions["install_wsl_ubuntu"]["requires_admin"])
@@ -137,6 +138,37 @@ class RuntimeSetupServiceTests(unittest.TestCase):
     def test_apply_rejects_an_unknown_action_before_execution(self) -> None:
         with self.assertRaisesRegex(RuntimeSetupError, "invalid"):
             apply_runtime_setup_action_owned(self.config_path, "run_anything")
+
+    def test_apply_includes_the_setup_output_tail_when_a_command_fails(self) -> None:
+        selected = {
+            "id": "install_training_packages",
+            "title": "Install packages",
+            "detail": "Install them.",
+            "status": "available",
+            "command": ["python", "-m", "pip", "install", "fixed"],
+            "requires_admin": False,
+            "restart_required": True,
+        }
+        completed = subprocess.CompletedProcess(
+            selected["command"],
+            1,
+            "",
+            "ERROR: incompatible wheel\nTry a different interpreter.\n",
+        )
+        with (
+            patch("autotrainer.runtime_setup_service._selected_action", return_value=selected),
+            patch("autotrainer.runtime_setup_service._checkout_root", return_value=self.root),
+            patch("autotrainer.runtime_setup_service.shutil.which", return_value="python.exe"),
+            patch("autotrainer.runtime_setup_service.subprocess.run", return_value=completed),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeSetupError,
+                "incompatible wheel Try a different interpreter",
+            ):
+                apply_runtime_setup_action_owned(
+                    self.config_path,
+                    "install_training_packages",
+                )
 
 
 if __name__ == "__main__":

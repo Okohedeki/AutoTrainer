@@ -15,6 +15,10 @@ from .training.common import validate_single_gpu
 
 REFERENCE_PACKAGES = {
     "torch": "2.13.0",
+    # Transformers probes torchvision while importing model classes. Keep the
+    # companion wheel aligned with PyTorch so an unrelated host installation
+    # cannot make the otherwise pinned training stack fail at import time.
+    "torchvision": "0.28.0",
     "transformers": "5.13.1",
     "trl": "1.8.0",
     "peft": "0.19.1",
@@ -30,6 +34,7 @@ REFERENCE_PACKAGES = {
 # broken CUDA/native-library installation.
 REFERENCE_IMPORTS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "torch": (("torch", ()),),
+    "torchvision": (("torchvision", ()),),
     "transformers": (
         (
             "transformers",

@@ -160,8 +160,8 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     if not packages_ready or cuda_wheel_needed:
         specifications = [
             (
-                f"torch=={version}+{_PYTORCH_CUDA_TAG}"
-                if name == "torch"
+                f"{name}=={version}+{_PYTORCH_CUDA_TAG}"
+                if name in {"torch", "torchvision"}
                 else f"{name}=={version}"
             )
             for name, version in REFERENCE_PACKAGES.items()
@@ -309,9 +309,12 @@ def apply_runtime_setup_action_owned(
             if selected["requires_admin"]
             else "Review the setup output and retry."
         )
+        output = (completed.stderr or completed.stdout).strip()
+        output_tail = " ".join(output.split())[-2_000:]
+        detail = f" Setup output: {output_tail}" if output_tail else ""
         raise RuntimeSetupError(
             f"{selected['title']} failed with exit {completed.returncode}. "
-            f"{guidance}"
+            f"{guidance}{detail}"
         )
     return {
         "action_id": action_id,
