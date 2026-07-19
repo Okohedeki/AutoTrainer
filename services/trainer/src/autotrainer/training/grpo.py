@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
+from math import isfinite
+from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -108,6 +111,18 @@ def resolve_grpo_recipe(
     batch_size = int_value(section, "per_device_train_batch_size", 1, "grpo")
     accumulation = int_value(section, "gradient_accumulation_steps", 2, "grpo")
     num_generations = int_value(section, "num_generations", 2, "grpo", minimum=2)
+    calibration_generations = int_value(
+        section,
+        "calibration_generations",
+        4,
+        "grpo",
+        minimum=4,
+    )
+    if calibration_generations % num_generations:
+        raise TrainingConfigurationError(
+            "grpo.calibration_generations must be divisible by grpo.num_generations; "
+            f"got {calibration_generations} and {num_generations}"
+        )
     effective_batch_size = batch_size * accumulation
     if effective_batch_size % num_generations:
         raise TrainingConfigurationError(
@@ -219,6 +234,7 @@ def resolve_grpo_recipe(
         "gradient_accumulation_steps": accumulation,
         "effective_batch_size": effective_batch_size,
         "num_generations": num_generations,
+        "calibration_generations": calibration_generations,
         "generation_batch_size": generation_batch_size,
         "max_completion_length": max_completion_length,
         "max_tool_calling_iterations": int_value(
@@ -280,6 +296,103 @@ def _bind_environment_image_identity(dataset: Any, runtime_reference: str) -> An
         lambda _row: {"environment_image_identity": runtime_reference},
         desc="Binding immutable rollout image",
     )
+
+
+def _summarize_starting_policy_calibration(
+    events: list[Mapping[str, Any]],
+    *,
+    task_ids: list[str],
+    repetitions: int,
+    num_generations: int,
+) -> dict[str, Any]:
+    """Require sampled reward spread before any optimizer step is allowed."""
+
+    expected_tasks = set(task_ids)
+    if not expected_tasks or len(expected_tasks) != len(task_ids):
+        raise TrainingRuntimeError(
+            "starting-policy calibration requires unique executable task ids"
+        )
+    grouped: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    gate_passes: dict[str, int] = defaultdict(int)
+    for event in events:
+        task_id = str(event.get("task_id", "")).strip()
+        round_number = event.get("calibration_round")
+        reward = event.get("reward")
+        if task_id not in expected_tasks:
+            raise TrainingRuntimeError(
+                f"starting-policy calibration returned unknown task {task_id!r}"
+            )
+        if (
+            isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or not 1 <= round_number <= repetitions
+        ):
+            raise TrainingRuntimeError(
+                "starting-policy calibration returned an invalid round number"
+            )
+        if (
+            isinstance(reward, bool)
+            or not isinstance(reward, Real)
+            or not isfinite(float(reward))
+        ):
+            raise TrainingRuntimeError(
+                f"starting-policy calibration returned invalid reward for {task_id!r}"
+            )
+        grouped[task_id][round_number].append(float(reward))
+        if event.get("hard_gate_passed") is True:
+            gate_passes[task_id] += 1
+
+    tasks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    for task_id in task_ids:
+        round_summaries: list[dict[str, Any]] = []
+        varied_rounds = 0
+        all_rewards: list[float] = []
+        for round_number in range(1, repetitions + 1):
+            rewards = grouped[task_id].get(round_number, [])
+            if len(rewards) != num_generations:
+                blockers.append(
+                    f"task {task_id!r} produced {len(rewards)} of {num_generations} "
+                    f"required rewards in calibration round {round_number}"
+                )
+                continue
+            reward_range = max(rewards) - min(rewards)
+            if reward_range > 1e-8:
+                varied_rounds += 1
+            all_rewards.extend(rewards)
+            round_summaries.append(
+                {
+                    "round": round_number,
+                    "reward_min": round(min(rewards), 6),
+                    "reward_max": round(max(rewards), 6),
+                    "reward_range": round(reward_range, 6),
+                }
+            )
+        if len(round_summaries) == repetitions and varied_rounds == 0:
+            blockers.append(
+                f"task {task_id!r} produced no within-group reward variation across "
+                f"{repetitions} frozen starting-policy calibration rounds"
+            )
+        tasks.append(
+            {
+                "task_id": task_id,
+                "rollout_count": len(all_rewards),
+                "hard_gate_pass_count": gate_passes[task_id],
+                "varied_round_count": varied_rounds,
+                "rounds": round_summaries,
+            }
+        )
+    return {
+        "status": "ready" if not blockers else "blocked",
+        "policy_frozen": True,
+        "optimizer_steps": 0,
+        "task_count": len(task_ids),
+        "num_generations": num_generations,
+        "round_count": repetitions,
+        "generations_per_task": repetitions * num_generations,
+        "tasks": tasks,
+        "blockers": blockers,
+    }
 
 
 def _save_grpo_processing_class(trainer: Any, fallback: Any, destination: Path) -> None:
@@ -368,14 +481,30 @@ def run_grpo(
 
     runtime = validate_single_gpu(torch)
     base_environment_factory = import_factory(recipe["environment"]["factory"])
+    calibration_round: int | None = None
+    calibration_events: list[dict[str, Any]] = []
 
     def environment_factory() -> Any:
-        """Attach the private observer without changing the TRL tool surface."""
+        """Attach private phase observers without changing the TRL tool surface."""
 
         environment = base_environment_factory()
         setter = getattr(environment, "_set_episode_callback", None)
-        if on_event is not None and callable(setter):
-            setter(lambda event: on_event({"stage": "grpo", **dict(event)}))
+        if callable(setter):
+
+            def observe_episode(event: Mapping[str, Any]) -> None:
+                if calibration_round is not None:
+                    if event.get("type") == "episode_scored":
+                        calibration_events.append(
+                            {
+                                **dict(event),
+                                "calibration_round": calibration_round,
+                            }
+                        )
+                    return
+                if on_event is not None:
+                    on_event({"stage": "grpo", **dict(event)})
+
+            setter(observe_episode)
         return environment
 
     destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
@@ -520,6 +649,57 @@ def run_grpo(
                 )
             ],
         )
+        calibration_metrics: list[dict[str, Any]] = []
+        calibration_repetitions = (
+            stage["calibration_generations"] // stage["num_generations"]
+        )
+        for round_index in range(calibration_repetitions):
+            calibration_round = round_index + 1
+            metrics = trainer.evaluate(
+                eval_dataset=train_dataset,
+                metric_key_prefix=f"starting_policy_calibration_{calibration_round}",
+            )
+            calibration_metrics.append(as_serializable(metrics))
+        calibration_round = None
+        canary_tasks = environment_canary.get("tasks")
+        if not isinstance(canary_tasks, list):
+            raise TrainingRuntimeError(
+                "GRPO executable canary did not return task identities for calibration"
+            )
+        task_ids = [
+            str(task.get("task_id", "")).strip()
+            for task in canary_tasks
+            if isinstance(task, Mapping)
+        ]
+        starting_policy_calibration = _summarize_starting_policy_calibration(
+            calibration_events,
+            task_ids=task_ids,
+            repetitions=calibration_repetitions,
+            num_generations=stage["num_generations"],
+        )
+        starting_policy_calibration.update(
+            {
+                "model": {
+                    "id": model_recipe["id"],
+                    "revision": model_recipe["revision"],
+                },
+                "dataset": {
+                    key: stage["dataset"][key]
+                    for key in ("sha256", "bytes", "record_count")
+                },
+                "container_image": dict(container_image),
+                "trainer_metrics": calibration_metrics,
+            }
+        )
+        (destination / "starting_policy_calibration.json").write_text(
+            json.dumps(starting_policy_calibration, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if starting_policy_calibration["status"] != "ready":
+            raise TrainingRuntimeError(
+                "GRPO starting-policy calibration rejected the curriculum: "
+                + str(starting_policy_calibration["blockers"][0])
+            )
         train_output = trainer.train()
         trainer.save_model(str(destination))
         _save_grpo_processing_class(trainer, tokenizer, destination)
@@ -555,6 +735,7 @@ def run_grpo(
         "dependencies": installed_versions,
         "runtime": runtime,
         "environment_canary": environment_canary,
+        "starting_policy_calibration": starting_policy_calibration,
         "trainable_adapter_parameters": trainable_parameters,
         "metrics": metrics,
     }

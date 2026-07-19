@@ -167,6 +167,7 @@
         "per_device_train_batch_size": { "type": "integer", "minimum": 1 },
         "gradient_accumulation_steps": { "type": "integer", "minimum": 1 },
         "num_generations": { "type": "integer", "minimum": 2 },
+        "calibration_generations": { "type": "integer", "minimum": 4 },
         "generation_batch_size": { "type": "integer", "minimum": 2 },
         "max_completion_length": { "type": "integer", "minimum": 128 },
         "max_tool_calling_iterations": { "type": "integer", "minimum": 1 },

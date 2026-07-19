@@ -26,6 +26,7 @@ from autotrainer.training.grpo import (  # noqa: E402
     _bind_environment_image_identity,
     _load_json_dataset as load_grpo_json_dataset,
     _save_grpo_processing_class,
+    _summarize_starting_policy_calibration,
 )
 from autotrainer.training.sft import (  # noqa: E402
     _load_json_dataset as load_sft_json_dataset,
@@ -277,6 +278,7 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["per_device_eval_batch_size"], 1)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
+        self.assertEqual(recipe["grpo"]["calibration_generations"], 4)
         self.assertEqual(recipe["grpo"]["dataset"]["record_count"], 1)
         self.assertEqual(
             recipe["grpo"]["dataset"]["bytes"], self.grpo_dataset.stat().st_size
@@ -302,6 +304,64 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertIs(result, dataset)
         self.assertEqual(dataset.update, {"environment_image_identity": IMAGE_DIGEST})
         self.assertEqual(dataset.description, "Binding immutable rollout image")
+
+    def test_starting_policy_calibration_requires_within_group_reward_spread(
+        self,
+    ) -> None:
+        events = [
+            {
+                "task_id": task_id,
+                "calibration_round": round_number,
+                "reward": reward,
+                "hard_gate_passed": reward > 0,
+            }
+            for task_id, groups in {
+                "pricing-page-001": ((0.0, 0.2), (0.1, 0.1)),
+                "checkout-page-002": ((0.1, 0.4), (0.2, 0.5)),
+            }.items()
+            for round_number, rewards in enumerate(groups, 1)
+            for reward in rewards
+        ]
+
+        result = _summarize_starting_policy_calibration(
+            events,
+            task_ids=["pricing-page-001", "checkout-page-002"],
+            repetitions=2,
+            num_generations=2,
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["generations_per_task"], 4)
+        self.assertEqual(result["tasks"][0]["varied_round_count"], 1)
+        self.assertEqual(result["tasks"][1]["varied_round_count"], 2)
+
+    def test_starting_policy_calibration_rejects_flat_or_incomplete_tasks(self) -> None:
+        events = [
+            {
+                "task_id": "pricing-page-001",
+                "calibration_round": round_number,
+                "reward": 0.0,
+                "hard_gate_passed": False,
+            }
+            for round_number in (1, 2)
+            for _ in range(2)
+        ]
+
+        result = _summarize_starting_policy_calibration(
+            events,
+            task_ids=["pricing-page-001", "checkout-page-002"],
+            repetitions=2,
+            num_generations=2,
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(
+            any(
+                "no within-group reward variation" in item
+                for item in result["blockers"]
+            )
+        )
+        self.assertTrue(any("checkout-page-002" in item for item in result["blockers"]))
 
     def test_grpo_persists_the_template_created_by_the_trainer(self) -> None:
         class ProcessingClass:
@@ -555,6 +615,32 @@ class TrainingRecipeTests(unittest.TestCase):
                 config,
                 project_root=self.project_root,
                 output_dir=Path("artifacts/grpo-output"),
+            )
+
+    def test_grpo_rejects_invalid_starting_policy_calibration_size(self) -> None:
+        config = self.config()
+        config["grpo"]["calibration_generations"] = 3
+        with self.assertRaisesRegex(
+            TrainingConfigurationError,
+            "calibration_generations.*greater than or equal to 4",
+        ):
+            run_grpo(
+                config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+                dry_run=True,
+            )
+
+        config["grpo"]["calibration_generations"] = 5
+        with self.assertRaisesRegex(
+            TrainingConfigurationError,
+            "calibration_generations must be divisible",
+        ):
+            run_grpo(
+                config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+                dry_run=True,
             )
 
     def test_grpo_rejects_output_that_would_overwrite_sft_adapter(self) -> None:

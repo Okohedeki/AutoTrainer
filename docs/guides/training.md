@@ -118,7 +118,7 @@ Rollout telemetry does not persist model reasoning, patches, tool arguments/outp
 
 Every GRPO job records the fingerprint and SHA-256 of the compiled task dataset it actually used. Rollouts are merged into task summaries only when that binding matches the current compiled curriculum. Stored events outside that match remain visibly unmatched. Metrics describe the current job's retained event window; a truncated window is labeled as truncated rather than presented as the complete run.
 
-Outcome labels are descriptive, not improvement claims. `unobserved` has no scored evidence, `uncalibrated` has too few retained attempts to read a pattern, `varied` has reward spread, and `flat` does not. Task difficulty should be calibrated with frozen base-policy rollouts before tasks are raised, repaired, or removed.
+Outcome labels are descriptive, not improvement claims. `unobserved` has no scored evidence, `uncalibrated` has too few retained attempts to read a pattern, `varied` has reward spread, and `flat` does not. Before optimization, AutoTrainer now runs and records at least four frozen starting-policy rollouts per task. A task must show within-group reward variation in that calibration or GRPO stops before updating the adapter. Use the retained training rollouts for later curriculum analysis, but do not confuse them with the frozen starting-policy evidence in `starting_policy_calibration.json`.
 
 If the backend stops during a job, the durable record is marked interrupted when recovered. Full optimizer/checkpoint resume is not automatic for every combined-path interruption; retry can repeat a stage. Preserve output directories and receipts before deciding whether a retry is comparable.
 

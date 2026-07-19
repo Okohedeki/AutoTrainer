@@ -158,6 +158,7 @@ grpo:
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 2
   num_generations: 2
+  calibration_generations: 4
   generation_batch_size: 2
   learning_rate: 0.00001
   max_steps: 100
@@ -174,6 +175,14 @@ grpo:
   top_k: 20
   seed: 42
 ```
+
+Before the first optimizer step, GRPO samples `calibration_generations` frozen
+starting-policy rollouts per task through the same environment and verifier.
+The value must be at least four and divisible by `num_generations`. Training
+stops if a task produces no within-group reward variation across the sampled
+groups, because that task would provide zero relative advantage at the start
+of the run. The resulting evidence is written to
+`starting_policy_calibration.json` beside the adapter.
 
 `start_from` is `base` for a practice-only fresh adapter or a completed compatible PEFT adapter path. When SFT and GRPO are both enabled, it must equal `sft.output_dir`; `train auto` passes the completed SFT adapter directly into the GRPO stage.
 

@@ -563,11 +563,26 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
             "gradient_accumulation_steps", 0
         )
         generations = grpo.get("num_generations", 0)
+        calibration_generations = grpo.get("calibration_generations", 4)
+        if (
+            isinstance(calibration_generations, bool)
+            or not isinstance(calibration_generations, int)
+            or calibration_generations < 4
+        ):
+            errors.append("grpo.calibration_generations must be an integer at least 4")
         if isinstance(effective_batch, int) and isinstance(generations, int) and generations > 0:
             if effective_batch % generations:
                 errors.append(
                     "GRPO effective batch (per_device_train_batch_size × gradient_accumulation_steps) "
                     "must be divisible by num_generations"
+                )
+            if (
+                isinstance(calibration_generations, int)
+                and not isinstance(calibration_generations, bool)
+                and calibration_generations % generations
+            ):
+                errors.append(
+                    "grpo.calibration_generations must be divisible by num_generations"
                 )
         start_from = grpo.get("start_from", grpo.get("sft_adapter"))
         if start_from in {None, ""}:
@@ -713,6 +728,7 @@ def default_config(
             "per_device_train_batch_size": 1,
             "gradient_accumulation_steps": 2,
             "num_generations": 2,
+            "calibration_generations": 4,
             "generation_batch_size": 2,
             "learning_rate": 0.00001,
             "max_steps": 100,

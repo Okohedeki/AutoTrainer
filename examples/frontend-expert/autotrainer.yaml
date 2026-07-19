@@ -52,6 +52,7 @@ grpo:
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 2
   num_generations: 2
+  calibration_generations: 4
   generation_batch_size: 2
   max_completion_length: 2048
   max_tool_calling_iterations: 8
