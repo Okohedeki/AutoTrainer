@@ -516,7 +516,7 @@ class TrainingServiceTests(unittest.TestCase):
             release.set()
         self.assertEqual(manager.snapshot()["status"], "completed")
 
-    def test_agent_cli_auto_uses_the_same_training_pipeline(self) -> None:
+    def test_agent_cli_auto_uses_the_same_durable_training_manager(self) -> None:
         completed = {"status": "completed", "recipe": "teach", "stages": []}
         output = StringIO()
         with (
@@ -527,7 +527,11 @@ class TrainingServiceTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn('"recipe": "teach"', output.getvalue())
-        run.assert_called_once_with(self.config_path)
+        self.assertIn('"status": "completed"', output.getvalue())
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args, (self.config_path,))
+        self.assertTrue(callable(run.call_args.kwargs["on_progress"]))
+        self.assertTrue(callable(run.call_args.kwargs["on_event"]))
 
     def test_direct_cli_sft_owns_the_project_and_gpu(self) -> None:
         loaded = load_config(self.config_path)

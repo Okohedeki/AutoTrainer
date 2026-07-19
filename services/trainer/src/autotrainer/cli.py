@@ -851,10 +851,21 @@ def _run_runtime(arguments: argparse.Namespace) -> int:
 
 def _run_train(arguments: argparse.Namespace) -> int:
     if arguments.train_command == "auto":
-        from .training_service import run_project_training
+        from .training_service import TrainingJobManager
 
-        _emit(run_project_training(arguments.config), as_json=arguments.json)
-        return 0
+        # The agent surface owns the same durable job record, event stream,
+        # project lease, and GPU lease as the GUI. Closing waits for the
+        # non-daemon worker instead of replacing it with a second orchestration
+        # path that could report different lifecycle evidence.
+        manager = TrainingJobManager(arguments.config)
+        try:
+            manager.start()
+            manager.close()
+            result = manager.snapshot()
+        finally:
+            manager.close()
+        _emit(result, as_json=arguments.json)
+        return 0 if result.get("status") == "completed" else 3
 
     from .device_gate import device_run_gate
     from .project_gate import project_run_gate
