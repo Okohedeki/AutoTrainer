@@ -749,6 +749,41 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_runtime_setup_endpoints_delegate_to_background_manager(self) -> None:
+        workspace = {
+            "status": "action_needed",
+            "actions": [{"id": "install_training_packages"}],
+            "job": {"status": "idle"},
+        }
+        with patch.object(
+            self.server.runtime_setup,
+            "workspace",
+            return_value=workspace,
+        ) as inspected:
+            status, result = self.request("GET", "/api/v1/runtime/setup")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        inspected.assert_called_once_with()
+
+        job = {
+            "id": "a" * 32,
+            "action_id": "install_training_packages",
+            "status": "queued",
+        }
+        with patch.object(
+            self.server.runtime_setup,
+            "start",
+            return_value=job,
+        ) as start:
+            status, result = self.request(
+                "POST",
+                "/api/v1/runtime/setup",
+                {"action_id": "install_training_packages"},
+            )
+        self.assertEqual(status, 202)
+        self.assertEqual(result, job)
+        start.assert_called_once_with("install_training_packages")
+
     def test_history_endpoints_share_the_review_service_contract(self) -> None:
         workspace = {
             "summary": {"reviewable_count": 1, "approved_count": 0},

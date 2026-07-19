@@ -469,6 +469,49 @@ class CliTests(unittest.TestCase):
             example_id="repair-form-response",
         )
 
+    def test_runtime_status_delegates_to_guided_setup_service(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"status": "action_needed", "actions": []}
+        with patch(
+            "autotrainer.runtime_setup_service.inspect_runtime_setup",
+            return_value=expected,
+        ) as inspect:
+            status, payload = self._json_command(
+                [
+                    "runtime",
+                    "status",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 3)
+        self.assertEqual(payload, expected)
+        inspect.assert_called_once_with(config_path)
+
+    def test_runtime_apply_delegates_to_fixed_setup_action(self) -> None:
+        config_path = Path("project/autotrainer.yaml")
+        expected = {"status": "completed", "action_id": "build_runtime_image"}
+        with patch(
+            "autotrainer.runtime_setup_service.apply_runtime_setup_action",
+            return_value=expected,
+        ) as apply:
+            status, payload = self._json_command(
+                [
+                    "runtime",
+                    "apply",
+                    "build_runtime_image",
+                    "--config",
+                    str(config_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(payload, expected)
+        apply.assert_called_once_with(config_path, "build_runtime_image")
+
     def test_host_commands_delegate_without_blocking_on_model_load(self) -> None:
         config_path = Path("project/autotrainer.yaml")
         with patch("autotrainer.hosting_service.HostingManager") as manager_type:

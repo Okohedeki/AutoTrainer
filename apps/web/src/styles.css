@@ -1121,6 +1121,7 @@ textarea { font: inherit; }
 .project-context:hover { border-color: #3a4650; background: #1b2229; }
 .new-project-button { min-height: 32px; padding-inline: 11px; font-size: 10px; }
 .data-workspace,
+.train-workspace,
 .training-workspace,
 .serve-workspace { display: grid; gap: 14px; }
 .data-workspace .history-review { margin-top: 0; }
@@ -1369,6 +1370,36 @@ textarea { font: inherit; }
 .grpo-next-action { margin-bottom: 12px; }
 
 /* Training */
+.runtime-setup-panel { padding: 20px; }
+.runtime-setup-panel > .panel-header > div > p:last-child { max-width: 760px; margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.runtime-component-list { margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); list-style: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.runtime-component-list li { min-width: 0; padding: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border-left: 1px solid var(--line); }
+.runtime-component-list li:first-child { border-left: 0; }
+.runtime-component-list li > div { min-width: 0; display: grid; gap: 4px; }
+.runtime-component-list strong { font-size: 9px; }
+.runtime-component-list small { overflow-wrap: anywhere; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.runtime-component-list .status-chip { grid-column: 2; justify-self: start; min-height: 20px; padding: 3px 6px; font-size: 8px; }
+.runtime-component-mark { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: #fff; font: 750 7px/1 "SFMono-Regular", Consolas, monospace; }
+.runtime-component-mark.ready { background: var(--good); }
+.runtime-component-mark.blocked { background: var(--warning); }
+.runtime-setup-job { margin-top: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.runtime-setup-job.completed { border-color: #c3dfd1; background: var(--good-soft); }
+.runtime-setup-job.failed { border-color: #e6c4c0; background: var(--danger-soft); }
+.runtime-setup-job strong { font-size: 10px; }
+.runtime-setup-job p { margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.runtime-setup-job small { display: block; margin-top: 6px; color: var(--warning); font-size: 8px; }
+.runtime-actions { margin-top: 12px; display: grid; gap: 8px; }
+.runtime-actions article { padding: 11px 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid var(--line); border-radius: 8px; }
+.runtime-actions article > div { min-width: 0; display: grid; gap: 3px; }
+.runtime-actions strong { font-size: 10px; }
+.runtime-actions p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.runtime-actions code { overflow: hidden; color: #78828d; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-actions small { color: var(--warning); font-size: 8px; }
+.runtime-actions button { flex: 0 0 auto; min-width: 82px; }
+.runtime-ready { padding: 14px; display: flex; align-items: center; gap: 10px; border: 1px solid #c3dfd1; border-radius: 8px; background: var(--good-soft); }
+.runtime-ready > span { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--good); font-size: 8px; font-weight: 800; }
+.runtime-ready strong { font-size: 10px; }
+.runtime-ready p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
 .training-page-error,
 .serve-error { margin: 0; }
 .training-command-panel,
@@ -1512,6 +1543,10 @@ textarea { font: inherit; }
   .evaluation-observation-grid,
   .serve-grid { grid-template-columns: 1fr; }
   .decision-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-component-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-component-list li { border-top: 1px solid var(--line); }
+  .runtime-component-list li:nth-child(-n+2) { border-top: 0; }
+  .runtime-component-list li:nth-child(odd) { border-left: 0; }
   .decision-stat-grid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
   .decision-stat-grid > div:nth-child(4) { border-top: 1px solid var(--line); }
   .project-create-panel,
@@ -1545,7 +1580,13 @@ textarea { font: inherit; }
   .decision-stat-grid,
   .arm-result-grid,
   .readiness-result,
-  .training-data-options { grid-template-columns: 1fr; }
+  .training-data-options,
+  .runtime-component-list { grid-template-columns: 1fr; }
+  .runtime-component-list li,
+  .runtime-component-list li:nth-child(-n+2) { border-top: 1px solid var(--line); border-left: 0; }
+  .runtime-component-list li:first-child { border-top: 0; }
+  .runtime-actions article { align-items: stretch; flex-direction: column; }
+  .runtime-actions button { width: 100%; }
   .decision-stat-grid > div { border-left: 0; border-top: 1px solid var(--line); }
   .decision-stat-grid > div:first-child { border-top: 0; }
   .project-create-form > div,

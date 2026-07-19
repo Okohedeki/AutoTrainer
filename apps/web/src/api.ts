@@ -241,6 +241,47 @@ export type PreparationResult = {
   details: Record<string, unknown>;
 };
 
+export type RuntimeSetupAction = {
+  id: "install_training_packages" | "install_wsl_ubuntu" | "install_docker_desktop" | "build_runtime_image";
+  title: string;
+  detail: string;
+  status: "available" | "blocked";
+  command: string[];
+  requires_admin: boolean;
+  restart_required: boolean;
+};
+
+export type RuntimeSetupJob = {
+  id: string | null;
+  action_id: RuntimeSetupAction["id"] | null;
+  status: "idle" | "queued" | "running" | "completed" | "failed";
+  message: string;
+  result?: {
+    restart_required?: boolean;
+  } | null;
+};
+
+export type RuntimeSetupWorkspace = {
+  status: "ready" | "action_needed";
+  doctor: {
+    python: { status: string; version: string; expected: string };
+    gpu: { status: string; detail?: string; device_name?: string };
+    sandbox: { status: string; detail?: string };
+    environment_image: { status: string; detail?: string };
+    packages: Array<{ name: string; status: string; installed?: string; expected: string; detail?: string }>;
+    sft_ready: boolean;
+    rl_ready: boolean;
+  };
+  host: {
+    platform: string;
+    python_executable: string;
+    windows: { applicable: boolean; ubuntu_installed: boolean; distributions?: string[] };
+  };
+  actions: RuntimeSetupAction[];
+  next_action: RuntimeSetupAction | null;
+  job: RuntimeSetupJob;
+};
+
 export type HistoryFile = {
   path: string;
   status: string;
@@ -732,6 +773,17 @@ export async function removeAuthoredExample(id: string): Promise<AuthoredExample
 
 export async function prepareProject(): Promise<PreparationResult> {
   return request("/api/v1/prepare", { method: "POST", body: "{}" });
+}
+
+export async function getRuntimeSetup(signal?: AbortSignal): Promise<RuntimeSetupWorkspace> {
+  return request("/api/v1/runtime/setup", { signal });
+}
+
+export async function applyRuntimeSetup(actionId: RuntimeSetupAction["id"]): Promise<RuntimeSetupJob> {
+  return request("/api/v1/runtime/setup", {
+    method: "POST",
+    body: JSON.stringify({ action_id: actionId }),
+  });
 }
 
 export async function getReviewHistory(signal?: AbortSignal): Promise<HistoryWorkspace> {

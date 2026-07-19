@@ -295,6 +295,31 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="check GPU, sandbox, Python, and pinned ML packages")
     _config_argument(doctor)
 
+    runtime = subparsers.add_parser(
+        "runtime",
+        help="inspect or apply guided local machine setup",
+    )
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_status = runtime_sub.add_parser(
+        "status",
+        help="show Doctor evidence and available fixed setup actions",
+    )
+    _config_argument(runtime_status)
+    runtime_apply = runtime_sub.add_parser(
+        "apply",
+        help="apply one fixed setup action",
+    )
+    runtime_apply.add_argument(
+        "action_id",
+        choices=[
+            "install_training_packages",
+            "install_wsl_ubuntu",
+            "install_docker_desktop",
+            "build_runtime_image",
+        ],
+    )
+    _config_argument(runtime_apply)
+
     train = subparsers.add_parser("train", help="run a declared training stage")
     train_sub = train.add_subparsers(dest="train_command", required=True)
     train_auto = train_sub.add_parser(
@@ -773,6 +798,23 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
     return 0 if ready else 3
 
 
+def _run_runtime(arguments: argparse.Namespace) -> int:
+    from .runtime_setup_service import (
+        apply_runtime_setup_action,
+        inspect_runtime_setup,
+    )
+
+    result = (
+        apply_runtime_setup_action(arguments.config, arguments.action_id)
+        if arguments.runtime_command == "apply"
+        else inspect_runtime_setup(arguments.config)
+    )
+    _emit(result, as_json=arguments.json)
+    if arguments.runtime_command == "apply":
+        return 0
+    return 0 if result["status"] == "ready" else 3
+
+
 def _run_train(arguments: argparse.Namespace) -> int:
     if arguments.train_command == "auto":
         from .training_service import run_project_training
@@ -972,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_plan(arguments)
         if arguments.command == "doctor":
             return _run_doctor(arguments)
+        if arguments.command == "runtime":
+            return _run_runtime(arguments)
         if arguments.command == "train":
             return _run_train(arguments)
         if arguments.command in {"evaluate", "benchmark"}:

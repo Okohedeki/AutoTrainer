@@ -11,6 +11,7 @@ import GrpoEvidencePanel from "./GrpoEvidencePanel";
 import HistoryReviewPanel from "./HistoryReviewPanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import ProjectsPanel from "./ProjectsPanel";
+import RuntimeSetupPanel from "./RuntimeSetupPanel";
 import ServePanel from "./ServePanel";
 import SourceSetupPanel from "./SourceSetupPanel";
 import TrainingMonitorPanel from "./TrainingMonitorPanel";
@@ -204,7 +205,10 @@ export default function App() {
                 <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} disabled={trainingActive} />
               </div>
             ) : activeView === "train" ? (
-              <TrainingMonitorPanel key={`train-${projects?.active_id}-${projectScopeRevision}`} revision={projectRevision} onOpenData={() => openView("data", true)} onTrainingActiveChange={setTrainingActive} />
+              <div className="train-workspace" key={`train-${projects?.active_id}-${projectScopeRevision}`}>
+                <RuntimeSetupPanel disabled={trainingActive} />
+                <TrainingMonitorPanel revision={projectRevision} onOpenData={() => openView("data", true)} onTrainingActiveChange={setTrainingActive} />
+              </div>
             ) : activeView === "evaluate" ? (
               <EvaluationMonitorPanel key={`evaluate-${projects?.active_id}-${projectScopeRevision}`} onOpenData={() => openView("data", true)} />
             ) : (

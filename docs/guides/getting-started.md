@@ -30,14 +30,27 @@ python -m pip install --upgrade pip
 python -m pip install -e ./services/trainer
 ```
 
-Install the CUDA build of PyTorch selected for your driver, then install the pinned training extra:
+The lightweight install is enough to start the console. Open **Train -> Training
+runtime** to inspect this machine and apply the supported setup actions for the
+exact ML package matrix, WSL2/Ubuntu, Docker Desktop, and the pinned rollout
+image. Actions that change Windows request Administrator approval and report
+when Windows or the backend must restart.
+
+Agents can inspect and apply the same fixed actions:
 
 ```bash
-python -m pip install -e './services/trainer[training]'
-docker build -t autotrainer/frontend-runtime:0.1 -f infra/frontend-runtime/Dockerfile .
+autotrainer runtime status --config autotrainer.yaml
+autotrainer runtime apply install_training_packages --config autotrainer.yaml
+autotrainer runtime apply install_wsl_ubuntu --config autotrainer.yaml
+autotrainer runtime apply install_docker_desktop --config autotrainer.yaml
+autotrainer runtime apply build_runtime_image --config autotrainer.yaml
 ```
 
-The reference package matrix is recorded in the project dependency declarations and checked by `autotrainer doctor`. Upgrade it as a tested set; Transformers, TRL, PEFT, bitsandbytes, and PyTorch interfaces change together.
+These commands accept only the listed action IDs; project or browser input
+never becomes a shell command or package specification. The reference package
+matrix is recorded in the project dependency declarations and checked by
+`autotrainer doctor`. Upgrade it as a tested set; Transformers, TRL, PEFT,
+bitsandbytes, and PyTorch interfaces change together.
 
 ## Run the console
 
@@ -205,12 +218,17 @@ Do not confuse it with `autotrainer serve`, which runs the dashboard control API
 
 ## Windows and WSL2
 
-From an elevated PowerShell prompt:
+The Train screen can run the WSL2/Ubuntu and Docker Desktop installers. The
+equivalent agent commands are:
 
 ```powershell
-wsl --install -d Ubuntu
-wsl --update
+autotrainer runtime apply install_wsl_ubuntu --config autotrainer.yaml
+autotrainer runtime apply install_docker_desktop --config autotrainer.yaml
 ```
+
+Run the AutoTrainer backend as Administrator when applying either action. A
+Windows restart may be required; finish Ubuntu's first-run user setup before
+starting the backend inside WSL2.
 
 Install the current NVIDIA Windows driver with WSL support. Do not install a second Windows GPU driver inside the Linux distribution. In Ubuntu, verify `nvidia-smi` and `torch.cuda.is_available()`.
 

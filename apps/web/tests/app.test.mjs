@@ -173,6 +173,8 @@ test("Data and Train share one truthful three-level GRPO evidence surface", asyn
 
 test("Train owns one-click start, observed SFT loss, and the shared GRPO evidence surface", async () => {
   const panel = await source("src/TrainingMonitorPanel.tsx");
+  const runtime = await source("src/RuntimeSetupPanel.tsx");
+  const app = await source("src/App.tsx");
   const evidence = await source("src/GrpoEvidencePanel.tsx");
   const api = await source("src/api.ts");
   assert.match(panel, />Start training</);
@@ -192,6 +194,15 @@ test("Train owns one-click start, observed SFT loss, and the shared GRPO evidenc
   assert.match(panel, /const sftLoss = useMemo/);
   assert.match(panel, /teachingLoss={sftLoss}/);
   assert.match(evidence, /Teaching loss/);
+  assert.match(app, /<RuntimeSetupPanel disabled={trainingActive}/);
+  assert.match(api, /request\("\/api\/v1\/runtime\/setup", \{ signal \}\)/);
+  assert.match(api, /export async function applyRuntimeSetup/);
+  for (const component of ["Python 3.11", "Pinned ML packages", "One CUDA GPU", "Container backend", "Pinned rollout image"]) assert.match(runtime, new RegExp(component));
+  assert.match(runtime, /workspace\.actions\.map/);
+  assert.match(runtime, /action\.command\.join/);
+  assert.match(runtime, /applyRuntimeSetup\(action\.id\)/);
+  assert.match(runtime, /Administrator approval is required/);
+  assert.doesNotMatch(runtime, /exec\(|spawn\(|shell/i);
   assert.doesNotMatch(panel, /Practice reward and rubric|events\.slice\(-24\)|Durable event rail/);
   assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b/i);
 });

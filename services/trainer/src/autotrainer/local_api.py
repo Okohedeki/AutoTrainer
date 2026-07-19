@@ -50,6 +50,7 @@ from .project_gate import (
     acquire_project_lease,
     assert_project_available,
 )
+from .runtime_setup_service import RuntimeSetupManager
 from .source_service import add_source, list_sources, remove_source
 from .task_authoring_service import (
     create_authored_task,
@@ -189,6 +190,7 @@ class LocalApiServer(ThreadingHTTPServer):
         self.training = TrainingJobManager(config_path)
         self.evaluation = EvaluationJobManager(config_path)
         self.hosting = HostingManager(config_path)
+        self.runtime_setup = RuntimeSetupManager(config_path)
 
     @property
     def config_path(self) -> Path:
@@ -207,6 +209,7 @@ class LocalApiServer(ThreadingHTTPServer):
             or self.training.snapshot().get("status") in {"queued", "running"}
             or self.evaluation.snapshot().get("status") in {"queued", "running"}
             or self.hosting.snapshot().get("status") in {"loading", "live"}
+            or self.runtime_setup.snapshot().get("status") in {"queued", "running"}
         ):
             raise ProjectBusyError(
                 "Stop the active project job or model host before switching projects."
@@ -225,6 +228,8 @@ class LocalApiServer(ThreadingHTTPServer):
             constructed.append(evaluation)
             hosting = HostingManager(target)
             constructed.append(hosting)
+            runtime_setup = RuntimeSetupManager(target)
+            constructed.append(runtime_setup)
             selected = self.workspace.select_project(project_id)
         except Exception:
             # A constructor can fail after earlier managers opened resources.
@@ -233,21 +238,35 @@ class LocalApiServer(ThreadingHTTPServer):
                 with suppress(Exception):
                     manager.close()  # type: ignore[attr-defined]
             raise
-        old_download, old_training, old_evaluation, old_hosting = (
+        old_download, old_training, old_evaluation, old_hosting, old_runtime_setup = (
             self.model_download,
             self.training,
             self.evaluation,
             self.hosting,
+            self.runtime_setup,
         )
-        self.model_download, self.training, self.evaluation, self.hosting = (
+        (
+            self.model_download,
+            self.training,
+            self.evaluation,
+            self.hosting,
+            self.runtime_setup,
+        ) = (
             model_download,
             training,
             evaluation,
             hosting,
+            runtime_setup,
         )
         # The new context is already published. Cleanup failures in an idle
         # old manager must not turn a successful switch into a failed POST.
-        for manager in (old_hosting, old_evaluation, old_training, old_download):
+        for manager in (
+            old_runtime_setup,
+            old_hosting,
+            old_evaluation,
+            old_training,
+            old_download,
+        ):
             with suppress(Exception):
                 manager.close()
         return selected
@@ -302,6 +321,7 @@ class LocalApiServer(ThreadingHTTPServer):
             # At most one long project job can own the shared lease.  Joining
             # both managers keeps shutdown honest whichever lifecycle owns it.
             self.hosting.close()
+            self.runtime_setup.close()
             self.evaluation.close()
             self.training.close()
             self.model_download.close()
@@ -567,6 +587,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         list_authored_examples(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/runtime/setup":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        self.server.runtime_setup.workspace(),
                     )
                 elif path == f"{API_PREFIX}/curriculum":
                     _query_values(query, allowed=set())
@@ -859,6 +885,18 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         prepare_project(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/runtime/setup":
+                    _require_keys(
+                        payload,
+                        allowed={"action_id"},
+                        required={"action_id"},
+                    )
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        self.server.runtime_setup.start(
+                            _required_text(payload, "action_id")
+                        ),
                     )
                 elif path == f"{API_PREFIX}/training/start":
                     _require_keys(payload, allowed=set())
