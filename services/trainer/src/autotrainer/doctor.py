@@ -20,6 +20,7 @@ REFERENCE_PACKAGES = {
     "peft": "0.19.1",
     "accelerate": "1.14.0",
     "datasets": "5.0.0",
+    "regex": "2025.10.22",
     "jmespath": "1.1.0",
     "bitsandbytes": "0.49.2",
 }
@@ -47,6 +48,7 @@ REFERENCE_IMPORTS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     ),
     "accelerate": (("accelerate", ()),),
     "datasets": (("datasets", ("load_dataset",)),),
+    "regex": (("regex", ()),),
     "jmespath": (("jmespath", ()),),
     "bitsandbytes": (("bitsandbytes", ()),),
 }

@@ -67,6 +67,7 @@ class RuntimeSetupServiceTests(unittest.TestCase):
             },
         )
         self.assertIn("torch==2.13.0", actions["install_training_packages"]["command"])
+        self.assertIn("regex==2025.10.22", actions["install_training_packages"]["command"])
         self.assertTrue(actions["install_wsl_ubuntu"]["requires_admin"])
         self.assertEqual(actions["build_runtime_image"]["status"], "blocked")
 
