@@ -148,6 +148,19 @@ def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[
     }
 
 
+def valid_verifier_report() -> dict[str, Any]:
+    """Return the complete native-typed hidden-verifier contract fixture."""
+
+    return {
+        "build_passed": True,
+        "regression_pass_rate": 1.0,
+        "task_pass_rate": 1.0,
+        "responsive_pass_rate": 0.75,
+        "design_rule_pass_rate": 0.8,
+        "code_quality_pass_rate": 0.9,
+    }
+
+
 class ScriptedFrontendEnvironment(FrontendEnvironment):
     def __init__(
         self,
@@ -156,6 +169,7 @@ class ScriptedFrontendEnvironment(FrontendEnvironment):
         *,
         failures: dict[str, int] | None = None,
         timeouts: set[str] | None = None,
+        verifier_payload: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._manifest = manifest
@@ -168,6 +182,11 @@ class ScriptedFrontendEnvironment(FrontendEnvironment):
         self._deadline = self._started_at + manifest.episode_timeout_seconds
         self.failures = failures or {}
         self.timeouts = timeouts or set()
+        self.verifier_payload = dict(
+            valid_verifier_report()
+            if verifier_payload is None
+            else verifier_payload
+        )
         self.commands: list[tuple[str, bool]] = []
         self.diff = "diff --git a/site.css b/site.css\n--- a/site.css\n+++ b/site.css\n"
 
@@ -183,15 +202,7 @@ class ScriptedFrontendEnvironment(FrontendEnvironment):
         returncode = self.failures.get(command, 0)
         if include_verifier and returncode == 0:
             (self._require_workspace() / "verifier-report.json").write_text(
-                json.dumps(
-                    {
-                        "regression_pass_rate": 1.0,
-                        "task_pass_rate": 1.0,
-                        "responsive_pass_rate": 0.75,
-                        "design_rule_pass_rate": 0.8,
-                        "code_quality_pass_rate": 0.9,
-                    }
-                ),
+                json.dumps(self.verifier_payload),
                 encoding="utf-8",
             )
         return subprocess.CompletedProcess(
@@ -627,20 +638,13 @@ class EpisodeFinalizationTests(unittest.TestCase):
         browser_tests: str = "npm run test:browser",
         failures: dict[str, int] | None = None,
         timeouts: set[str] | None = None,
+        verifier_payload: Mapping[str, Any] | None = None,
     ) -> ScriptedFrontendEnvironment:
         episode_root = Path(temporary_directory) / "episode"
         workspace = episode_root / "workspace"
         workspace.mkdir(parents=True)
         (workspace / "verifier-report.json").write_text(
-            json.dumps(
-                {
-                    "regression_pass_rate": 1.0,
-                    "task_pass_rate": 1.0,
-                    "responsive_pass_rate": 0.75,
-                    "design_rule_pass_rate": 0.8,
-                    "code_quality_pass_rate": 0.9,
-                }
-            ),
+            json.dumps(valid_verifier_report()),
             encoding="utf-8",
         )
         manifest = TaskManifest.from_mapping(
@@ -651,6 +655,7 @@ class EpisodeFinalizationTests(unittest.TestCase):
             workspace,
             failures=failures,
             timeouts=timeouts,
+            verifier_payload=verifier_payload,
         )
 
     def test_finalize_captures_complete_evaluation_before_cleanup(self) -> None:
@@ -673,6 +678,103 @@ class EpisodeFinalizationTests(unittest.TestCase):
             self.assertIsNone(environment._workspace)
             self.assertIs(environment.last_result, result)
             self.assertEqual(environment._finalize(), result)
+
+    def test_hidden_verifier_false_build_gate_is_respected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            payload = valid_verifier_report()
+            payload["build_passed"] = False
+            environment = self.prepare_environment(
+                temporary_directory,
+                verifier_payload=payload,
+            )
+
+            result = environment._finalize()
+
+            self.assertTrue(result.gated)
+            self.assertEqual(result.hard_gate_reason, "build_failed")
+            self.assertEqual(result.reward, 0.0)
+            self.assertEqual(result.raw_verifier_rates["task_tests"], 1.0)
+
+    def test_hidden_verifier_requires_a_native_boolean_build_gate(self) -> None:
+        for index, value in enumerate((1, 0, "true", None)):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                payload = valid_verifier_report()
+                payload["build_passed"] = value
+                environment = self.prepare_environment(
+                    temporary_directory,
+                    verifier_payload=payload,
+                )
+
+                result = environment._finalize()
+
+                self.assertEqual(result.hard_gate_reason, "invalid_verifier_report")
+                self.assertEqual(result.raw_verifier_rates, {}, msg=f"case {index}")
+                self.assertEqual(result.reward, 0.0)
+
+    def test_hidden_verifier_requires_every_contract_field(self) -> None:
+        required_fields = tuple(valid_verifier_report())
+        for field in required_fields:
+            with (
+                self.subTest(field=field),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                payload = valid_verifier_report()
+                del payload[field]
+                environment = self.prepare_environment(
+                    temporary_directory,
+                    verifier_payload=payload,
+                )
+
+                result = environment._finalize()
+
+                self.assertEqual(result.hard_gate_reason, "invalid_verifier_report")
+                self.assertEqual(result.raw_verifier_rates, {})
+                self.assertEqual(result.reward, 0.0)
+
+    def test_hidden_verifier_rejects_non_numeric_rate_types(self) -> None:
+        rate_fields = tuple(valid_verifier_report())[1:]
+        for field in rate_fields:
+            for value in (True, "1.0", None):
+                with (
+                    self.subTest(field=field, value=value),
+                    tempfile.TemporaryDirectory() as temporary_directory,
+                ):
+                    payload = valid_verifier_report()
+                    payload[field] = value
+                    environment = self.prepare_environment(
+                        temporary_directory,
+                        verifier_payload=payload,
+                    )
+
+                    result = environment._finalize()
+
+                    self.assertEqual(
+                        result.hard_gate_reason,
+                        "invalid_verifier_report",
+                    )
+                    self.assertEqual(result.raw_verifier_rates, {})
+
+    def test_hidden_verifier_rejects_nonfinite_and_out_of_range_rates(self) -> None:
+        for value in (-0.01, 1.01, float("nan"), float("inf")):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                payload = valid_verifier_report()
+                payload["task_pass_rate"] = value
+                environment = self.prepare_environment(
+                    temporary_directory,
+                    verifier_payload=payload,
+                )
+
+                result = environment._finalize()
+
+                self.assertEqual(result.hard_gate_reason, "invalid_verifier_report")
+                self.assertEqual(result.raw_verifier_rates, {})
+                self.assertEqual(result.reward, 0.0)
 
     def test_grpo_observer_receives_only_the_scored_rubric_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -817,15 +919,7 @@ class EvaluatePatchTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
             (workspace / "verifier-report.json").write_text(
-                json.dumps(
-                    {
-                        "regression_pass_rate": 1.0,
-                        "task_pass_rate": 1.0,
-                        "responsive_pass_rate": 1.0,
-                        "design_rule_pass_rate": 1.0,
-                        "code_quality_pass_rate": 1.0,
-                    }
-                ),
+                json.dumps(valid_verifier_report()),
                 encoding="utf-8",
             )
             manifest = TaskManifest.from_mapping(executable_manifest())

@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import unicodedata
+from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -391,15 +392,34 @@ class FrontendEnvironment:
             try:
                 report_path = self._safe_path(manifest.verifier_report_path or "")
                 payload = json.loads(report_path.read_text(encoding="utf-8"))
-                raw_rates = {
-                    "regression_safety": float(payload["regression_pass_rate"]),
-                    "task_tests": float(payload["task_pass_rate"]),
-                    "responsive_rules": float(payload["responsive_pass_rate"]),
-                    "design_rules": float(payload["design_rule_pass_rate"]),
-                    "patch_quality": float(payload["code_quality_pass_rate"]),
+                build_passed = payload["build_passed"]
+                if type(build_passed) is not bool:
+                    # JSON booleans are the only accepted gate values. Python's
+                    # bool-is-int relationship must not let 0/1 forge a gate.
+                    raise TypeError("build_passed must be a JSON boolean")
+
+                rate_fields = {
+                    "regression_safety": "regression_pass_rate",
+                    "task_tests": "task_pass_rate",
+                    "responsive_rules": "responsive_pass_rate",
+                    "design_rules": "design_rule_pass_rate",
+                    "patch_quality": "code_quality_pass_rate",
                 }
+                raw_rates: dict[str, float] = {}
+                for signal, field in rate_fields.items():
+                    value = payload[field]
+                    # Do not coerce strings or booleans at this trust boundary.
+                    # The verifier must emit native, finite JSON numbers in the
+                    # documented probability range.
+                    if type(value) not in (int, float):
+                        raise TypeError(f"{field} must be a JSON number")
+                    if (type(value) is float and not isfinite(value)) or not (
+                        0 <= value <= 1
+                    ):
+                        raise ValueError(f"{field} must be finite and between 0 and 1")
+                    raw_rates[signal] = float(value)
                 report = RolloutVerifierReport(
-                    build_passed=True,
+                    build_passed=build_passed,
                     regression_pass_rate=raw_rates["regression_safety"],
                     task_pass_rate=raw_rates["task_tests"],
                     responsive_pass_rate=raw_rates["responsive_rules"],
