@@ -234,6 +234,15 @@ class V1FlowIntegrationTests(unittest.TestCase):
                         return_value=READY_DOCTOR,
                     ) as doctor,
                     patch(
+                        "autotrainer.project_service.run_grpo_environment_canary",
+                        return_value={
+                            "status": "ready",
+                            "task_id": "repair-homepage",
+                            "baseline_reward": 0.2,
+                            "task_pass_rate": 0.0,
+                        },
+                    ) as environment_canary,
+                    patch(
                         "autotrainer.training_service.run_sft",
                         side_effect=fake_sft,
                     ),
@@ -297,6 +306,10 @@ class V1FlowIntegrationTests(unittest.TestCase):
 
                 self.assertGreaterEqual(model_guard.call_count, 2)
                 self.assertEqual(doctor.call_count, 2)
+                self.assertEqual(
+                    environment_canary.call_count,
+                    2 if recipe in {"practice", "both"} else 0,
+                )
                 self.assertEqual(trained["status"], "completed")
                 self.assertEqual(trained["recipe"], recipe)
                 self.assertEqual([stage for stage, _config in events], expected_stages[recipe])

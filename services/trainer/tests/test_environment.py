@@ -49,6 +49,32 @@ class PolicyToolSurfaceTests(unittest.TestCase):
             },
         )
 
+    def test_policy_tools_describe_every_argument_for_trl_schema_generation(self) -> None:
+        environment = FrontendEnvironment()
+        for name in ("list_files", "read_file", "search_code", "apply_patch", "run_check"):
+            with self.subTest(tool=name):
+                tool = getattr(environment, name)
+                documentation = inspect.getdoc(tool) or ""
+                self.assertIn("Args:", documentation)
+                for parameter in inspect.signature(tool).parameters.values():
+                    self.assertIn(f"{parameter.name}:", documentation)
+
+    def test_transformers_can_generate_policy_tool_schemas_without_trl(self) -> None:
+        # Transformers owns tool-schema generation. TRL does not need to be
+        # installed for this compatibility boundary to be exercised locally.
+        try:
+            from transformers.utils import get_json_schema
+        except ImportError:
+            self.skipTest("transformers is available in the pinned training extra")
+
+        environment = FrontendEnvironment()
+        for name in ("list_files", "read_file", "search_code", "apply_patch", "run_check"):
+            with self.subTest(tool=name):
+                schema = get_json_schema(getattr(environment, name))
+                properties = schema["function"]["parameters"]["properties"]
+                expected = set(inspect.signature(getattr(environment, name)).parameters)
+                self.assertEqual(set(properties), expected)
+
 
 def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[str, Any]:
     return {

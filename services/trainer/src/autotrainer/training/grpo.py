@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
 from .telemetry import TrainingEventCallback, make_trainer_log_callback
+from .preflight import run_grpo_environment_canary
 from .common import (
     SUPPORTED_MODEL_CLASS,
     TrainingConfigurationError,
@@ -178,6 +179,8 @@ def resolve_grpo_recipe(
             "factory_arguments": 0,
             "reset_receives_dataset_row": True,
             "reward_method": "get_reward",
+            # V1 readiness requires auditable gate evidence, not just a scalar.
+            "result_attribute": "last_result",
         },
     }
     recipe["grpo"] = {
@@ -251,6 +254,11 @@ def run_grpo(
 
     require_materialized_model(recipe["model"])
     installed_versions = validate_reference_dependencies()
+
+    # Exercise the actual repository snapshot, container gates, and hidden
+    # verifier before allocating several gigabytes of model memory. Direct CLI
+    # callers receive the same fail-closed contract as project Prepare.
+    environment_canary = run_grpo_environment_canary(recipe)
 
     # Heavy imports stay behind static validation and dry-run handling.
     try:
@@ -448,6 +456,7 @@ def run_grpo(
         "recipe": recipe,
         "dependencies": installed_versions,
         "runtime": runtime,
+        "environment_canary": environment_canary,
         "trainable_adapter_parameters": trainable_parameters,
         "metrics": metrics,
     }

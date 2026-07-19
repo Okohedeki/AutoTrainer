@@ -23,7 +23,11 @@ from .model_cache import ModelCacheError, require_materialized_model
 from .planner import build_plan
 from .project_gate import project_prepare_gate
 from .sources import scan_sources
-from .training import resolve_grpo_recipe, resolve_sft_recipe
+from .training import (
+    resolve_grpo_recipe,
+    resolve_sft_recipe,
+    run_grpo_environment_canary,
+)
 from .training.common import TrainingConfigurationError, import_factory
 from .training.selection import select_stage_config
 
@@ -389,7 +393,30 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
         except Exception as error:
             doctor = {"sft_ready": False, "rl_ready": False, "errors": [str(error)]}
 
+    # Doctor proves the host can see the container runtime and image; it cannot
+    # prove a task's install/build/verifier contract actually executes. Run one
+    # deterministic no-edit episode only after the cheaper runtime gates pass.
+    environment_canary: dict[str, Any] = {
+        "status": "not_required" if recipe == "teach" else "skipped",
+        "errors": [],
+    }
+    if (
+        recipe in {"practice", "both"}
+        and preflight.get("status") == "ready"
+        and _doctor_ready(doctor, recipe)
+    ):
+        try:
+            environment_canary = run_grpo_environment_canary(
+                preflight["recipes"]["grpo"]
+            )
+            environment_canary["errors"] = []
+        except Exception as error:
+            environment_canary = {"status": "blocked", "errors": [str(error)]}
+
     preflight_errors = [str(value) for value in preflight.get("errors", [])]
+    canary_errors = [
+        str(value) for value in environment_canary.get("errors", [])
+    ]
     steps: list[dict[str, str]] = []
     next_action: dict[str, str] | None = None
     if blocking_validation:
@@ -437,6 +464,12 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
             "title": "Prepare the local runtime",
             "detail": _doctor_blocker(doctor, recipe),
         }
+    elif canary_errors:
+        steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "complete"), _step("runtime", "blocked")]
+        next_action = {
+            "title": "Fix the executable RL task",
+            "detail": canary_errors[0],
+        }
     else:
         steps = [_step("validate", "complete"), _step("sources", "complete"), _step("compile", "complete"), _step("runtime", "complete")]
 
@@ -459,6 +492,7 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
             "plan": plan,
             "preflight": preflight,
             "doctor": doctor,
+            "environment_canary": environment_canary,
         },
     }
 

@@ -53,6 +53,12 @@ def plan_result() -> dict:
 
 
 READY_DOCTOR = {"sft_ready": True, "rl_ready": True}
+READY_CANARY = {
+    "status": "ready",
+    "task_id": "pricing-001",
+    "baseline_reward": 0.2,
+    "task_pass_rate": 0.0,
+}
 
 
 class ProjectServiceTests(unittest.TestCase):
@@ -75,6 +81,7 @@ class ProjectServiceTests(unittest.TestCase):
         pending_history: int = 0,
         recipe_error: Exception | None = None,
         model_error: Exception | None = None,
+        canary_error: Exception | None = None,
     ) -> dict:
         full = scan_result(
             examples,
@@ -122,6 +129,11 @@ class ProjectServiceTests(unittest.TestCase):
                 "autotrainer.project_service.require_materialized_model",
                 side_effect=model_error,
             ),
+            patch(
+                "autotrainer.project_service.run_grpo_environment_canary",
+                side_effect=canary_error,
+                return_value=READY_CANARY,
+            ),
         ):
             return prepare_project(self.config_path)
 
@@ -143,8 +155,34 @@ class ProjectServiceTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     set(result["details"]),
-                    {"validation", "scan", "compile", "plan", "preflight", "doctor"},
+                    {
+                        "validation",
+                        "scan",
+                        "compile",
+                        "plan",
+                        "preflight",
+                        "doctor",
+                        "environment_canary",
+                    },
                 )
+
+    def test_rl_prepare_requires_an_executable_environment_canary(self) -> None:
+        result = self.prepare_with(0, 1)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["details"]["environment_canary"]["status"], "ready")
+
+    def test_broken_executable_task_blocks_rl_after_doctor(self) -> None:
+        result = self.prepare_with(
+            0,
+            1,
+            canary_error=RuntimeError("pricing-001 verifier_failed"),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["next_action"]["title"], "Fix the executable RL task")
+        self.assertIn("verifier_failed", result["next_action"]["detail"])
+        self.assertEqual(result["steps"][-1]["status"], "blocked")
 
     def test_prepare_resolves_selected_recipe_and_exact_local_model(self) -> None:
         result = self.prepare_with(1, 0)

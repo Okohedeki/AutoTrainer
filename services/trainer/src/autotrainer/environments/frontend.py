@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from ..environment import CheckResult, EpisodeResult, RolloutVerifierReport, score_rollout
+from ..integrity import IntegrityError, tree_identity
 from ..manifest import TaskManifest
 
 
@@ -54,6 +55,7 @@ class FrontendEnvironment:
         self._task_root: Path | None = None
         self._backend = "docker"
         self._image = ""
+        self._verifier_identity: dict[str, Any] | None = None
         self._tool_calls = 0
         self._tool_calls_by_name: dict[str, int] = {}
         self._max_output_chars = 12_000
@@ -113,7 +115,15 @@ class FrontendEnvironment:
         return self._last_result
 
     def list_files(self, path: str = ".") -> str:
-        """List editable repository files below a relative directory."""
+        """List editable repository files below a relative directory.
+
+        Args:
+            path: Repository-relative directory to inspect. Use ``.`` for the
+                editable repository root.
+
+        Returns:
+            A bounded newline-delimited list of repository-relative file paths.
+        """
 
         self._use_tool("list_files")
         root = self._safe_path(path)
@@ -130,7 +140,17 @@ class FrontendEnvironment:
         return self._bounded("\n".join(files))
 
     def read_file(self, path: str, start: int = 1, end: int = 200) -> str:
-        """Read an inclusive, one-indexed line range from a UTF-8 text file."""
+        """Read an inclusive, one-indexed line range from a UTF-8 text file.
+
+        Args:
+            path: Repository-relative path to the text file.
+            start: First one-indexed line to return.
+            end: Last one-indexed line to return, inclusive.
+
+        Returns:
+            Bounded numbered lines, or a short validation error visible to the
+            policy.
+        """
 
         self._use_tool("read_file")
         if start < 1 or end < start or end - start > 500:
@@ -149,7 +169,15 @@ class FrontendEnvironment:
         return self._bounded("\n".join(selected))
 
     def search_code(self, query: str, path: str = ".") -> str:
-        """Search text files for a literal query and return bounded line matches."""
+        """Search text files for a literal query and return bounded line matches.
+
+        Args:
+            query: Literal case-insensitive text to find.
+            path: Repository-relative file or directory to search.
+
+        Returns:
+            Bounded ``path:line: text`` matches, or ``no matches``.
+        """
 
         self._use_tool("search_code")
         if not query or len(query) > 200:
@@ -175,7 +203,15 @@ class FrontendEnvironment:
         return self._bounded("\n".join(matches) if matches else "no matches")
 
     def apply_patch(self, patch: str) -> str:
-        """Apply a unified diff after path and Git safety checks."""
+        """Apply a unified diff after path and Git safety checks.
+
+        Args:
+            patch: Complete unified diff whose paths stay inside the editable
+                repository.
+
+        Returns:
+            A bounded success message or the reason the patch was rejected.
+        """
 
         self._use_tool("apply_patch")
         try:
@@ -211,7 +247,14 @@ class FrontendEnvironment:
             raise
 
     def run_check(self, check: str) -> str:
-        """Run one trusted named check: build, tests, or browserTests."""
+        """Run one trusted check declared by the task author.
+
+        Args:
+            check: Check name: ``build``, ``tests``, or ``browserTests``.
+
+        Returns:
+            A bounded pass/fail summary with captured command output.
+        """
 
         self._use_tool("run_check")
         if check not in {"build", "tests", "browserTests"}:
@@ -444,9 +487,22 @@ class FrontendEnvironment:
             raise RuntimeError("environment_backend must be docker or podman")
         if shutil.which(self._backend) is None:
             raise RuntimeError(f"{self._backend} is required for frontend RL episodes")
-        self._image = str(task_row.get("environment_image", ""))
+        # Evaluation plans replace mutable image tags with an immutable image
+        # ID or repository digest. GRPO rows created directly by compile retain
+        # the tag because training has its own Doctor preflight.
+        self._image = str(
+            task_row.get("environment_image_identity")
+            or task_row.get("environment_image", "")
+        )
         if not self._image:
             raise RuntimeError("compiled task row is missing environment_image")
+        verifier_identity = task_row.get("verifier_identity")
+        if verifier_identity is not None:
+            if not isinstance(verifier_identity, Mapping):
+                raise RuntimeError("compiled verifier_identity must be a mapping")
+            self._verifier_identity = dict(verifier_identity)
+        else:
+            self._verifier_identity = None
         self._max_output_chars = int(task_row.get("max_tool_output_chars", 12_000))
 
         self._manifest = manifest
@@ -1236,6 +1292,21 @@ class FrontendEnvironment:
         candidate = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
         if not candidate.exists():
             raise RuntimeError(f"verifier bundle does not exist: {candidate}")
+        expected = self._verifier_identity
+        if expected is not None:
+            try:
+                actual = tree_identity(candidate)
+            except IntegrityError as error:
+                raise RuntimeError(f"verifier identity cannot be checked: {error}") from error
+            # Compare both the aggregate hash and entry ledger. The latter
+            # identifies renames and size changes instead of accepting an
+            # underspecified digest-only task row.
+            if actual.get("sha256") != expected.get("sha256") or actual.get(
+                "files"
+            ) != expected.get("files"):
+                raise RuntimeError(
+                    "hidden verifier files changed after the evaluation plan was frozen"
+                )
         workspace = self._require_workspace()
         try:
             candidate.relative_to(workspace)
@@ -1326,6 +1397,7 @@ class FrontendEnvironment:
             self._remove_tree(root)
         self._manifest = None
         self._task_root = None
+        self._verifier_identity = None
         self._episode_id = None
         self._tool_calls_by_name = {}
         self._install_result = None

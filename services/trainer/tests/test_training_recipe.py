@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
@@ -171,6 +172,26 @@ class TrainingRecipeTests(unittest.TestCase):
                 dry_run=False,
             )
 
+    def test_real_grpo_runs_executable_canary_before_training_imports(self) -> None:
+        with (
+            patch("autotrainer.training.grpo.require_materialized_model"),
+            patch(
+                "autotrainer.training.grpo.validate_reference_dependencies",
+                return_value={},
+            ),
+            patch(
+                "autotrainer.training.grpo.run_grpo_environment_canary",
+                side_effect=RuntimeError("verifier canary failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "verifier canary failed"):
+                run_grpo(
+                    self.config(),
+                    project_root=self.project_root,
+                    output_dir=Path("artifacts/grpo-output"),
+                    dry_run=False,
+                )
+
     def test_grpo_dry_run_requires_and_records_same_sft_adapter(self) -> None:
         result = run_grpo(
             self.config(),
@@ -187,6 +208,45 @@ class TrainingRecipeTests(unittest.TestCase):
         )
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
+        self.assertEqual(recipe["grpo"]["dataset"]["record_count"], 1)
+
+    def test_grpo_recipe_validates_every_compiled_row(self) -> None:
+        malformed = {
+            "task_id": "pricing-page-002",
+            "prompt": "this must remain a conversational message list",
+        }
+        self.grpo_dataset.write_text(
+            self.grpo_dataset.read_text(encoding="utf-8")
+            + json.dumps(malformed)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(TrainingConfigurationError, "record 2.prompt"):
+            resolve_grpo_recipe(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+            )
+
+    def test_grpo_recipe_rejects_duplicate_task_ids(self) -> None:
+        duplicate = {
+            "task_id": "pricing-page-001",
+            "prompt": [{"role": "user", "content": "A different task."}],
+        }
+        self.grpo_dataset.write_text(
+            self.grpo_dataset.read_text(encoding="utf-8")
+            + json.dumps(duplicate)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(TrainingConfigurationError, "duplicate task_id"):
+            resolve_grpo_recipe(
+                self.config(),
+                project_root=self.project_root,
+                output_dir=Path("artifacts/grpo-output"),
+            )
 
     def test_practice_dry_run_creates_a_fresh_qlora_policy_from_base(self) -> None:
         config = self.config()

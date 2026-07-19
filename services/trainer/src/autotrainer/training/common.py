@@ -513,15 +513,44 @@ def validate_sft_token_lengths(
 
 
 def inspect_grpo_dataset(path: Path) -> dict[str, Any]:
-    record = _first_json_record(path)
-    _reject_multimodal(record)
-    if "prompt" not in record:
-        raise TrainingConfigurationError("grpo.dataset records must contain a prompt field")
-    _validate_messages(record["prompt"], "grpo.dataset.prompt", require_assistant=False)
+    """Validate every rollout row before a model or environment is loaded.
+
+    Checking only the first row made a late malformed task look like a runtime
+    failure after an expensive model load. Task IDs are optional for generic
+    environment integrations, but compiled AutoTrainer rows always include
+    them and must remain unique.
+    """
+
+    records = _json_records(path)
+    task_ids: set[str] = set()
+    first_record = records[0][1]
+    for position, record in records:
+        _reject_multimodal(record, f"grpo.dataset record {position}")
+        if "prompt" not in record:
+            raise TrainingConfigurationError(
+                f"grpo.dataset record {position} must contain a prompt field"
+            )
+        _validate_messages(
+            record["prompt"],
+            f"grpo.dataset record {position}.prompt",
+            require_assistant=False,
+        )
+        if "task_id" in record:
+            task_id = record.get("task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise TrainingConfigurationError(
+                    f"grpo.dataset record {position}.task_id must be non-empty text"
+                )
+            if task_id in task_ids:
+                raise TrainingConfigurationError(
+                    f"grpo.dataset contains duplicate task_id {task_id!r}"
+                )
+            task_ids.add(task_id)
     return {
         "path": str(path),
         "format": "conversational-prompts",
-        "first_record_fields": sorted(str(key) for key in record),
+        "record_count": len(records),
+        "first_record_fields": sorted(str(key) for key in first_record),
     }
 
 
