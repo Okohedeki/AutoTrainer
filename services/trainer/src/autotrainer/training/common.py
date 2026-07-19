@@ -493,6 +493,10 @@ def _validate_messages(value: Any, field: str, *, require_assistant: bool) -> No
         content = message.get("content")
         if not isinstance(role, str) or not role:
             raise TrainingConfigurationError(f"{field}[{index}].role must be a string")
+        if role not in {"system", "user", "assistant", "tool"}:
+            raise TrainingConfigurationError(
+                f"{field}[{index}].role must be system, user, assistant, or tool"
+            )
         if not isinstance(content, str):
             raise TrainingConfigurationError(
                 f"{field}[{index}].content must be text in V1"
@@ -683,6 +687,11 @@ def inspect_grpo_dataset(path: Path) -> dict[str, Any]:
             f"grpo.dataset record {position}.prompt",
             require_assistant=False,
         )
+        if record["prompt"][-1].get("role") != "user":
+            raise TrainingConfigurationError(
+                f"grpo.dataset record {position}.prompt must end with a user message "
+                "because TRL appends the environment reset observation there"
+            )
         if "task_id" in record:
             task_id = record.get("task_id")
             if not isinstance(task_id, str) or not task_id.strip():

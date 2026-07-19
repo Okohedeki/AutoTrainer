@@ -196,6 +196,9 @@ def resolve_grpo_recipe(
         # Compatibility projection for clients that still display this field.
         "sft_adapter": adapter,
         "per_device_train_batch_size": batch_size,
+        # The inherited Transformers default is eight and can OOM a 9B QLoRA
+        # as soon as an optional validation dataset enables periodic eval.
+        "per_device_eval_batch_size": 1,
         "gradient_accumulation_steps": accumulation,
         "effective_batch_size": effective_batch_size,
         "num_generations": num_generations,
@@ -421,6 +424,7 @@ def run_grpo(
         training_args = GRPOConfig(
             output_dir=str(destination),
             per_device_train_batch_size=stage["per_device_train_batch_size"],
+            per_device_eval_batch_size=stage["per_device_eval_batch_size"],
             gradient_accumulation_steps=stage["gradient_accumulation_steps"],
             learning_rate=stage["learning_rate"],
             num_train_epochs=stage["num_train_epochs"],

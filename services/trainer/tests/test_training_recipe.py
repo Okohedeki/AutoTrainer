@@ -120,6 +120,7 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(result["recipe"]["stage"], "sft")
         self.assertEqual(result["recipe"]["sft"]["effective_batch_size"], 8)
+        self.assertEqual(result["recipe"]["sft"]["per_device_eval_batch_size"], 1)
         self.assertEqual(
             result["recipe"]["sft"]["dataset"]["path"], str(self.sft_dataset)
         )
@@ -252,6 +253,7 @@ class TrainingRecipeTests(unittest.TestCase):
             "my_project.environment:create_environment",
         )
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
+        self.assertEqual(recipe["grpo"]["per_device_eval_batch_size"], 1)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
         self.assertEqual(recipe["grpo"]["dataset"]["record_count"], 1)
         self.assertEqual(
@@ -395,6 +397,36 @@ class TrainingRecipeTests(unittest.TestCase):
                 project_root=self.project_root,
                 output_dir=Path("artifacts/grpo-output"),
             )
+
+    def test_grpo_recipe_requires_supported_roles_and_a_final_user_message(self) -> None:
+        cases = (
+            (
+                [{"role": "developer", "content": "hidden policy"}],
+                "role must be system, user, assistant, or tool",
+            ),
+            (
+                [{"role": "assistant", "content": "Already answered."}],
+                "must end with a user message",
+            ),
+        )
+        for index, (prompt, message) in enumerate(cases, 2):
+            with self.subTest(prompt=prompt):
+                self.grpo_dataset.write_text(
+                    self.grpo_dataset.read_text(encoding="utf-8")
+                    + json.dumps({"task_id": f"invalid-{index}", "prompt": prompt})
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(TrainingConfigurationError, message):
+                    resolve_grpo_recipe(
+                        self.config(),
+                        project_root=self.project_root,
+                        output_dir=Path("artifacts/grpo-output"),
+                    )
+                # Each subtest starts from the valid first row so one invalid
+                # case cannot shadow the validation branch exercised by next.
+                lines = self.grpo_dataset.read_text(encoding="utf-8").splitlines()
+                self.grpo_dataset.write_text(lines[0] + "\n", encoding="utf-8")
 
     def test_grpo_recipe_rejects_duplicate_task_ids(self) -> None:
         duplicate = {

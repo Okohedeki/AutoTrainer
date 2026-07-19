@@ -109,6 +109,9 @@ def resolve_sft_recipe(
         "eval_dataset": eval_dataset,
         "max_length": max_length,
         "per_device_train_batch_size": batch_size,
+        # Transformers defaults evaluation to eight rows per device. Keep
+        # optional validation inside the same 24 GB single-GPU envelope.
+        "per_device_eval_batch_size": 1,
         "gradient_accumulation_steps": accumulation,
         "effective_batch_size": effective_batch_size,
         "learning_rate": learning_rate,
@@ -146,7 +149,7 @@ def run_sft(
     """Validate and optionally execute text-only 9B QLoRA SFT.
 
     A dry run performs the complete static validation path, including checking
-    the first dataset record, without importing PyTorch or Hugging Face modules.
+    every dataset record, without importing PyTorch or Hugging Face modules.
     """
 
     recipe = resolve_sft_recipe(config, project_root=project_root, output_dir=output_dir)
@@ -256,6 +259,7 @@ def run_sft(
             output_dir=str(destination),
             max_length=stage["max_length"],
             per_device_train_batch_size=stage["per_device_train_batch_size"],
+            per_device_eval_batch_size=stage["per_device_eval_batch_size"],
             gradient_accumulation_steps=stage["gradient_accumulation_steps"],
             learning_rate=stage["learning_rate"],
             num_train_epochs=stage["num_train_epochs"],
