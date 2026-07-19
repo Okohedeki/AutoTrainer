@@ -14,8 +14,10 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.config import default_config, write_config  # noqa: E402
 from autotrainer.model_host import (  # noqa: E402
+    HostSpec,
     ModelHostError,
     _require_context_fit,
+    _tokenizer_source,
     create_model_host_server,
     resolve_host_spec,
 )
@@ -77,19 +79,57 @@ class ModelHostTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
+    @staticmethod
+    def _write_completed_adapter(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "adapter_config.json").write_text("{}", encoding="utf-8")
+        (path / "adapter_model.safetensors").write_bytes(b"adapter")
+        (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (path / "tokenizer_config.json").write_text(
+            json.dumps({"chat_template": "trained-response-aware-template"}),
+            encoding="utf-8",
+        )
+        (path / ".autotrainer-run-claim.json").write_text(
+            json.dumps({"policy": "immutable-fresh-run-v1", "status": "completed"}),
+            encoding="utf-8",
+        )
+
     def test_auto_adapter_prefers_completed_grpo_then_sft(self) -> None:
         sft = self.root / ".autotrainer" / "checkpoints" / "sft"
         grpo = self.root / ".autotrainer" / "checkpoints" / "grpo"
-        sft.mkdir(parents=True)
+        self._write_completed_adapter(sft)
         grpo.mkdir(parents=True)
-        (sft / "adapter_config.json").write_text("{}", encoding="utf-8")
 
         self.assertEqual(resolve_host_spec(self.config_path).adapter_name, "sft")
 
-        (grpo / "adapter_config.json").write_text("{}", encoding="utf-8")
+        self._write_completed_adapter(grpo)
         selected = resolve_host_spec(self.config_path)
         self.assertEqual(selected.adapter_name, "grpo")
         self.assertEqual(selected.adapter_path, grpo.resolve())
+
+    def test_candidate_uses_its_saved_training_tokenizer_and_base_uses_snapshot(self) -> None:
+        grpo = self.root / ".autotrainer" / "checkpoints" / "grpo"
+        self._write_completed_adapter(grpo)
+        candidate = resolve_host_spec(self.config_path, "grpo")
+        base = resolve_host_spec(self.config_path, "base")
+
+        self.assertEqual(_tokenizer_source(candidate), grpo.resolve())
+        self.assertEqual(_tokenizer_source(base), self.snapshot.resolve())
+
+        missing_template = grpo / "tokenizer_config.json"
+        missing_template.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ModelHostError, "preserve its trained chat template"):
+            _tokenizer_source(
+                HostSpec(
+                    config_path=candidate.config_path,
+                    model_id=candidate.model_id,
+                    revision=candidate.revision,
+                    snapshot_path=candidate.snapshot_path,
+                    adapter_name=candidate.adapter_name,
+                    adapter_path=candidate.adapter_path,
+                    display_name=candidate.display_name,
+                )
+            )
 
     def test_explicit_missing_adapter_is_not_presented_as_deployed(self) -> None:
         with self.assertRaisesRegex(ModelHostError, "not complete"):

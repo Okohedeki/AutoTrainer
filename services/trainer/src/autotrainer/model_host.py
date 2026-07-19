@@ -124,7 +124,67 @@ def _adapter_output(config_path: Path, stage: str) -> Path:
 def _is_adapter(path: Path) -> bool:
     """Accept only a completed PEFT root, never a half-written run folder."""
 
-    return path.is_dir() and (path / "adapter_config.json").is_file()
+    if not path.is_dir():
+        return False
+    required = (
+        path / "adapter_config.json",
+        path / "tokenizer_config.json",
+        path / "tokenizer.json",
+    )
+    if not all(item.is_file() for item in required) or not any(
+        (path / filename).is_file()
+        for filename in ("adapter_model.safetensors", "adapter_model.bin")
+    ):
+        return False
+    try:
+        claim = json.loads(
+            (path / ".autotrainer-run-claim.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(claim, Mapping) and claim.get("status") == "completed"
+
+
+def _tokenizer_source(spec: HostSpec) -> Path:
+    """Select the tokenizer that defines the exact arm's trained protocol."""
+
+    if spec.adapter_path is None:
+        return spec.snapshot_path
+    source = spec.adapter_path
+    tokenizer_config = source / "tokenizer_config.json"
+    tokenizer_data = source / "tokenizer.json"
+    if not tokenizer_config.is_file() or not tokenizer_data.is_file():
+        raise ModelHostError(
+            f"The {spec.adapter_name.upper()} adapter is missing its saved tokenizer. "
+            "Run training again with this AutoTrainer version."
+        )
+    try:
+        config = json.loads(tokenizer_config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ModelHostError(
+            f"The {spec.adapter_name.upper()} adapter tokenizer config is unreadable."
+        ) from error
+    inline_template = config.get("chat_template") if isinstance(config, Mapping) else None
+    inline_template_ready = (
+        isinstance(inline_template, str) and bool(inline_template.strip())
+    ) or (
+        isinstance(inline_template, Mapping)
+        and any(isinstance(value, str) and value.strip() for value in inline_template.values())
+    )
+    template_file = source / "chat_template.jinja"
+    try:
+        file_template_ready = template_file.is_file() and bool(
+            template_file.read_text(encoding="utf-8").strip()
+        )
+    except (OSError, UnicodeDecodeError) as error:
+        raise ModelHostError(
+            f"The {spec.adapter_name.upper()} adapter chat template is unreadable."
+        ) from error
+    if not inline_template_ready and not file_template_ready:
+        raise ModelHostError(
+            f"The {spec.adapter_name.upper()} adapter does not preserve its trained chat template."
+        )
+    return source
 
 
 def resolve_host_spec(config_path: str | Path, adapter: str = "auto") -> HostSpec:
@@ -196,7 +256,7 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        str(spec.snapshot_path),
+        str(_tokenizer_source(spec)),
         local_files_only=True,
         trust_remote_code=False,
     )
@@ -229,9 +289,9 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
                 "add_generation_prompt": True,
             }
             if tools is not None:
-                # This is the same native Qwen tool template and no-thinking
-                # setting that TRL's environment_factory path receives during
-                # GRPO. Evaluation must measure the behavior that was trained.
+                # Candidate adapters use the response-aware tokenizer/template
+                # persisted by GRPOTrainer; reference arms use their own pinned
+                # snapshot tokenizer. The evaluator supplies its frozen tools.
                 options.update(tools=tools, enable_thinking=False)
             return tokenizer.apply_chat_template(messages, **options)
 
