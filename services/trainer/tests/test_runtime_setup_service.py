@@ -152,8 +152,8 @@ class RuntimeSetupServiceTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             selected["command"],
             1,
-            "",
-            "ERROR: incompatible wheel\nTry a different interpreter.\n",
+            "Downloading package\nERROR: incompatible wheel\n",
+            "WARNING: retrying\nTry a different interpreter.\n",
         )
         with (
             patch("autotrainer.runtime_setup_service._selected_action", return_value=selected),
@@ -163,7 +163,7 @@ class RuntimeSetupServiceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeSetupError,
-                "incompatible wheel Try a different interpreter",
+                "incompatible wheel",
             ):
                 apply_runtime_setup_action_owned(
                     self.config_path,

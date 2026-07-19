@@ -11,6 +11,7 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,28 @@ _ACTION_IDS = frozenset(
 
 class RuntimeSetupError(ConfigError):
     """Raised when a setup action is unknown, unavailable, or already active."""
+
+
+def _failure_output_excerpt(stdout: str, stderr: str) -> str:
+    """Keep the actionable subprocess failure visible in the bounded job message."""
+
+    lines = [
+        " ".join(line.split())
+        for line in f"{stdout}\n{stderr}".splitlines()
+        if line.strip()
+    ]
+    important = [
+        line
+        for line in lines
+        if re.search(
+            r"(?:^ERROR\b|exception|traceback|\[WinError\b|permission denied|"
+            r"access is denied|no space left|could not install|failed)",
+            line,
+            flags=re.IGNORECASE,
+        )
+    ]
+    selected = important[-6:] if important else lines[-12:]
+    return " | ".join(selected)[-850:]
 
 
 def _command_result(command: str, arguments: list[str]) -> dict[str, Any]:
@@ -309,9 +332,8 @@ def apply_runtime_setup_action_owned(
             if selected["requires_admin"]
             else "Review the setup output and retry."
         )
-        output = (completed.stderr or completed.stdout).strip()
-        output_tail = " ".join(output.split())[-2_000:]
-        detail = f" Setup output: {output_tail}" if output_tail else ""
+        output_excerpt = _failure_output_excerpt(completed.stdout, completed.stderr)
+        detail = f" Setup output: {output_excerpt}" if output_excerpt else ""
         raise RuntimeSetupError(
             f"{selected['title']} failed with exit {completed.returncode}. "
             f"{guidance}{detail}"
