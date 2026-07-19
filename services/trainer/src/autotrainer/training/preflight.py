@@ -15,6 +15,7 @@ from numbers import Real
 from pathlib import Path
 from typing import Any
 
+from ..integrity import IntegrityError, resolve_container_image
 from .common import (
     TrainingRuntimeError,
     _json_records,
@@ -25,6 +26,85 @@ from .common import (
 
 _REQUIRED_CHECKS = ("build", "tests", "verifier")
 _OPTIONAL_CHECKS = ("install", "browserTests")
+
+
+def _validate_environment_rows(
+    records: list[tuple[int, Mapping[str, Any]]],
+    *,
+    backend: str,
+    image: str,
+    dataset_name: str,
+) -> None:
+    """Reject compiled rows that diverge from the resolved recipe runtime."""
+
+    for position, row in records:
+        row_backend = str(row.get("environment_backend", "")).strip()
+        row_image = str(row.get("environment_image", "")).strip()
+        if row_backend != backend or row_image != image:
+            raise TrainingRuntimeError(
+                f"{dataset_name} record {position} does not use the configured container "
+                "runtime; re-run compilation before training"
+            )
+
+
+def _bind_environment_rows(
+    records: list[tuple[int, Mapping[str, Any]]],
+    runtime_reference: str,
+) -> list[tuple[int, Mapping[str, Any]]]:
+    """Copy compiled rows and bind them to the already-resolved image identity."""
+
+    bound: list[tuple[int, Mapping[str, Any]]] = []
+    for position, row in records:
+        runtime_row = dict(row)
+        runtime_row["environment_image_identity"] = runtime_reference
+        bound.append((position, runtime_row))
+    return bound
+
+
+def _freeze_environment_image(
+    environment: Mapping[str, Any],
+    records: list[tuple[int, Mapping[str, Any]]],
+    image_resolver: Callable[[str, str], Mapping[str, str]],
+) -> tuple[list[tuple[int, Mapping[str, Any]]], dict[str, str]]:
+    """Resolve the configured tag once and bind every executable task row to it."""
+
+    backend = str(environment.get("backend", "")).strip()
+    image = str(environment.get("image", "")).strip()
+    if backend not in {"docker", "podman"}:
+        raise TrainingRuntimeError(
+            "resolved GRPO recipe environment backend must be docker or podman"
+        )
+    if not image:
+        raise TrainingRuntimeError(
+            "resolved GRPO recipe environment image must be non-empty"
+        )
+    _validate_environment_rows(
+        records,
+        backend=backend,
+        image=image,
+        dataset_name="grpo.dataset",
+    )
+    try:
+        resolved = image_resolver(backend, image)
+    except IntegrityError as error:
+        raise TrainingRuntimeError(str(error)) from error
+    except Exception as error:
+        raise TrainingRuntimeError(
+            f"could not resolve container image {image!r} with {backend}: {error}"
+        ) from error
+    if not isinstance(resolved, Mapping):
+        raise TrainingRuntimeError("container image resolver returned invalid evidence")
+    identity = {str(key): str(value) for key, value in resolved.items()}
+    runtime_reference = identity.get("runtime_reference", "").strip()
+    digest = identity.get("digest", "").strip()
+    if (
+        identity.get("backend") != backend
+        or identity.get("reference") != image
+        or not runtime_reference
+        or not digest.startswith("sha256:")
+    ):
+        raise TrainingRuntimeError("container image resolver returned invalid evidence")
+    return _bind_environment_rows(records, runtime_reference), identity
 
 
 def _check_detail(check: Any) -> str:
@@ -155,6 +235,7 @@ def run_grpo_environment_canary(
     recipe: Mapping[str, Any],
     *,
     factory: Callable[[], Any] | None = None,
+    image_resolver: Callable[[str, str], Mapping[str, str]] = resolve_container_image,
 ) -> dict[str, Any]:
     """Execute every compiled task through the real RL environment without edits.
 
@@ -166,6 +247,7 @@ def run_grpo_environment_canary(
     Args:
         recipe: Fully resolved GRPO recipe.
         factory: Optional environment factory injection used by unit tests.
+        image_resolver: Optional immutable-image resolver injection used by unit tests.
 
     Returns:
         JSON-compatible evidence for every exercised task and baseline.
@@ -179,7 +261,9 @@ def run_grpo_environment_canary(
     stage = recipe.get("grpo")
     environment = recipe.get("environment")
     if not isinstance(stage, Mapping) or not isinstance(environment, Mapping):
-        raise TrainingRuntimeError("resolved GRPO recipe is missing stage or environment data")
+        raise TrainingRuntimeError(
+            "resolved GRPO recipe is missing stage or environment data"
+        )
     dataset = stage.get("dataset")
     if not isinstance(dataset, Mapping) or not dataset.get("path"):
         raise TrainingRuntimeError("resolved GRPO recipe is missing its dataset path")
@@ -187,6 +271,25 @@ def run_grpo_environment_canary(
     verify_dataset_identity(dataset)
     dataset_path = Path(str(dataset["path"]))
     records = _json_records(dataset_path)
+    records, container_image = _freeze_environment_image(
+        environment,
+        records,
+        image_resolver,
+    )
+    eval_dataset = stage.get("eval_dataset")
+    if eval_dataset is not None:
+        if not isinstance(eval_dataset, Mapping) or not eval_dataset.get("path"):
+            raise TrainingRuntimeError(
+                "resolved GRPO recipe has invalid eval dataset evidence"
+            )
+        verify_dataset_identity(eval_dataset)
+        eval_records = _json_records(Path(str(eval_dataset["path"])))
+        _validate_environment_rows(
+            eval_records,
+            backend=container_image["backend"],
+            image=container_image["reference"],
+            dataset_name="grpo.eval_dataset",
+        )
     active_factory = factory or import_factory(str(environment.get("factory", "")))
     task_results = [
         _run_task_canary(
@@ -202,6 +305,7 @@ def run_grpo_environment_canary(
         "dataset_path": str(dataset_path),
         "task_count": len(task_results),
         "tasks": task_results,
+        "container_image": container_image,
         # Keep the first-row summary for existing GUI clients while the full
         # evidence list makes readiness truthful for every compiled task.
         **first,

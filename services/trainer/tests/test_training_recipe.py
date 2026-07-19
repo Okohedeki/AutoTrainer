@@ -23,12 +23,16 @@ from autotrainer.training.common import (  # noqa: E402
     verify_adapter_tree_identity,
 )
 from autotrainer.training.grpo import (  # noqa: E402
+    _bind_environment_image_identity,
     _load_json_dataset as load_grpo_json_dataset,
     _save_grpo_processing_class,
 )
 from autotrainer.training.sft import (  # noqa: E402
     _load_json_dataset as load_sft_json_dataset,
 )
+
+
+IMAGE_DIGEST = "sha256:" + "b" * 64
 
 
 class TrainingRecipeTests(unittest.TestCase):
@@ -44,7 +48,10 @@ class TrainingRecipeTests(unittest.TestCase):
                 {
                     "prompt": [{"role": "user", "content": "Create a pricing page."}],
                     "completion": [
-                        {"role": "assistant", "content": "I will inspect the repository."}
+                        {
+                            "role": "assistant",
+                            "content": "I will inspect the repository.",
+                        }
                     ],
                 }
             )
@@ -107,7 +114,11 @@ class TrainingRecipeTests(unittest.TestCase):
                 "dataset": "data/grpo.jsonl",
                 "sft_adapter": "artifacts/sft-adapter",
             },
-            "environment": {"factory": "my_project.environment:create_environment"},
+            "environment": {
+                "factory": "my_project.environment:create_environment",
+                "backend": "docker",
+                "image": "autotrainer-rollout:latest",
+            },
         }
 
     def test_sft_dry_run_resolves_local_data_and_effective_batch(self) -> None:
@@ -183,7 +194,9 @@ class TrainingRecipeTests(unittest.TestCase):
                 dry_run=True,
             )
 
-    def test_sft_checks_every_full_conversation_with_the_real_tokenizer_boundary(self) -> None:
+    def test_sft_checks_every_full_conversation_with_the_real_tokenizer_boundary(
+        self,
+    ) -> None:
         second = {
             "prompt": [{"role": "user", "content": "short task"}],
             "completion": [{"role": "assistant", "content": "x" * 80}],
@@ -194,12 +207,16 @@ class TrainingRecipeTests(unittest.TestCase):
         )
 
         class LengthTokenizer:
-            def apply_chat_template(self, messages: list[dict], **_: object) -> list[int]:
+            def apply_chat_template(
+                self, messages: list[dict], **_: object
+            ) -> list[int]:
                 length = sum(len(message["content"]) for message in messages)
                 return list(range(length))
 
         with self.assertRaisesRegex(TrainingConfigurationError, "record 2 uses"):
-            validate_sft_token_lengths(LengthTokenizer(), self.sft_dataset, max_length=60)
+            validate_sft_token_lengths(
+                LengthTokenizer(), self.sft_dataset, max_length=60
+            )
 
         report = validate_sft_token_lengths(
             LengthTokenizer(), self.sft_dataset, max_length=200
@@ -252,6 +269,11 @@ class TrainingRecipeTests(unittest.TestCase):
             recipe["environment"]["factory"],
             "my_project.environment:create_environment",
         )
+        self.assertEqual(recipe["environment"]["backend"], "docker")
+        self.assertEqual(
+            recipe["environment"]["image"],
+            "autotrainer-rollout:latest",
+        )
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["per_device_eval_batch_size"], 1)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
@@ -262,6 +284,24 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(len(recipe["grpo"]["dataset"]["sha256"]), 64)
         self.assertEqual(recipe["grpo"]["sft_adapter"]["tree"]["file_count"], 2)
         self.assertEqual(len(recipe["grpo"]["sft_adapter"]["tree"]["sha256"]), 64)
+
+    def test_grpo_runtime_dataset_is_bound_to_the_canary_image(self) -> None:
+        class Dataset:
+            def __init__(self) -> None:
+                self.update: dict[str, str] | None = None
+                self.description: str | None = None
+
+            def map(self, transform: object, *, desc: str) -> Dataset:
+                self.update = transform({})  # type: ignore[operator]
+                self.description = desc
+                return self
+
+        dataset = Dataset()
+        result = _bind_environment_image_identity(dataset, IMAGE_DIGEST)
+
+        self.assertIs(result, dataset)
+        self.assertEqual(dataset.update, {"environment_image_identity": IMAGE_DIGEST})
+        self.assertEqual(dataset.description, "Binding immutable rollout image")
 
     def test_grpo_persists_the_template_created_by_the_trainer(self) -> None:
         class ProcessingClass:
@@ -288,11 +328,15 @@ class TrainingRecipeTests(unittest.TestCase):
         )
         self.assertEqual(processing_class.saved_to, str(destination))
 
-    def test_grpo_refuses_to_publish_without_a_persistent_trainer_template(self) -> None:
+    def test_grpo_refuses_to_publish_without_a_persistent_trainer_template(
+        self,
+    ) -> None:
         processing_class = MagicMock(chat_template=None)
         trainer = MagicMock(processing_class=processing_class, chat_template=None)
 
-        with self.assertRaisesRegex(TrainingRuntimeError, "persistent training chat template"):
+        with self.assertRaisesRegex(
+            TrainingRuntimeError, "persistent training chat template"
+        ):
             _save_grpo_processing_class(
                 trainer,
                 object(),
@@ -375,7 +419,9 @@ class TrainingRecipeTests(unittest.TestCase):
         claim_fresh_output_directory(destination)
 
         claim = destination / ".autotrainer-run-claim.json"
-        self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["status"], "running")
+        self.assertEqual(
+            json.loads(claim.read_text(encoding="utf-8"))["status"], "running"
+        )
         with self.assertRaisesRegex(TrainingConfigurationError, "must be empty"):
             claim_fresh_output_directory(destination)
 
@@ -398,7 +444,9 @@ class TrainingRecipeTests(unittest.TestCase):
                 output_dir=Path("artifacts/grpo-output"),
             )
 
-    def test_grpo_recipe_requires_supported_roles_and_a_final_user_message(self) -> None:
+    def test_grpo_recipe_requires_supported_roles_and_a_final_user_message(
+        self,
+    ) -> None:
         cases = (
             (
                 [{"role": "developer", "content": "hidden policy"}],
@@ -496,6 +544,7 @@ class TrainingRecipeTests(unittest.TestCase):
                 output_dir=Path("artifacts/grpo-output"),
                 dry_run=True,
             )
+
     def test_grpo_rejects_invalid_generation_arithmetic(self) -> None:
         config = self.config()
         config["grpo"]["gradient_accumulation_steps"] = 3

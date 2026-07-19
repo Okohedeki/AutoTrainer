@@ -28,6 +28,7 @@ from .common import (
     mark_output_directory_complete,
     resolve_input_directory,
     resolve_input_file,
+    string_value,
     validate_factory_path,
     validate_fresh_output_directory,
     validate_reference_dependencies,
@@ -51,7 +52,9 @@ def resolve_grpo_recipe(
     recipe = base_recipe(config, project_root=project_root, output_dir=output_dir)
     section = get_section(config, "grpo")
     if section.get("enabled", True) is False:
-        raise TrainingConfigurationError("GRPO is disabled for the selected training recipe")
+        raise TrainingConfigurationError(
+            "GRPO is disabled for the selected training recipe"
+        )
     environment_section = get_section(config, "environment")
     root = Path(recipe["project_root"])
 
@@ -69,7 +72,10 @@ def resolve_grpo_recipe(
         )
     start_value = start_value.strip()
     sft_section = config.get("sft", {})
-    sft_enabled = not isinstance(sft_section, Mapping) or sft_section.get("enabled", True) is not False
+    sft_enabled = (
+        not isinstance(sft_section, Mapping)
+        or sft_section.get("enabled", True) is not False
+    )
     if start_value == "base" and sft_enabled:
         raise TrainingConfigurationError(
             "both-stage training requires GRPO to continue the SFT adapter, not base"
@@ -86,6 +92,19 @@ def resolve_grpo_recipe(
         )
 
     factory_path = validate_factory_path(environment_section.get("factory"))
+    environment_backend = choice_value(
+        environment_section,
+        "backend",
+        "docker",
+        {"docker", "podman"},
+        "environment",
+    )
+    environment_image = string_value(
+        environment_section,
+        "image",
+        None,
+        "environment",
+    )
     batch_size = int_value(section, "per_device_train_batch_size", 1, "grpo")
     accumulation = int_value(section, "gradient_accumulation_steps", 2, "grpo")
     num_generations = int_value(section, "num_generations", 2, "grpo", minimum=2)
@@ -114,9 +133,7 @@ def resolve_grpo_recipe(
             "grpo.generation_batch_size must be divisible by grpo.num_generations"
         )
 
-    max_completion_length = int_value(
-        section, "max_completion_length", 2048, "grpo"
-    )
+    max_completion_length = int_value(section, "max_completion_length", 2048, "grpo")
     if max_completion_length > 4096:
         raise TrainingConfigurationError(
             "grpo.max_completion_length must be <= 4096 on the supported 24 GB runtime"
@@ -143,9 +160,7 @@ def resolve_grpo_recipe(
     loss_type = choice_value(section, "loss_type", "dapo", {"dapo"}, "grpo")
     bf16 = bool_value(section, "bf16", True, "grpo")
     tf32 = bool_value(section, "tf32", True, "grpo")
-    gradient_checkpointing = bool_value(
-        section, "gradient_checkpointing", True, "grpo"
-    )
+    gradient_checkpointing = bool_value(section, "gradient_checkpointing", True, "grpo")
     use_vllm = bool_value(section, "use_vllm", False, "grpo")
     if not bf16 or not gradient_checkpointing:
         raise TrainingConfigurationError(
@@ -180,6 +195,8 @@ def resolve_grpo_recipe(
     recipe["stage"] = "grpo"
     recipe["environment"] = {
         "factory": factory_path,
+        "backend": environment_backend,
+        "image": environment_image,
         "network_access": False,
         "contract": {
             "factory_arguments": 0,
@@ -251,6 +268,20 @@ def _load_json_dataset(load_dataset: Any, description: Mapping[str, Any]) -> Any
     return load_dataset("json", data_files=description["path"], split="train")
 
 
+def _bind_environment_image_identity(dataset: Any, runtime_reference: str) -> Any:
+    """Inject the canary-resolved image into every row handed to TRL."""
+
+    map_dataset = getattr(dataset, "map", None)
+    if not callable(map_dataset):
+        raise TrainingRuntimeError(
+            "loaded GRPO dataset cannot bind immutable container image identity"
+        )
+    return map_dataset(
+        lambda _row: {"environment_image_identity": runtime_reference},
+        desc="Binding immutable rollout image",
+    )
+
+
 def _save_grpo_processing_class(trainer: Any, fallback: Any, destination: Path) -> None:
     """Persist the exact tokenizer/template contract established by TRL.
 
@@ -287,7 +318,9 @@ def run_grpo(
 ) -> dict[str, Any]:
     """Validate and optionally train a QLoRA policy with verified tool-use GRPO."""
 
-    recipe = resolve_grpo_recipe(config, project_root=project_root, output_dir=output_dir)
+    recipe = resolve_grpo_recipe(
+        config, project_root=project_root, output_dir=output_dir
+    )
     if dry_run:
         return {"status": "dry_run", "dry_run": True, "recipe": recipe}
 
@@ -298,6 +331,16 @@ def run_grpo(
     # verifier before allocating several gigabytes of model memory. Direct CLI
     # callers receive the same fail-closed contract as project Prepare.
     environment_canary = run_grpo_environment_canary(recipe)
+    container_image = environment_canary.get("container_image")
+    if (
+        not isinstance(container_image, Mapping)
+        or not str(container_image.get("runtime_reference", "")).strip()
+    ):
+        raise TrainingRuntimeError(
+            "GRPO executable canary did not return immutable container image evidence"
+        )
+    runtime_image = str(container_image["runtime_reference"]).strip()
+    recipe["environment"]["image_identity"] = dict(container_image)
 
     # Heavy imports stay behind static validation and dry-run handling.
     try:
@@ -332,10 +375,9 @@ def run_grpo(
         environment = base_environment_factory()
         setter = getattr(environment, "_set_episode_callback", None)
         if on_event is not None and callable(setter):
-            setter(
-                lambda event: on_event({"stage": "grpo", **dict(event)})
-            )
+            setter(lambda event: on_event({"stage": "grpo", **dict(event)}))
         return environment
+
     destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
@@ -408,16 +450,24 @@ def run_grpo(
                 is_trainable=True,
             )
         trainable_parameters = sum(
-            parameter.numel() for parameter in policy.parameters() if parameter.requires_grad
+            parameter.numel()
+            for parameter in policy.parameters()
+            if parameter.requires_grad
         )
         if trainable_parameters == 0:
             raise TrainingRuntimeError(
                 "The GRPO policy has no trainable adapter parameters"
             )
 
-        train_dataset = _load_json_dataset(load_dataset, stage["dataset"])
+        train_dataset = _bind_environment_image_identity(
+            _load_json_dataset(load_dataset, stage["dataset"]),
+            runtime_image,
+        )
         eval_dataset = (
-            _load_json_dataset(load_dataset, stage["eval_dataset"])
+            _bind_environment_image_identity(
+                _load_json_dataset(load_dataset, stage["eval_dataset"]),
+                runtime_image,
+            )
             if stage["eval_dataset"] is not None
             else None
         )
@@ -491,7 +541,9 @@ def run_grpo(
             "and reduce grpo.max_completion_length before changing QLoRA settings."
         ) from error
     except Exception as error:
-        raise TrainingRuntimeError(f"GRPO failed after recipe validation: {error}") from error
+        raise TrainingRuntimeError(
+            f"GRPO failed after recipe validation: {error}"
+        ) from error
 
     metrics = as_serializable(getattr(train_output, "metrics", {}))
     return {
