@@ -171,8 +171,15 @@ test("Evaluate freezes weights, runs once, and renders real trial and verifier e
   assert.match(api, /\/api\/v1\/evaluation\/events\?after=/);
   assert.match(panel, /benchmark\?\.trials/);
   assert.match(panel, /Planned trial matrix/);
-  assert.match(panel, /Reward and verified success/);
-  assert.match(panel, /Rubric components/);
+  assert.match(panel, /Reward and verified success by model arm/);
+  assert.match(panel, /Separate per-arm means/);
+  assert.match(panel, /no values are pooled across models/);
+  assert.match(panel, /Rubric components for one model/);
+  assert.match(panel, /Did training improve the model\?/);
+  assert.match(panel, /Candidate minus reference/);
+  assert.match(panel, /confidence interval/);
+  assert.match(panel, /report\.comparison\.candidates/);
+  assert.match(api, /export type EvaluationReport/);
   assert.match(panel, /Live verification/);
   assert.match(panel, /planIdRef/);
   assert.match(panel, /page\.cursor_reset \|\| planRolledOver/);

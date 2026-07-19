@@ -22,6 +22,8 @@ const rubricLabels: Record<(typeof rubricKeys)[number], string> = {
   task_tests: "Task tests",
 };
 const rubricColors = ["#7c82ff", "#2fb785", "#f0a34a", "#e06c75", "#57a9d9"];
+const armRewardColors = ["#7c82ff", "#2fb785", "#f0a34a", "#57a9d9"];
+const armSuccessColors = ["#a6aaff", "#79cfa9", "#f5c27f", "#93cae8"];
 
 function phaseLabel(value: string) {
   return value.replaceAll("_", " ");
@@ -47,6 +49,12 @@ function cumulative(results: EvaluationResult[], read: (result: EvaluationResult
     points.push({ x: index + 1, y: total / count });
   });
   return points;
+}
+
+function percent(value: number | undefined, signed = false) {
+  if (typeof value !== "number") return "-";
+  const prefix = signed && value > 0 ? "+" : "";
+  return `${prefix}${(value * 100).toFixed(1)} pp`;
 }
 
 function eventText(event: EvaluationEvent) {
@@ -125,6 +133,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   const [events, setEvents] = useState<EvaluationEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [rubricArmId, setRubricArmId] = useState<string | null>(null);
 
   const refresh = async (signal?: AbortSignal) => {
     const version = ++requestVersion.current;
@@ -184,6 +193,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   const benchmark = useMemo(() => workspace?.suites.find((suite) => suite.id === "model_benchmark"), [workspace]);
   const fable = useMemo(() => workspace?.suites.find((suite) => suite.id === "fable_ab"), [workspace]);
   const results = benchmark?.results ?? [];
+  const arms = benchmark?.arms ?? [];
   const trials = benchmark?.trials ?? workspace?.plan?.trials ?? workspace?.job.planned_trials ?? [];
   const resultsTruncated = Boolean(benchmark?.results_truncated || workspace?.job.results_truncated);
   const trialsTruncated = Boolean(benchmark?.trials_truncated);
@@ -191,19 +201,43 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   const canRun = workspace?.readiness.status === "ready" && !jobLive;
   const benchmarkProgress = benchmark?.total ? benchmark.completed / benchmark.total : 0;
 
-  const proofSeries = useMemo<ChartSeries[]>(() => [
-    { id: "reward", label: resultsTruncated ? "Visible-window reward" : "Mean reward", color: "#d8ff58", points: cumulative(results, (result) => result.reward) },
-    { id: "success", label: resultsTruncated ? "Visible-window success" : "Verified success", color: "#2fb785", points: cumulative(results, (result) => result.hard_gate_passed ? 1 : 0) },
-  ], [results, resultsTruncated]);
+  // Each line advances on that arm's own scored trials. Pooling reference and
+  // candidate values would make a healthy average while hiding who improved.
+  const proofSeries = useMemo<ChartSeries[]>(() => arms.flatMap((arm, index) => {
+    const armResults = results.filter((result) => result.arm_id === arm.id);
+    const windowLabel = resultsTruncated ? "visible window" : "cumulative";
+    return [
+      { id: `${arm.id}-reward`, label: `${arm.label} reward (${windowLabel})`, color: armRewardColors[index % armRewardColors.length], points: cumulative(armResults, (result) => result.reward) },
+      { id: `${arm.id}-success`, label: `${arm.label} verified success`, color: armSuccessColors[index % armSuccessColors.length], points: cumulative(armResults, (result) => result.hard_gate_passed ? 1 : 0) },
+    ];
+  }), [arms, results, resultsTruncated]);
+  const selectedRubricArm = arms.some((arm) => arm.id === rubricArmId)
+    ? rubricArmId
+    : arms.find((arm) => arm.role === "candidate")?.id ?? arms[0]?.id ?? null;
+  const selectedRubricResults = useMemo(
+    () => results.filter((result) => result.arm_id === selectedRubricArm),
+    [results, selectedRubricArm],
+  );
   const rubricSeries = useMemo<ChartSeries[]>(() => rubricKeys.map((key, index) => ({
     id: key,
     label: rubricLabels[key],
     color: rubricColors[index],
-    points: cumulative(results, (result) => typeof result.components[key] === "number" ? result.components[key] : null),
-  })), [results]);
+    points: cumulative(selectedRubricResults, (result) => typeof result.components[key] === "number" ? result.components[key] : null),
+  })), [selectedRubricResults]);
   const proofDescription = resultsTruncated
-    ? `Cumulative means over the latest ${results.length} returned trials, not all ${benchmark?.completed ?? workspace?.job.completed ?? results.length} scored trials.`
-    : `Cumulative means from ${results.length} scored trial${results.length === 1 ? "" : "s"}.`;
+    ? `Separate per-arm means over the latest ${results.length} returned trials, not all ${benchmark?.completed ?? workspace?.job.completed ?? results.length} scored trials.`
+    : `Separate per-arm means from ${results.length} scored trial${results.length === 1 ? "" : "s"}; no values are pooled across models.`;
+  const report = benchmark?.report ?? null;
+  const decision = report?.decision;
+  const interval = decision?.confidence_interval;
+  const verdict = decision?.verified_better
+    ? "Verified improvement"
+    : decision?.observed_better
+      ? "Observed lead, not verified"
+      : report
+        ? "No verified improvement"
+        : "Decision pending";
+  const verdictTone = decision?.verified_better ? "good" : report ? "warning" : "muted";
   const resultRowsShown = Math.min(results.length, 16);
 
   const run = async () => {
@@ -249,8 +283,12 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
           <header className="panel-header"><div><p className="panel-kicker">Observed proof</p><h2>Live evaluation rubric</h2></div><span className={`status-chip ${suiteTone(benchmark)}`}>{phaseLabel(benchmark?.phase || "idle")}</span></header>
           {jobLive && workspace?.job.current_trial && <div className="current-trial" role="status"><span className="pulse-marker" aria-hidden="true" /><div><strong>{phaseLabel(workspace.job.phase)}</strong><p>{workspace.job.message}</p></div><dl><div><dt>Task</dt><dd>{workspace.job.current_trial.task_id}</dd></div><div><dt>Arm</dt><dd>{workspace.job.current_trial.arm_id}</dd></div><div><dt>Seed</dt><dd>{workspace.job.current_trial.seed}</dd></div></dl></div>}
           {resultsTruncated && <div className="evidence-disclosure" role="status"><strong>Graph window is truncated.</strong><span>The backend returned only its latest result window, so these lines are visible-window means rather than whole-run means.</span></div>}
-          <TelemetryChart title="Reward and verified success" description={proofDescription} series={proofSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="The graph begins after the trusted verifier scores the first generated result." />
-          <TelemetryChart title="Rubric components" description={resultsTruncated ? `Five verifier components over the latest ${results.length} returned trials only.` : `Five verifier components from ${results.length} scored trial${results.length === 1 ? "" : "s"}.`} series={rubricSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="Component lines appear as trusted trial results arrive." />
+          <TelemetryChart title="Reward and verified success by model arm" description={proofDescription} series={proofSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="Separate model lines begin after the trusted verifier scores the first generated result." />
+          <div className="rubric-arm-switch" aria-label="Rubric model arm">
+            <span>Rubric detail</span>
+            {arms.map((arm) => <button key={arm.id} type="button" className={selectedRubricArm === arm.id ? "active" : ""} aria-pressed={selectedRubricArm === arm.id} onClick={() => setRubricArmId(arm.id)}>{arm.label}</button>)}
+          </div>
+          <TelemetryChart title="Rubric components for one model" description={selectedRubricArm ? `Five trusted verifier components for ${arms.find((arm) => arm.id === selectedRubricArm)?.label ?? selectedRubricArm}. Switch arms above to compare without mixing their scores.` : "Select a model arm to inspect its verifier components."} series={rubricSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="Component lines appear after this model arm receives a trusted score." />
         </article>
 
         <aside className="panel event-rail-panel evaluation-event-rail">
@@ -266,6 +304,24 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
           )}
         </aside>
       </div>
+
+      <article className="panel evaluation-decision-panel" aria-label="Paired comparison decision">
+        <header className="panel-header"><div><p className="panel-kicker">Paired comparison</p><h2>Did training improve the model?</h2></div><span className={`status-chip ${verdictTone}`}>{verdict}</span></header>
+        {!report ? <div className="evaluation-empty"><strong>The decision waits for complete paired evidence</strong><p>After both model arms finish every held-out task, the backend calculates the task-clustered confidence interval and publishes the final decision here.</p></div> : (
+          <>
+            <div className="decision-stat-grid">
+              <div><span>Candidate minus reference</span><strong>{percent(decision?.delta, true)}</strong><small>Verified task success</small></div>
+              <div><span>{interval ? `${(interval.confidence * 100).toFixed(0)}% confidence interval` : "Confidence interval"}</span><strong>{interval ? `${percent(interval.low, true)} to ${percent(interval.high, true)}` : "Not available"}</strong><small>{interval?.method ?? "At least two independent tasks required"}</small></div>
+              <div><span>Independent tasks</span><strong>{decision?.task_count ?? 0}</strong><small>Minimum {decision?.minimum_tasks ?? "-"}</small></div>
+              <div><span>Evidence integrity</span><strong>{report.completeness.fairness_passed ? "Passed" : "Not passed"}</strong><small>{report.completeness.completed_trials} / {report.completeness.expected_trials} paired trials</small></div>
+            </div>
+            <div className="arm-result-grid">
+              {report.comparison.candidates.map((candidate) => <section key={candidate.candidate_id}><div><strong>{candidate.label}</strong><span>Rank {candidate.rank}</span></div><dl><div><dt>Verified success</dt><dd>{(candidate.hard_gate_pass_rate * 100).toFixed(1)}%</dd></div><div><dt>Mean reward</dt><dd>{candidate.reward_mean.toFixed(3)}</dd></div></dl></section>)}
+            </div>
+            <p className="decision-explanation">{decision?.verified_better ? "The candidate cleared the configured minimum delta and the lower confidence bound stayed above it." : decision?.observed_better ? "The point estimate is ahead, but the confidence gate or evidence requirements were not met." : "The trained candidate did not beat the configured reference threshold on this frozen plan."}</p>
+          </>
+        )}
+      </article>
 
       <article className="panel trial-matrix-panel">
         <header className="panel-header"><div><p className="panel-kicker">Frozen work order</p><h2>Planned trial matrix</h2></div><span className="status-chip muted">{trialsTruncated ? `${trials.length} of ${benchmark?.total ?? trials.length} shown` : `${trials.length || benchmark?.total || 0} trials`}</span></header>

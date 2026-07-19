@@ -1380,6 +1380,7 @@ textarea { font: inherit; }
 /* Evaluation */
 .evaluation-command-panel,
 .evaluation-graph-panel,
+.evaluation-decision-panel,
 .trial-matrix-panel,
 .scored-results-panel,
 .external-proof-strip { padding: 20px; }
@@ -1391,6 +1392,27 @@ textarea { font: inherit; }
 .evaluation-blocked ul { margin: 0; padding-left: 18px; color: #86500c; font-size: 9px; line-height: 1.5; }
 .evaluation-workspace > .observed-progress { margin: 0; background: #fff; box-shadow: var(--shadow); }
 .evaluation-event-rail { align-self: start; }
+.rubric-arm-switch { margin: 14px 0 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.rubric-arm-switch > span { margin-right: 3px; color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.rubric-arm-switch button { min-height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #fff; font-size: 8px; font-weight: 750; }
+.rubric-arm-switch button.active { border-color: var(--ink); color: #fff; background: var(--ink); }
+.evaluation-decision-panel .panel-header { margin-bottom: 14px; }
+.decision-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.decision-stat-grid > div { min-width: 0; padding: 13px; display: grid; gap: 5px; border-left: 1px solid var(--line); }
+.decision-stat-grid > div:first-child { border-left: 0; }
+.decision-stat-grid span { color: var(--muted); font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.decision-stat-grid strong { overflow-wrap: anywhere; font-size: 13px; }
+.decision-stat-grid small { color: var(--muted); font-size: 8px; line-height: 1.4; }
+.arm-result-grid { margin-top: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.arm-result-grid section { padding: 12px 13px; border: 1px solid var(--line); border-radius: 8px; }
+.arm-result-grid section > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.arm-result-grid section > div strong { font-size: 10px; }
+.arm-result-grid section > div span { color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.arm-result-grid dl { margin: 10px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.arm-result-grid dl > div { display: grid; gap: 4px; }
+.arm-result-grid dt { color: var(--muted); font-size: 8px; }
+.arm-result-grid dd { margin: 0; font: 750 10px/1.3 "SFMono-Regular", Consolas, monospace; }
+.decision-explanation { margin: 11px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
 .trial-matrix-panel .panel-header,
 .scored-results-panel .panel-header { margin-bottom: 12px; }
 .trial-matrix-scroll { max-height: 330px; overflow: auto; }
@@ -1442,6 +1464,9 @@ textarea { font: inherit; }
   .training-live-grid,
   .evaluation-observation-grid,
   .serve-grid { grid-template-columns: 1fr; }
+  .decision-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decision-stat-grid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
+  .decision-stat-grid > div:nth-child(4) { border-top: 1px solid var(--line); }
   .project-create-panel,
   .event-rail-panel { position: static; max-height: none; }
   .event-rail { max-height: 430px; }
@@ -1467,8 +1492,12 @@ textarea { font: inherit; }
   .grpo-overview-grid,
   .grpo-detail-grid,
   .training-output-grid,
+  .decision-stat-grid,
+  .arm-result-grid,
   .readiness-result,
   .training-data-options { grid-template-columns: 1fr; }
+  .decision-stat-grid > div { border-left: 0; border-top: 1px solid var(--line); }
+  .decision-stat-grid > div:first-child { border-top: 0; }
   .project-create-form > div,
   .selected-model-row,
   .local-model-row,

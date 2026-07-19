@@ -346,6 +346,49 @@ export type EvaluationResult = EvaluationTrial & {
   components: Record<string, number>;
 };
 
+export type EvaluationArm = {
+  id: string;
+  label: string;
+  role: "reference" | "control" | "candidate" | string;
+};
+
+export type EvaluationReport = {
+  plan_id: string;
+  completeness: {
+    expected_trials: number;
+    completed_trials: number;
+    rate: number;
+    fairness_passed: boolean;
+  };
+  comparison: {
+    winner_candidate_id: string | null;
+    candidates: Array<{
+      candidate_id: string;
+      label: string;
+      rank: number;
+      hard_gate_pass_rate: number;
+      reward_mean: number;
+    }>;
+  };
+  decision: {
+    metric: string;
+    candidate?: string;
+    control?: string;
+    task_count?: number;
+    delta?: number;
+    minimum_delta?: number;
+    minimum_tasks?: number;
+    observed_better: boolean;
+    verified_better: boolean;
+    confidence_interval: {
+      low: number;
+      high: number;
+      confidence: number;
+      method: string;
+    } | null;
+  };
+};
+
 export type EvaluationJob = {
   id: string | null;
   status: "idle" | "queued" | "running" | "completed" | "failed" | "interrupted";
@@ -369,6 +412,7 @@ export type EvaluationSuite = {
   message: string;
   completed: number;
   total: number;
+  arms: EvaluationArm[];
   results: EvaluationResult[];
   trials?: EvaluationTrial[];
   trials_truncated?: boolean;
@@ -380,6 +424,7 @@ export type EvaluationSuite = {
     required_reviews: number;
     complete: boolean;
   } | null;
+  report: EvaluationReport | null;
 };
 
 export type EvaluationWorkspace = {
