@@ -1952,10 +1952,14 @@ def ingest_evaluation_results(
     project_root: Path,
     suite_id: str,
     input_path: Path,
-    *,
-    scorer: Callable[[Mapping[str, Any], str], Any] | None = None,
 ) -> dict[str, Any]:
-    """Validate external envelopes and locally score their patches exactly once."""
+    """Validate external envelopes and score with the frozen first-party scorer.
+
+    Scorer injection is intentionally not part of this evidence-writing API.
+    Otherwise a caller could persist arbitrary scores carrying the trusted
+    scorer identity frozen in the plan. Tests that need a cheap verifier patch
+    the private scorer in-process instead of widening the production contract.
+    """
 
     plan, run_dir = load_current_plan(config, project_root)
     if suite_id not in plan["suites"]:
@@ -1971,7 +1975,6 @@ def ingest_evaluation_results(
         for trial in plan["trials"]
         if trial["suite_id"] == suite_id
     }
-    active_scorer = scorer or _default_patch_scorer
     ingested: list[str] = []
     for result, result_path in _result_documents(Path(input_path)):
         # Keep runtime behavior in lockstep with the published producer schema;
@@ -2068,7 +2071,7 @@ def ingest_evaluation_results(
         else:
             patch_text = Path(evidence["patch"]["path"]).read_text(encoding="utf-8")
             task_row = plan["task_rows"][trial["task_id"]]
-            episode = active_scorer(task_row, patch_text)
+            episode = _default_patch_scorer(task_row, patch_text)
             verified, gate_reason, reward, components, episode_metadata = _normalized_episode(
                 episode
             )
@@ -2794,7 +2797,6 @@ def run_command_suite(
     suite_id: str,
     *,
     resume: bool = False,
-    scorer: Callable[[Mapping[str, Any], str], Any] | None = None,
     on_progress: EvaluationProgressCallback | None = None,
     producer_factory: Callable[
         [Mapping[str, Any], Path, Mapping[str, Any]], Any
@@ -2961,7 +2963,6 @@ def run_command_suite(
                     project_root,
                     suite_id,
                     result_path,
-                    scorer=scorer,
                 )
                 completed += 1
                 _notify_progress(
@@ -3041,7 +3042,6 @@ def run_command_suite(
                 project_root,
                 suite_id,
                 result_path,
-                scorer=scorer,
             )
             completed += 1
             _notify_progress(

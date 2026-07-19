@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import io
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -395,7 +397,41 @@ def _scorer(_: dict, patch: str) -> dict:
     }
 
 
+def _ingest_with_scorer(
+    config: dict,
+    root: Path,
+    suite_id: str,
+    input_path: Path,
+    *,
+    scorer: Callable[[dict, str], dict] = _scorer,
+) -> dict:
+    """Keep verifier substitution inside the test harness, not production APIs."""
+
+    with patch("autotrainer.evaluation._default_patch_scorer", scorer):
+        return ingest_evaluation_results(config, root, suite_id, input_path)
+
+
+def _run_suite_with_scorer(
+    config: dict,
+    root: Path,
+    suite_id: str,
+    *,
+    scorer: Callable[[dict, str], dict] = _scorer,
+    **kwargs: object,
+) -> dict:
+    """Exercise orchestration with a cheap test verifier via private patching."""
+
+    with patch("autotrainer.evaluation._default_patch_scorer", scorer):
+        return run_command_suite(config, root, suite_id, **kwargs)
+
+
 class EvaluationPlanTests(unittest.TestCase):
+    def test_evidence_writers_do_not_accept_scorer_injection(self) -> None:
+        # Persisted records always carry the plan's first-party scorer hash, so
+        # neither evidence-writing entry point may accept a different callable.
+        self.assertNotIn("scorer", inspect.signature(ingest_evaluation_results).parameters)
+        self.assertNotIn("scorer", inspect.signature(run_command_suite).parameters)
+
     def test_plan_is_deterministic_paired_and_sensitive_to_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -929,11 +965,10 @@ class EvaluationWorkflowTests(unittest.TestCase):
                 def close(self) -> None:
                     closed.append(True)
 
-            outcome = run_command_suite(
+            outcome = _run_suite_with_scorer(
                 config,
                 root,
                 "model_benchmark",
-                scorer=_scorer,
                 producer_factory=lambda _config, _root, _plan: FakeProducer(),
             )
 
@@ -981,11 +1016,10 @@ class EvaluationWorkflowTests(unittest.TestCase):
                 return SimpleNamespace(stdout="runner output", stderr="", returncode=0)
 
             with patch("autotrainer.evaluation.subprocess.run", side_effect=command):
-                outcome = run_command_suite(
+                outcome = _run_suite_with_scorer(
                     config,
                     root,
                     "model_benchmark",
-                    scorer=_scorer,
                     on_progress=events.append,
                 )
 
@@ -1045,7 +1079,7 @@ class EvaluationWorkflowTests(unittest.TestCase):
 
             with patch("autotrainer.evaluation.subprocess.run", side_effect=command):
                 with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
-                    run_command_suite(
+                    _run_suite_with_scorer(
                         config,
                         root,
                         "model_benchmark",
@@ -1063,7 +1097,7 @@ class EvaluationWorkflowTests(unittest.TestCase):
                     / "patch.diff"
                 )
                 generated_patch.write_text("producer mutated its patch\n", encoding="utf-8")
-                outcome = run_command_suite(
+                outcome = _run_suite_with_scorer(
                     config,
                     root,
                     "model_benchmark",
@@ -1114,7 +1148,7 @@ class EvaluationWorkflowTests(unittest.TestCase):
             )
             with command_patch as command_mock:
                 with self.assertRaisesRegex(RuntimeError, "scorer failed"):
-                    run_command_suite(
+                    _run_suite_with_scorer(
                         config,
                         root,
                         "model_benchmark",
@@ -1138,12 +1172,11 @@ class EvaluationWorkflowTests(unittest.TestCase):
                 result_path.write_text(json.dumps(result), encoding="utf-8")
 
                 with self.assertRaisesRegex(EvaluationError, "changed planned field arm_id"):
-                    run_command_suite(
+                    _run_suite_with_scorer(
                         config,
                         root,
                         "model_benchmark",
                         resume=True,
-                        scorer=_scorer,
                     )
                 self.assertEqual(command_mock.call_count, 1)
 
@@ -1229,26 +1262,22 @@ class EvaluationWorkflowTests(unittest.TestCase):
             unknown["producer_score"] = 1.0
             unknown_path.write_text(json.dumps(unknown), encoding="utf-8")
             with self.assertRaisesRegex(EvaluationError, "unknown field"):
-                ingest_evaluation_results(
-                    config, root, trial["suite_id"], unknown_path, scorer=_scorer
-                )
+                _ingest_with_scorer(config, root, trial["suite_id"], unknown_path)
 
             mistyped_path = _result(plan, trial, root / "mistyped-result")
             mistyped = json.loads(mistyped_path.read_text(encoding="utf-8"))
             mistyped["usage"]["input_tokens"] = "ten"
             mistyped_path.write_text(json.dumps(mistyped), encoding="utf-8")
             with self.assertRaisesRegex(EvaluationError, "non-negative integer"):
-                ingest_evaluation_results(
-                    config, root, trial["suite_id"], mistyped_path, scorer=_scorer
-                )
+                _ingest_with_scorer(config, root, trial["suite_id"], mistyped_path)
 
             malformed_enum_path = _result(plan, trial, root / "malformed-enum-result")
             malformed_enum = json.loads(malformed_enum_path.read_text(encoding="utf-8"))
             malformed_enum["status"] = []
             malformed_enum_path.write_text(json.dumps(malformed_enum), encoding="utf-8")
             with self.assertRaisesRegex(EvaluationError, "status must be a non-empty string"):
-                ingest_evaluation_results(
-                    config, root, trial["suite_id"], malformed_enum_path, scorer=_scorer
+                _ingest_with_scorer(
+                    config, root, trial["suite_id"], malformed_enum_path
                 )
 
     def test_directory_ingest_ignores_json_evidence(self) -> None:
@@ -1266,8 +1295,8 @@ class EvaluationWorkflowTests(unittest.TestCase):
             result["output"]["transcript"] = transcript.name
             result_path.write_text(json.dumps(result), encoding="utf-8")
 
-            ingested = ingest_evaluation_results(
-                config, root, trial["suite_id"], incoming, scorer=_scorer
+            ingested = _ingest_with_scorer(
+                config, root, trial["suite_id"], incoming
             )
 
             self.assertEqual(ingested["ingested_count"], 1)
@@ -1281,12 +1310,11 @@ class EvaluationWorkflowTests(unittest.TestCase):
             for index, trial in enumerate(
                 trial for trial in plan["trials"] if trial["suite_id"] == "fable_ab"
             ):
-                ingest_evaluation_results(
+                _ingest_with_scorer(
                     config,
                     root,
                     "fable_ab",
                     _result(plan, trial, root / "fable-results" / str(index)),
-                    scorer=_scorer,
                 )
             exported = export_blind_review(config, root, "fable_ab", root / "review")
             blind_map = json.loads(Path(exported["sealed_map"]).read_text(encoding="utf-8"))
@@ -1419,12 +1447,11 @@ class EvaluationWorkflowTests(unittest.TestCase):
             plan, run_dir = load_current_plan(config, root)
             for index, trial in enumerate(plan["trials"]):
                 result_path = _result(plan, trial, root / "incoming-results" / str(index))
-                ingest_evaluation_results(
+                _ingest_with_scorer(
                     config,
                     root,
                     trial["suite_id"],
                     result_path,
-                    scorer=_scorer,
                 )
 
             review_export = export_blind_review(config, root, "fable_ab", root / "review")
@@ -1478,12 +1505,11 @@ class EvaluationWorkflowTests(unittest.TestCase):
             write_evaluation_plan(config, root)
             plan, run_dir = load_current_plan(config, root)
             trial = plan["trials"][0]
-            ingest_evaluation_results(
+            _ingest_with_scorer(
                 config,
                 root,
                 trial["suite_id"],
                 _result(plan, trial, root / "tamper-result"),
-                scorer=_scorer,
             )
             scored_path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
             scored = json.loads(scored_path.read_text(encoding="utf-8"))
@@ -1499,12 +1525,11 @@ class EvaluationWorkflowTests(unittest.TestCase):
             write_evaluation_plan(config, root)
             plan, run_dir = load_current_plan(config, root)
             trial = plan["trials"][0]
-            ingest_evaluation_results(
+            _ingest_with_scorer(
                 config,
                 root,
                 trial["suite_id"],
                 _result(plan, trial, root / "tamper-raw"),
-                scorer=_scorer,
             )
             raw_path = run_dir / "raw" / trial["suite_id"] / f"{trial['trial_id']}.json"
             raw = json.loads(raw_path.read_text(encoding="utf-8"))
@@ -1522,13 +1547,9 @@ class EvaluationWorkflowTests(unittest.TestCase):
             plan, _ = load_current_plan(config, root)
             trial = plan["trials"][0]
             result_path = _result(plan, trial, root / "result")
-            ingest_evaluation_results(
-                config, root, trial["suite_id"], result_path, scorer=_scorer
-            )
+            _ingest_with_scorer(config, root, trial["suite_id"], result_path)
             with self.assertRaisesRegex(EvaluationError, "duplicate result"):
-                ingest_evaluation_results(
-                    config, root, trial["suite_id"], result_path, scorer=_scorer
-                )
+                _ingest_with_scorer(config, root, trial["suite_id"], result_path)
             summary = build_evaluation_reports(config, root)
             suite = summary["suites"][trial["suite_id"]]
             self.assertLess(suite["completeness"]["rate"], 1.0)
