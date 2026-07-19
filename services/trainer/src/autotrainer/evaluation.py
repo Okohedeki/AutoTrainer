@@ -23,6 +23,12 @@ import tempfile
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .benchmark import compare_benchmark, render_benchmark_markdown
+from .integrity import (
+    IntegrityError,
+    resolve_container_image,
+    source_identity,
+    tree_identity,
+)
 
 
 SCHEMA_VERSION = 1
@@ -36,6 +42,11 @@ RESULT_COMPONENTS = (
 RESULT_ENVELOPE_NAMES = ("result.json",)
 RESULT_ENVELOPE_SUFFIX = ".result.json"
 MAX_RESULT_ARTIFACT_BYTES = 10 * 1024 * 1024
+# Two binary tasks can only produce a handful of paired outcomes and a
+# degenerate bootstrap interval. Five independent task groups is still small
+# enough for a local V1, while preventing repetitions or sibling variants from
+# being presented as credible independent evidence.
+MINIMUM_INDEPENDENT_TASK_GROUPS = 5
 
 
 class EvaluationError(ValueError):
@@ -314,6 +325,98 @@ def _relative_or_text(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _trusted_scorer_identity() -> dict[str, Any]:
+    """Freeze every first-party module that defines the trusted score.
+
+    The evaluator owns normalization in this module, while the frontend
+    environment owns patch replay and verifier execution. Task-manifest parsing
+    is included because it controls which commands and weights are honored.
+    """
+
+    from . import manifest as manifest_module
+    from .environments import frontend as frontend_module
+
+    try:
+        identity = source_identity(
+            (
+                ("autotrainer/evaluation.py", Path(__file__)),
+                ("autotrainer/environments/frontend.py", Path(frontend_module.__file__)),
+                ("autotrainer/manifest.py", Path(manifest_module.__file__)),
+            )
+        )
+    except IntegrityError as error:
+        raise EvaluationError(f"trusted scorer implementation cannot be frozen: {error}") from error
+    return {
+        "name": "autotrainer.frontend_patch_verifier",
+        **identity,
+        "components": list(RESULT_COMPONENTS),
+        "hard_gate": "task_tests_and_runtime_gates",
+    }
+
+
+def _task_root(row: Mapping[str, Any], project_root: Path) -> Path:
+    """Resolve the author-owned root used by relative verifier bundles."""
+
+    if row.get("task_root"):
+        return _resolve_local(project_root, row.get("task_root"), "evaluation task.task_root")
+    if row.get("manifest_path"):
+        return _resolve_local(
+            project_root, row.get("manifest_path"), "evaluation task.manifest_path"
+        ).parent
+    return project_root
+
+
+def _freeze_verifier_identity(
+    row: Mapping[str, Any], project_root: Path, task_id: str
+) -> dict[str, Any]:
+    """Bind a task to the exact hidden verifier files used by both arms."""
+
+    manifest = _mapping(row.get("manifest", {}), f"evaluation task {task_id}.manifest")
+    verifier = _mapping(
+        manifest.get("verifier", {}), f"evaluation task {task_id}.manifest.verifier"
+    )
+    bundle_value = verifier.get("bundle")
+    bundle = _resolve_local(
+        _task_root(row, project_root),
+        bundle_value,
+        f"evaluation task {task_id}.manifest.verifier.bundle",
+    )
+    try:
+        identity = tree_identity(bundle)
+    except IntegrityError as error:
+        raise EvaluationError(
+            f"evaluation task {task_id!r} verifier cannot be frozen: {error}"
+        ) from error
+    return {"path": _relative_or_text(bundle, project_root), **identity}
+
+
+def _freeze_environment(
+    config: Mapping[str, Any], task_rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Resolve the configured container tag once and reject task divergence."""
+
+    environment = _mapping(config.get("environment", {}), "environment")
+    backend = _text(environment.get("backend"), "environment.backend")
+    image = _text(environment.get("image"), "environment.image")
+    for index, row in enumerate(task_rows):
+        row_backend = _text(
+            row.get("environment_backend"),
+            f"evaluation task {index}.environment_backend",
+        )
+        row_image = _text(
+            row.get("environment_image"), f"evaluation task {index}.environment_image"
+        )
+        if row_backend != backend or row_image != image:
+            raise EvaluationError(
+                "compiled evaluation tasks do not use the configured container runtime; "
+                "re-run compilation before evaluation"
+            )
+    try:
+        return resolve_container_image(backend, image)
+    except IntegrityError as error:
+        raise EvaluationError(str(error)) from error
+
+
 def _read_jsonl(path: Path, field: str) -> list[dict[str, Any]]:
     if not path.is_file():
         raise EvaluationError(f"{field} does not exist; run `autotrainer compile` first: {path}")
@@ -354,6 +457,30 @@ def _training_dataset(config: Mapping[str, Any], root: Path) -> Path:
     return _resolve_local(root, configured, "grpo.dataset")
 
 
+def _sft_training_dataset(config: Mapping[str, Any], root: Path) -> Path | None:
+    """Return the supervised dataset whose repository exposure must be proven.
+
+    Projects that deliberately disable SFT have no supervised exposure. Once
+    SFT is enabled, omitting its compiled dataset is not treated as evidence
+    that the examples were harmless or unrelated to the final benchmark.
+    """
+
+    value = config.get("sft")
+    if value is None:
+        # Minimal library configurations written before SFT was added do not
+        # claim a supervised stage. Normal generated configs always declare it.
+        return None
+    sft = _mapping(value, "sft")
+    if sft.get("enabled", True) is False:
+        return None
+    configured = sft.get("dataset")
+    if not configured:
+        raise EvaluationError(
+            "sft.dataset is required to prove supervised repository holdout before evaluation"
+        )
+    return _resolve_local(root, configured, "sft.dataset")
+
+
 def _repository_keys(
     rows: Sequence[Mapping[str, Any]], field: str
 ) -> tuple[set[str], set[str]]:
@@ -387,6 +514,7 @@ def _compiler_repository_provenance(
     root: Path,
     training_dataset: Path,
     evaluation_dataset: Path,
+    sft_training_dataset: Path | None,
 ) -> dict[str, Any]:
     """Verify the compiler ledger for every declared repository exposure."""
 
@@ -407,10 +535,13 @@ def _compiler_repository_provenance(
     hashes = report.get("artifact_sha256")
     if not isinstance(artifacts, Mapping) or not isinstance(hashes, Mapping):
         raise EvaluationError("compiler provenance report lacks artifact paths or SHA-256 digests")
-    for key, expected_path in (
+    required_artifacts: list[tuple[str, Path]] = [
         ("rl_train", training_dataset),
         ("rl_evaluation", evaluation_dataset),
-    ):
+    ]
+    if sft_training_dataset is not None:
+        required_artifacts.append(("sft_train", sft_training_dataset))
+    for key, expected_path in required_artifacts:
         reported_value = artifacts.get(key)
         if not isinstance(reported_value, str) or not reported_value.strip():
             raise EvaluationError(f"compiler provenance report lacks {key} artifact")
@@ -495,6 +626,7 @@ def _compiler_repository_provenance(
         "sha256": _sha256_file(report_path),
         "fingerprint": report.get("fingerprint"),
         "repository_exposures": exposures,
+        "dataset_repository_provenance": report.get("dataset_repository_provenance"),
     }
 
 
@@ -556,12 +688,81 @@ def _resolved_arm(
         adapter_path = _resolve_local(
             root, adapter.get("path"), f"evaluation.arms.{arm_id}.adapter.path"
         )
+        adapter_config_path = adapter_path / "adapter_config.json"
+        try:
+            adapter_config = _mapping(
+                json.loads(adapter_config_path.read_text(encoding="utf-8")),
+                f"evaluation.arms.{arm_id}.adapter_config",
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise EvaluationError(
+                f"evaluation arm {arm_id!r} adapter metadata is unreadable: "
+                f"{adapter_config_path}: {error}"
+            ) from error
+        if adapter_config.get("base_model_name_or_path") != model_id:
+            raise EvaluationError(
+                f"evaluation arm {arm_id!r} adapter was trained for a different base model: "
+                f"{adapter_config.get('base_model_name_or_path')!r} != {model_id!r}"
+            )
+        adapter_revision = adapter_config.get("revision")
+        if adapter_revision is not None and adapter_revision != revision:
+            raise EvaluationError(
+                f"evaluation arm {arm_id!r} adapter base revision does not match the "
+                f"frozen model revision: {adapter_revision!r} != {revision!r}"
+            )
+
+        stage = _text(
+            adapter.get("stage", "grpo"), f"evaluation.arms.{arm_id}.adapter.stage"
+        )
+        recipe_path = adapter_path / "resolved_recipe.json"
+        training_provenance: dict[str, Any]
+        if recipe_path.is_file():
+            try:
+                recipe = _mapping(
+                    json.loads(recipe_path.read_text(encoding="utf-8")),
+                    f"evaluation.arms.{arm_id}.resolved_recipe",
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise EvaluationError(
+                    f"evaluation arm {arm_id!r} training provenance is unreadable: {error}"
+                ) from error
+            recipe_model = _mapping(
+                recipe.get("model", {}), f"evaluation.arms.{arm_id}.resolved_recipe.model"
+            )
+            if recipe_model.get("id") != model_id or recipe_model.get("revision") != revision:
+                raise EvaluationError(
+                    f"evaluation arm {arm_id!r} resolved recipe does not match its frozen base"
+                )
+            if recipe.get("stage") != stage:
+                raise EvaluationError(
+                    f"evaluation arm {arm_id!r} resolved recipe stage does not match "
+                    f"adapter.stage: {recipe.get('stage')!r} != {stage!r}"
+                )
+            training_provenance = {
+                "status": "verified",
+                "path": _relative_or_text(recipe_path, root),
+                "sha256": _sha256_file(recipe_path),
+                "stage": stage,
+                "model_id": model_id,
+                "model_revision": revision,
+            }
+        else:
+            # A reference adapter may come from elsewhere, but an AutoTrainer
+            # candidate cannot support a training-improvement claim without the
+            # exact recipe that this package writes at stage completion.
+            training_provenance = {"status": "unavailable", "stage": stage}
+            if resolved["role"] == "candidate":
+                raise EvaluationError(
+                    f"evaluation arm {arm_id!r} is a candidate adapter without "
+                    f"resolved_recipe.json; re-run training before evaluation"
+                )
         resolved["adapter"] = {
             "path": _relative_or_text(adapter_path, root),
-            "stage": _text(
-                adapter.get("stage", "grpo"), f"evaluation.arms.{arm_id}.adapter.stage"
-            ),
+            "stage": stage,
             "sha256": _sha256_tree(adapter_path),
+            "base_model_id": model_id,
+            "base_model_revision": adapter_revision,
+            "training_provenance": training_provenance,
         }
     return resolved
 
@@ -791,6 +992,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     # directly. Compare the two compiled datasets again at this execution gate.
     # IDs are labels; scanner-derived identity and exact revision are provenance.
     training_dataset_path = _training_dataset(config, root)
+    sft_training_dataset_path = _sft_training_dataset(config, root)
     dataset_path = _evaluation_dataset(config, root)
     grpo = _mapping(config.get("grpo", {}), "grpo")
     training_eval_value = grpo.get("eval_dataset")
@@ -804,6 +1006,11 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
                 "training validation cannot reuse the final benchmark"
             )
     training_rows = _read_jsonl(training_dataset_path, "compiled GRPO training dataset")
+    sft_training_rows = (
+        _read_jsonl(sft_training_dataset_path, "compiled SFT training dataset")
+        if sft_training_dataset_path is not None
+        else []
+    )
     task_rows = _read_jsonl(dataset_path, "compiled evaluation dataset")
     training_identities, training_revisions = _repository_keys(
         training_rows, "compiled GRPO training dataset"
@@ -811,11 +1018,59 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
     evaluation_identities, evaluation_revisions = _repository_keys(
         task_rows, "compiled evaluation dataset"
     )
+    sft_training_identities: set[str] = set()
+    sft_training_revisions: set[str] = set()
+    if sft_training_rows:
+        sft_training_identities, sft_training_revisions = _repository_keys(
+            sft_training_rows, "compiled SFT training dataset"
+        )
     compiler_provenance = _compiler_repository_provenance(
-        config, root, training_dataset_path, dataset_path
+        config,
+        root,
+        training_dataset_path,
+        dataset_path,
+        sft_training_dataset_path,
     )
-    shared_identities = sorted(training_identities & evaluation_identities)
-    shared_revisions = sorted(training_revisions & evaluation_revisions)
+    reported_dataset_provenance = compiler_provenance.get(
+        "dataset_repository_provenance"
+    )
+    if not isinstance(reported_dataset_provenance, Mapping):
+        raise EvaluationError(
+            "compiler provenance report lacks record-level dataset repository provenance; "
+            "re-run compilation"
+        )
+
+    def expected_record_provenance(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        descriptors: list[dict[str, Any]] = []
+        for index, row in enumerate(rows, 1):
+            manifest = row.get("manifest", {})
+            task = manifest.get("task", {}) if isinstance(manifest, Mapping) else {}
+            descriptors.append(
+                {
+                    "record": index,
+                    "source_id": row.get("source_id")
+                    or (task.get("sourceId") if isinstance(task, Mapping) else None),
+                    "repository_identity": row.get("source_repository_identity"),
+                    "revision": row.get("source_revision"),
+                }
+            )
+        return descriptors
+
+    expected_provenance = {
+        "rl_train": expected_record_provenance(training_rows),
+        "rl_evaluation": expected_record_provenance(task_rows),
+    }
+    if sft_training_dataset_path is not None:
+        expected_provenance["sft_train"] = expected_record_provenance(sft_training_rows)
+    for key, expected in expected_provenance.items():
+        if reported_dataset_provenance.get(key) != expected:
+            raise EvaluationError(
+                f"compiler record-level provenance does not match {key} dataset bytes"
+            )
+    all_training_identities = training_identities | sft_training_identities
+    all_training_revisions = training_revisions | sft_training_revisions
+    shared_identities = sorted(all_training_identities & evaluation_identities)
+    shared_revisions = sorted(all_training_revisions & evaluation_revisions)
     if shared_identities or shared_revisions:
         reasons: list[str] = []
         if shared_identities:
@@ -827,11 +1082,46 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             + " and ".join(reasons)
         )
 
+    # Per-row SFT provenance is only credible when the compiler's independently
+    # scanned repository ledger contains the same immutable identity/revision.
+    # This prevents a generic JSONL from self-asserting that it is leak-free.
+    if sft_training_rows:
+        ledger_pairs = {
+            (item["repository_identity"], item["commit"])
+            for item in compiler_provenance["repository_exposures"]
+            if item["partition"] == "train"
+        }
+        unattested = sorted(
+            {
+                (
+                    str(row.get("source_repository_identity", "")).strip(),
+                    str(row.get("source_revision", "")).strip().lower(),
+                )
+                for row in sft_training_rows
+            }
+            - ledger_pairs
+        )
+        if unattested:
+            formatted = ", ".join(f"{identity}@{revision}" for identity, revision in unattested)
+            raise EvaluationError(
+                "compiled SFT examples are not attested by the scanned training repository "
+                f"ledger: {formatted}"
+            )
+
+    container_image = _freeze_environment(config, task_rows)
+    scorer_identity = _trusted_scorer_identity()
+
     tasks: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(task_rows):
+        # Add trusted identities to a private copy. The compiled dataset remains
+        # byte-for-byte compiler evidence, while every executable row in the
+        # evaluation plan is pinned to the verifier and image it will use.
+        row = json.loads(json.dumps(row))
         task_id, manifest = _task_identity(row, index)
         if task_id in tasks:
             raise EvaluationError(f"duplicate evaluation task id: {task_id}")
+        row["verifier_identity"] = _freeze_verifier_identity(row, root, task_id)
+        row["environment_image_identity"] = container_image["runtime_reference"]
         tasks[task_id] = {
             "task_id": task_id,
             "group_id": manifest["task"].get("groupId"),
@@ -841,6 +1131,36 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             "fingerprint": f"sha256:{_digest(row)}",
             "row": row,
         }
+
+    group_ids = {
+        str(task["group_id"]).strip()
+        for task in tasks.values()
+        if str(task.get("group_id", "")).strip()
+    }
+    if len(group_ids) < MINIMUM_INDEPENDENT_TASK_GROUPS:
+        raise EvaluationError(
+            "evaluation requires at least "
+            f"{MINIMUM_INDEPENDENT_TASK_GROUPS} independent task groups; found {len(group_ids)}"
+        )
+    for suite_id, value in decisions.items():
+        if suite_id == "confidence":
+            continue
+        decision = _mapping(value, f"evaluation.decisions.{suite_id}")
+        minimum_tasks = decision.get("minimum_tasks")
+        if (
+            not isinstance(minimum_tasks, int)
+            or isinstance(minimum_tasks, bool)
+            or minimum_tasks < MINIMUM_INDEPENDENT_TASK_GROUPS
+        ):
+            raise EvaluationError(
+                f"evaluation.decisions.{suite_id}.minimum_tasks must be at least "
+                f"{MINIMUM_INDEPENDENT_TASK_GROUPS} independent task groups"
+            )
+        if minimum_tasks > len(group_ids):
+            raise EvaluationError(
+                f"evaluation.decisions.{suite_id}.minimum_tasks is {minimum_tasks}, but only "
+                f"{len(group_ids)} independent task groups were compiled"
+            )
 
     arms = {
         arm_id: _resolved_arm(arm_id, _mapping(value, f"evaluation.arms.{arm_id}"), config, root)
@@ -888,6 +1208,16 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             },
             "training_repository_identities": sorted(training_identities),
             "training_revisions": sorted(training_revisions),
+            "sft_training_source": (
+                {
+                    "path": _relative_or_text(sft_training_dataset_path, root),
+                    "sha256": _sha256_file(sft_training_dataset_path),
+                }
+                if sft_training_dataset_path is not None
+                else None
+            ),
+            "sft_training_repository_identities": sorted(sft_training_identities),
+            "sft_training_revisions": sorted(sft_training_revisions),
             "evaluation_repository_identities": sorted(evaluation_identities),
             "evaluation_revisions": sorted(evaluation_revisions),
             "compiler_provenance": compiler_provenance,
@@ -895,16 +1225,22 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         "repetitions": repetitions,
         "seeds": list(seeds),
         "environment": {
-            key: environment.get(key)
-            for key in (
-                "factory",
-                "backend",
-                "image",
-                "network",
-                "max_tool_output_chars",
-                "episode_timeout_seconds",
-            )
+            **{
+                key: environment.get(key)
+                for key in (
+                    "factory",
+                    "backend",
+                    "image",
+                    "network",
+                    "max_tool_output_chars",
+                    "episode_timeout_seconds",
+                )
+            },
+            # Human-readable tag remains visible, but execution consumes the
+            # immutable runtime_reference frozen alongside it.
+            "image_identity": container_image,
         },
+        "scoring": scorer_identity,
         "fairness": _frozen_fairness(fairness),
         "arms": arms,
         "suites": suites,
@@ -979,6 +1315,7 @@ _PLAN_DOCUMENT_FIELDS = frozenset(
         "repetitions",
         "seeds",
         "environment",
+        "scoring",
         "fairness",
         "arms",
         "suites",
@@ -1570,6 +1907,26 @@ def _zero_scored_result(
     }
 
 
+def _seal_scored_result(
+    scored: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    source_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a scored record to its raw envelope and trusted scorer bytes."""
+
+    sealed = dict(scored)
+    scoring = _mapping(plan.get("scoring"), "evaluation plan scoring identity")
+    sealed["integrity"] = {
+        "algorithm": "sha256",
+        "scorer_sha256": scoring.get("sha256"),
+        "source_result_sha256": f"sha256:{_digest(source_result)}",
+        # Hash the canonical scored payload before the self-describing seal is
+        # added. Reports recompute this value instead of trusting JSON fields.
+        "record_sha256": f"sha256:{_digest(scored)}",
+    }
+    return sealed
+
+
 def ingest_evaluation_results(
     config: Mapping[str, Any],
     project_root: Path,
@@ -1719,6 +2076,7 @@ def ingest_evaluation_results(
         # The pre-score receipt makes generation durable across verifier
         # failures. Publish the raw/scored pair only after trusted scoring, then
         # remove the receipt; a crash between these writes remains retryable.
+        scored = _seal_scored_result(scored, plan, result)
         _write_json(raw_path, result)
         _write_json(scored_path, scored)
         pending_path.unlink(missing_ok=True)
@@ -1731,11 +2089,157 @@ def ingest_evaluation_results(
     }
 
 
-def _load_scored(run_dir: Path) -> dict[str, dict[str, Any]]:
+def _validate_scored_result(
+    value: Any,
+    path: Path,
+    plan: Mapping[str, Any],
+    trial: Mapping[str, Any],
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Validate the canonical scored identity before it enters any report."""
+
+    scored = _exact_mapping(
+        value,
+        f"scored trial {path}",
+        required=(
+            "schema_version",
+            "plan_id",
+            "trial_id",
+            "suite_id",
+            "candidate_id",
+            "task_id",
+            "repetition",
+            "seed",
+            "status",
+            "hard_gate_passed",
+            "gate_reason",
+            "reward",
+            "components",
+            "metadata",
+            "integrity",
+        ),
+    )
+    expected_fields = {
+        "plan_id": trial["plan_id"],
+        "trial_id": trial["trial_id"],
+        "suite_id": trial["suite_id"],
+        "candidate_id": trial["arm_id"],
+        "task_id": trial["task_id"],
+        "repetition": trial["repetition"],
+        "seed": trial["seed"],
+    }
+    if path.stem != trial["trial_id"] or any(
+        scored.get(field) != expected for field, expected in expected_fields.items()
+    ):
+        raise EvaluationError(f"scored trial identity does not match its frozen trial: {path}")
+    if scored.get("schema_version") != SCHEMA_VERSION:
+        raise EvaluationError(f"scored trial schema version changed: {path}")
+
+    integrity = _exact_mapping(
+        scored.get("integrity"),
+        f"scored trial {path}.integrity",
+        required=(
+            "algorithm",
+            "scorer_sha256",
+            "source_result_sha256",
+            "record_sha256",
+        ),
+    )
+    if integrity.get("algorithm") != "sha256":
+        raise EvaluationError(f"scored trial uses an unsupported integrity algorithm: {path}")
+    expected_scorer = _mapping(plan.get("scoring"), "evaluation plan scoring").get(
+        "sha256"
+    )
+    if integrity.get("scorer_sha256") != expected_scorer:
+        raise EvaluationError(f"scored trial does not name the frozen scorer: {path}")
+    unsealed = {key: item for key, item in scored.items() if key != "integrity"}
+    if integrity.get("record_sha256") != f"sha256:{_digest(unsealed)}":
+        raise EvaluationError(f"scored trial content digest does not match: {path}")
+
+    raw_path = run_dir / "raw" / trial["suite_id"] / f"{trial['trial_id']}.json"
+    try:
+        raw = _validate_result_envelope(
+            json.loads(raw_path.read_text(encoding="utf-8")), f"raw result {raw_path}"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(f"raw result evidence is unreadable: {raw_path}: {error}") from error
+    if integrity.get("source_result_sha256") != f"sha256:{_digest(raw)}":
+        raise EvaluationError(f"raw result no longer matches its scored trial: {path}")
+    for field, expected in {
+        "plan_id": trial["plan_id"],
+        "trial_id": trial["trial_id"],
+        "suite_id": trial["suite_id"],
+        "arm_id": trial["arm_id"],
+        "task_id": trial["task_id"],
+        "repetition": trial["repetition"],
+        "seed": trial["seed"],
+    }.items():
+        if raw.get(field) != expected:
+            raise EvaluationError(f"raw result changed frozen field {field}: {raw_path}")
+
+    metadata = _mapping(scored.get("metadata"), f"scored trial {path}.metadata")
+    if metadata.get("fairness") != _producer_fairness(raw, trial, plan):
+        raise EvaluationError(f"scored fairness evidence is not canonical: {path}")
+    if metadata.get("usage") != raw.get("usage"):
+        raise EvaluationError(f"scored usage evidence does not match the raw result: {path}")
+    evidence = _mapping(metadata.get("evidence", {}), f"scored trial {path}.evidence")
+    evidence_root = (run_dir / "evidence").resolve()
+    for field, descriptor_value in evidence.items():
+        if field not in {"patch", "transcript", "review_artifact"}:
+            raise EvaluationError(f"scored trial has unknown evidence field {field}: {path}")
+        descriptor = _exact_mapping(
+            descriptor_value,
+            f"scored trial {path}.evidence.{field}",
+            required=("path", "sha256", "bytes"),
+        )
+        target = Path(_text(descriptor.get("path"), f"evidence.{field}.path"))
+        try:
+            target.resolve().relative_to(evidence_root)
+        except ValueError as error:
+            raise EvaluationError(f"scored evidence escaped its content store: {target}") from error
+        digest = _text(descriptor.get("sha256"), f"evidence.{field}.sha256")
+        size = _schema_non_negative_integer(descriptor.get("bytes"), f"evidence.{field}.bytes")
+        _verify_evidence_target(target, digest, size)
+
+    reward = scored.get("reward")
+    if (
+        not isinstance(reward, (int, float))
+        or isinstance(reward, bool)
+        or not math.isfinite(float(reward))
+        or not 0 <= float(reward) <= 1
+    ):
+        raise EvaluationError(f"scored trial reward is invalid: {path}")
+    components = _exact_mapping(
+        scored.get("components"),
+        f"scored trial {path}.components",
+        required=RESULT_COMPONENTS,
+    )
+    if any(
+        not isinstance(component, (int, float))
+        or isinstance(component, bool)
+        or not math.isfinite(float(component))
+        or not 0 <= float(component) <= 1
+        for component in components.values()
+    ):
+        raise EvaluationError(f"scored trial components are invalid: {path}")
+    hard_gate_passed = scored.get("hard_gate_passed")
+    if not isinstance(hard_gate_passed, bool):
+        raise EvaluationError(f"scored trial hard gate must be boolean: {path}")
+    if not hard_gate_passed and float(reward) != 0.0:
+        raise EvaluationError(f"failed hard gate retained non-zero reward: {path}")
+    if hard_gate_passed and float(components["task_tests"]) < 1.0:
+        raise EvaluationError(f"passed hard gate lacks complete task tests: {path}")
+    return scored
+
+
+def _load_scored(
+    plan: Mapping[str, Any], run_dir: Path
+) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     directory = run_dir / "scored-trials"
     if not directory.exists():
         return results
+    trials = {trial["trial_id"]: trial for trial in plan.get("trials", [])}
     for path in sorted(directory.glob("*.json")):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -1743,7 +2247,12 @@ def _load_scored(run_dir: Path) -> dict[str, dict[str, Any]]:
             raise EvaluationError(f"could not read scored trial {path}: {error}") from error
         if not isinstance(value, dict) or value.get("trial_id") in results:
             raise EvaluationError(f"invalid or duplicate scored trial: {path}")
-        results[value["trial_id"]] = value
+        trial = trials.get(value.get("trial_id"))
+        if trial is None:
+            raise EvaluationError(f"scored evidence refers to an unknown trial: {path}")
+        results[value["trial_id"]] = _validate_scored_result(
+            value, path, plan, trial, run_dir
+        )
     return results
 
 
@@ -1842,16 +2351,26 @@ def _paired_delta(
     control: str,
     plan_id: str,
     confidence: float,
+    task_groups: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     by_arm_task: dict[tuple[str, str], list[float]] = {}
     for run in payload["runs"]:
         key = (run["candidate_id"], run["task_id"])
         by_arm_task.setdefault(key, []).append(1.0 if run["hard_gate_passed"] else 0.0)
     tasks = sorted({run["task_id"] for run in payload["runs"]})
-    differences = [
-        sum(by_arm_task[(candidate, task)]) / len(by_arm_task[(candidate, task)])
+    task_differences = {
+        task: sum(by_arm_task[(candidate, task)]) / len(by_arm_task[(candidate, task)])
         - sum(by_arm_task[(control, task)]) / len(by_arm_task[(control, task)])
         for task in tasks
+    }
+    groups: dict[str, list[float]] = {}
+    for task, difference in task_differences.items():
+        group_id = str((task_groups or {}).get(task, task))
+        groups.setdefault(group_id, []).append(difference)
+    # Related variants are one independent observation. Average within group
+    # before bootstrapping so adding sibling tasks cannot narrow confidence.
+    differences = [
+        sum(groups[group_id]) / len(groups[group_id]) for group_id in sorted(groups)
     ]
     point = sum(differences) / len(differences)
     interval = None
@@ -1883,7 +2402,7 @@ def _paired_delta(
             ),
             "lower_quantile": round(tail_probability, 6),
             "upper_quantile": round(1.0 - tail_probability, 6),
-            "method": "task-clustered deterministic bootstrap",
+            "method": "independent-task-group deterministic bootstrap",
             "bootstrap_samples": bootstrap_samples,
             "quantile_method": "R-7 linear interpolation",
             "seed": seed,
@@ -1893,6 +2412,7 @@ def _paired_delta(
         "control": control,
         "metric": "verified_task_success",
         "task_count": len(tasks),
+        "independent_task_group_count": len(differences),
         "delta": round(point, 6),
         "confidence_interval": interval,
     }
@@ -1941,6 +2461,12 @@ def _review_summary(plan: Mapping[str, Any], run_dir: Path, suite_id: str) -> di
             if trial["suite_id"] == suite_id
         }
     )
+    task_group_count = len(
+        {
+            task.get("group_id") or task.get("task_id")
+            for task in plan.get("tasks", [])
+        }
+    )
     # A failed result is evidence against a preference claim, not an abstention.
     denominator = sum(counts.values())
     rate = (
@@ -1954,6 +2480,7 @@ def _review_summary(plan: Mapping[str, Any], run_dir: Path, suite_id: str) -> di
         "required_reviewers_per_pair": required,
         "pair_count": len(blind_map["pairs"]),
         "task_count": task_count,
+        "independent_task_group_count": task_group_count,
         "complete": complete,
         "counts": counts,
         "blind_preference_rate": round(rate, 6),
@@ -1966,7 +2493,7 @@ def build_evaluation_reports(
     """Report each suite separately and gate every verified improvement claim."""
 
     plan, run_dir = load_current_plan(config, project_root)
-    scored = _load_scored(run_dir)
+    scored = _load_scored(plan, run_dir)
     suite_reports: dict[str, Any] = {}
     all_verified = True
     confidence = float(
@@ -2026,7 +2553,7 @@ def build_evaluation_reports(
                 and review["complete"]
                 and completeness["rate"] == 1.0
                 and completeness["fairness_passed"]
-                and review["task_count"] >= minimum_tasks
+                and review["independent_task_group_count"] >= minimum_tasks
                 and observed
             )
             decision = {
@@ -2044,6 +2571,10 @@ def build_evaluation_reports(
                 control,
                 plan["plan_id"],
                 confidence,
+                {
+                    str(task["task_id"]): str(task.get("group_id") or task["task_id"])
+                    for task in plan.get("tasks", [])
+                },
             )
             threshold = float(decision_config.get("minimum_delta", 0.0))
             observed = delta["delta"] > threshold
@@ -2051,7 +2582,7 @@ def build_evaluation_reports(
             verified = bool(
                 completeness["rate"] == 1.0
                 and completeness["fairness_passed"]
-                and delta["task_count"] >= minimum_tasks
+                and delta["independent_task_group_count"] >= minimum_tasks
                 and interval is not None
                 and interval["low"] > threshold
             )
@@ -2114,7 +2645,7 @@ def export_blind_review(
         raise EvaluationError(
             f"evaluation suite {suite_id!r} is deferred: {blockers or 'runner is not pinned'}"
         )
-    scored = _load_scored(run_dir)
+    scored = _load_scored(plan, run_dir)
     by_key: dict[tuple[str, int, int], dict[str, Mapping[str, Any]]] = {}
     for trial in plan["trials"]:
         if trial["suite_id"] != suite_id:

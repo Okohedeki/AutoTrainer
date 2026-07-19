@@ -434,7 +434,7 @@
             "control": { "type": "string", "minLength": 1 },
             "metric": { "const": "verified_task_success" },
             "minimum_delta": { "type": "number", "minimum": -1, "maximum": 1 },
-            "minimum_tasks": { "type": "integer", "minimum": 2 }
+            "minimum_tasks": { "type": "integer", "minimum": 5 }
           }
         },
         "fable_ab": {
@@ -446,7 +446,7 @@
             "control": { "type": "string", "minLength": 1 },
             "metric": { "const": "blind_preference_rate" },
             "minimum_rate": { "type": "number", "minimum": 0, "maximum": 1 },
-            "minimum_tasks": { "type": "integer", "minimum": 2 }
+            "minimum_tasks": { "type": "integer", "minimum": 5 }
           }
         }
       }

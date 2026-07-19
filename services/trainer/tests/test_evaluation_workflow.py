@@ -45,9 +45,13 @@ TRAIN_REPOSITORY_IDENTITY = "sha256:" + "1" * 64
 EVALUATION_REPOSITORY_IDENTITY = "sha256:" + "2" * 64
 TRAIN_SOURCE_REVISION = "c" * 40
 EVALUATION_SOURCE_REVISION = "d" * 40
+IMAGE_ID = "sha256:" + "e" * 64
+EVALUATION_TASK_IDS = ("checkout", "pricing", "navigation", "account", "search")
 
 
-def _task(task_id: str, *, split: str = "evaluation") -> dict:
+def _task(
+    task_id: str, *, split: str = "evaluation", root: Path | None = None
+) -> dict:
     source_id = "training-source" if split == "train" else f"source-{task_id}"
     manifest = {
         "version": "1.0",
@@ -87,7 +91,7 @@ def _task(task_id: str, *, split: str = "evaluation") -> dict:
             "patchQuality": 0.10,
         },
     }
-    return {
+    row = {
         "task_id": task_id,
         "manifest": manifest,
         "source_path": f"sources/{task_id}",
@@ -100,8 +104,31 @@ def _task(task_id: str, *, split: str = "evaluation") -> dict:
             TRAIN_SOURCE_REVISION if split == "train" else EVALUATION_SOURCE_REVISION
         ),
         "environment_backend": "docker",
-        "environment_image": "autotrainer/frontend-runtime:0.1",
+        "environment_image": IMAGE_ID,
     }
+    if root is not None:
+        task_root = root / "task-packs" / task_id
+        verifier = task_root / "hidden" / "verifier"
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "verify.mjs").write_text(
+            f"// frozen verifier fixture for {task_id}\n", encoding="utf-8"
+        )
+        row["task_root"] = str(task_root)
+    return row
+
+
+def _dataset_provenance(path: Path) -> list[dict]:
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [
+        {
+            "record": index,
+            "source_id": row.get("source_id")
+            or row.get("manifest", {}).get("task", {}).get("sourceId"),
+            "repository_identity": row.get("source_repository_identity"),
+            "revision": row.get("source_revision"),
+        }
+        for index, row in enumerate(rows, 1)
+    ]
 
 
 def _write_compile_provenance(
@@ -110,18 +137,33 @@ def _write_compile_provenance(
     compiled = root / ".artifacts" / "compiled"
     training = compiled / "rl" / "train.jsonl"
     evaluation = compiled / "rl" / "evaluation.jsonl"
+    artifacts = {
+        "rl_train": str(training),
+        "rl_evaluation": str(evaluation),
+    }
+    artifact_sha256 = {
+        "rl_train": hashlib.sha256(training.read_bytes()).hexdigest(),
+        "rl_evaluation": hashlib.sha256(evaluation.read_bytes()).hexdigest(),
+    }
+    dataset_repository_provenance = {
+        "rl_train": _dataset_provenance(training),
+        "rl_evaluation": _dataset_provenance(evaluation),
+    }
+    sft_training = compiled / "sft" / "train.jsonl"
+    if sft_training.is_file():
+        artifacts["sft_train"] = str(sft_training)
+        artifact_sha256["sft_train"] = hashlib.sha256(
+            sft_training.read_bytes()
+        ).hexdigest()
+        dataset_repository_provenance["sft_train"] = _dataset_provenance(
+            sft_training
+        )
     report = {
         "schema_version": 1,
         "fingerprint": "fixture-compile-fingerprint",
         "errors": [],
-        "artifacts": {
-            "rl_train": str(training),
-            "rl_evaluation": str(evaluation),
-        },
-        "artifact_sha256": {
-            "rl_train": hashlib.sha256(training.read_bytes()).hexdigest(),
-            "rl_evaluation": hashlib.sha256(evaluation.read_bytes()).hexdigest(),
-        },
+        "artifacts": artifacts,
+        "artifact_sha256": artifact_sha256,
         "repository_exposures": exposures
         or [
             {
@@ -137,6 +179,7 @@ def _write_compile_provenance(
                 "commit": EVALUATION_SOURCE_REVISION,
             },
         ],
+        "dataset_repository_provenance": dataset_repository_provenance,
     }
     destination = compiled / "compile-report.json"
     destination.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
@@ -151,15 +194,28 @@ def _config(root: Path) -> dict:
         encoding="utf-8",
     )
     (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
+    (adapter / "resolved_recipe.json").write_text(
+        json.dumps(
+            {
+                "stage": "grpo",
+                "model": {"id": "Qwen/Qwen3.5-9B", "revision": REVISION},
+            }
+        ),
+        encoding="utf-8",
+    )
     dataset = root / ".artifacts" / "compiled" / "rl" / "evaluation.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text(
-        "".join(json.dumps(_task(task_id)) + "\n" for task_id in ("checkout", "pricing")),
+        "".join(
+            json.dumps(_task(task_id, root=root)) + "\n"
+            for task_id in EVALUATION_TASK_IDS
+        ),
         encoding="utf-8",
     )
     training_dataset = root / ".artifacts" / "compiled" / "rl" / "train.jsonl"
     training_dataset.write_text(
-        json.dumps(_task("training", split="train")) + "\n", encoding="utf-8"
+        json.dumps(_task("training", split="train", root=root)) + "\n",
+        encoding="utf-8",
     )
     _write_compile_provenance(root)
     arms = {
@@ -225,7 +281,7 @@ def _config(root: Path) -> dict:
         "environment": {
             "factory": "autotrainer.environments.frontend:FrontendEnvironment",
             "backend": "docker",
-            "image": "autotrainer/frontend-runtime:0.1",
+            "image": IMAGE_ID,
             "network": "none",
             "max_tool_output_chars": 12000,
             "episode_timeout_seconds": 900,
@@ -264,14 +320,14 @@ def _config(root: Path) -> dict:
                     "control": "reference_9b",
                     "metric": "verified_task_success",
                     "minimum_delta": 0.0,
-                    "minimum_tasks": 2,
+                    "minimum_tasks": 5,
                 },
                 "fable_ab": {
                     "candidate": "autotrainer",
                     "control": "base_fable",
                     "metric": "blind_preference_rate",
                     "minimum_rate": 0.5,
-                    "minimum_tasks": 2,
+                    "minimum_tasks": 5,
                 },
             },
         },
@@ -352,13 +408,129 @@ class EvaluationPlanTests(unittest.TestCase):
                 first["holdout"]["training_repository_identities"],
                 [TRAIN_REPOSITORY_IDENTITY],
             )
-            self.assertEqual(len(first["trials"]), 16)
-            self.assertEqual(len({trial["trial_id"] for trial in first["trials"]}), 16)
+            self.assertEqual(len(first["trials"]), 40)
+            self.assertEqual(len({trial["trial_id"] for trial in first["trials"]}), 40)
             changed = json.loads(json.dumps(config))
-            changed["environment"]["image"] = "autotrainer/frontend-runtime:0.2"
+            changed["environment"]["image"] = "sha256:" + "f" * 64
+            dataset = root / ".artifacts" / "compiled" / "rl" / "evaluation.jsonl"
+            rows = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                row["environment_image"] = changed["environment"]["image"]
+            dataset.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            _write_compile_provenance(root)
             self.assertNotEqual(
                 first["plan_id"], build_evaluation_plan(changed, root)["plan_id"]
             )
+
+    def test_plan_freezes_scorer_verifier_and_container_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            written = write_evaluation_plan(config, root)
+
+            self.assertRegex(written["scoring"]["sha256"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(
+                written["environment"]["image_identity"]["runtime_reference"],
+                IMAGE_ID,
+            )
+            verifier_identity = written["task_rows"]["checkout"]["verifier_identity"]
+            self.assertRegex(verifier_identity["sha256"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(verifier_identity["files"][0]["path"], "verify.mjs")
+
+            verifier_path = (
+                root / "task-packs" / "checkout" / "hidden" / "verifier" / "verify.mjs"
+            )
+            verifier_path.write_text("// changed after plan\n", encoding="utf-8")
+            with self.assertRaisesRegex(EvaluationError, "immutable"):
+                load_current_plan(config, root)
+
+    def test_mutable_container_tag_is_resolved_without_a_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            tag = "autotrainer/frontend-runtime:test"
+            config["environment"]["image"] = tag
+            dataset = root / ".artifacts" / "compiled" / "rl" / "evaluation.jsonl"
+            rows = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                row["environment_image"] = tag
+            dataset.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            _write_compile_provenance(root)
+
+            inspected_id = "sha256:" + "9" * 64
+            completed = SimpleNamespace(returncode=0, stdout=inspected_id + "\n", stderr="")
+            with patch("autotrainer.integrity.subprocess.run", return_value=completed) as inspect:
+                plan = build_evaluation_plan(config, root)
+
+            self.assertEqual(
+                plan["environment"]["image_identity"]["runtime_reference"], inspected_id
+            )
+            argv = inspect.call_args.args[0]
+            self.assertEqual(argv[:3], ["docker", "image", "inspect"])
+            self.assertNotIn("pull", argv)
+
+    def test_candidate_adapter_requires_matching_base_and_training_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            adapter_config_path = root / "adapter" / "adapter_config.json"
+            adapter_config = json.loads(adapter_config_path.read_text(encoding="utf-8"))
+            adapter_config["base_model_name_or_path"] = "wrong/base"
+            adapter_config_path.write_text(json.dumps(adapter_config), encoding="utf-8")
+            with self.assertRaisesRegex(EvaluationError, "different base model"):
+                build_evaluation_plan(config, root)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            (root / "adapter" / "resolved_recipe.json").unlink()
+            with self.assertRaisesRegex(EvaluationError, "without resolved_recipe"):
+                build_evaluation_plan(config, root)
+
+    def test_sft_holdout_requires_attested_record_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            sft_dataset = root / ".artifacts" / "compiled" / "sft" / "train.jsonl"
+            sft_dataset.parent.mkdir(parents=True)
+            sft_dataset.write_text(
+                json.dumps(
+                    {
+                        "prompt": [{"role": "user", "content": "Improve checkout"}],
+                        "completion": [{"role": "assistant", "content": "Use this patch"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config["sft"] = {
+                "enabled": True,
+                "dataset": ".artifacts/compiled/sft/train.jsonl",
+            }
+            _write_compile_provenance(root)
+
+            with self.assertRaisesRegex(EvaluationError, "lacks source_repository_identity"):
+                build_evaluation_plan(config, root)
+
+    def test_related_task_variants_do_not_count_as_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            dataset = root / ".artifacts" / "compiled" / "rl" / "evaluation.jsonl"
+            rows = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                row["manifest"]["task"]["groupId"] = "one-related-family"
+            dataset.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            _write_compile_provenance(root)
+
+            with self.assertRaisesRegex(EvaluationError, "independent task groups"):
+                build_evaluation_plan(config, root)
 
     def test_default_fable_placeholders_defer_only_the_external_suite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -602,7 +774,7 @@ class EvaluationPlanTests(unittest.TestCase):
             write_evaluation_plan(config, root)
             output = root / "export"
             manifest = export_evaluation_suite(config, root, "fable_ab", output)
-            self.assertEqual(manifest["request_count"], 8)
+            self.assertEqual(manifest["request_count"], 20)
             request = json.loads(Path(manifest["requests"][0]).read_text(encoding="utf-8"))
             self.assertNotIn("verifier", request["task"]["manifest"])
             self.assertNotIn("rewards", request["task"]["manifest"])
@@ -620,8 +792,10 @@ class EvaluationPlanTests(unittest.TestCase):
             root = Path(temporary_directory)
             config = default_config(revision=REVISION)
             config["project"]["artifact_dir"] = ".artifacts"
+            config["sft"]["enabled"] = False
             config["grpo"]["dataset"] = ".artifacts/compiled/rl/train.jsonl"
             config["evaluation"]["dataset"] = ".artifacts/compiled/rl/evaluation.jsonl"
+            config["environment"]["image"] = IMAGE_ID
             config["evaluation"]["arms"]["reference_9b"]["model"]["id"] = "Qwen/Qwen3.5-9B"
             config["evaluation"]["arms"]["reference_9b"]["model"]["revision"] = REVISION
             fable_runner = config["evaluation"]["suites"]["fable_ab"]["runner"]
@@ -629,13 +803,32 @@ class EvaluationPlanTests(unittest.TestCase):
             fable_runner["orchestration_sha256"] = ORCHESTRATION
             adapter = root / ".autotrainer" / "checkpoints" / "grpo"
             adapter.mkdir(parents=True)
-            (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+            (adapter / "adapter_config.json").write_text(
+                json.dumps({"base_model_name_or_path": "Qwen/Qwen3.5-9B"}),
+                encoding="utf-8",
+            )
             (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
+            (adapter / "resolved_recipe.json").write_text(
+                json.dumps(
+                    {
+                        "stage": "grpo",
+                        "model": {"id": "Qwen/Qwen3.5-9B", "revision": REVISION},
+                    }
+                ),
+                encoding="utf-8",
+            )
             dataset = root / ".artifacts" / "compiled" / "rl" / "evaluation.jsonl"
             dataset.parent.mkdir(parents=True)
-            dataset.write_text(json.dumps(_task("cli-task")) + "\n", encoding="utf-8")
+            dataset.write_text(
+                "".join(
+                    json.dumps(_task(task_id, root=root)) + "\n"
+                    for task_id in EVALUATION_TASK_IDS
+                ),
+                encoding="utf-8",
+            )
             (dataset.parent / "train.jsonl").write_text(
-                json.dumps(_task("training", split="train")) + "\n", encoding="utf-8"
+                json.dumps(_task("training", split="train", root=root)) + "\n",
+                encoding="utf-8",
             )
             _write_compile_provenance(root)
             config_path = write_config(root / "autotrainer.yaml", config)
@@ -750,9 +943,9 @@ class EvaluationWorkflowTests(unittest.TestCase):
             self.assertEqual(preflighted, suite_arms)
             self.assertEqual(
                 produced,
-                [suite_arms[0]] * 4 + [suite_arms[1]] * 4,
+                [suite_arms[0]] * 10 + [suite_arms[1]] * 10,
             )
-            self.assertEqual(outcome["completed"], 8)
+            self.assertEqual(outcome["completed"], 20)
             self.assertEqual(closed, [True])
 
     def test_command_suite_reports_only_observed_trial_boundaries(self) -> None:
@@ -792,16 +985,16 @@ class EvaluationWorkflowTests(unittest.TestCase):
                     on_progress=events.append,
                 )
 
-            self.assertEqual(outcome["total"], 8)
-            self.assertEqual(outcome["completed"], 8)
+            self.assertEqual(outcome["total"], 20)
+            self.assertEqual(outcome["completed"], 20)
             self.assertEqual(events[0]["phase"], "queued")
             self.assertEqual(events[-1]["phase"], "completed")
-            self.assertEqual(events[-1]["completed"], 8)
+            self.assertEqual(events[-1]["completed"], 20)
             self.assertEqual(
-                [event["phase"] for event in events].count("generating"), 8
+                [event["phase"] for event in events].count("generating"), 20
             )
             self.assertEqual(
-                [event["phase"] for event in events].count("verifying"), 8
+                [event["phase"] for event in events].count("verifying"), 20
             )
             # Opaque generation exposes no fabricated fractional percentage;
             # progress advances only after a trusted scored artifact exists.
@@ -1203,7 +1396,7 @@ class EvaluationWorkflowTests(unittest.TestCase):
             summary = _review_summary(plan, run_dir, "fable_ab")
             self.assertFalse(summary["complete"])
 
-    def test_fable_minimum_tasks_counts_unique_tasks_not_repetitions(self) -> None:
+    def test_plan_rejects_repetitions_of_too_few_independent_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             config = _config(root)
@@ -1211,47 +1404,8 @@ class EvaluationWorkflowTests(unittest.TestCase):
             only_task = dataset.read_text(encoding="utf-8").splitlines()[0]
             dataset.write_text(only_task + "\n", encoding="utf-8")
             _write_compile_provenance(root)
-            write_evaluation_plan(config, root)
-            plan, _ = load_current_plan(config, root)
-            for index, trial in enumerate(plan["trials"]):
-                ingest_evaluation_results(
-                    config,
-                    root,
-                    trial["suite_id"],
-                    _result(plan, trial, root / "one-task-results" / str(index)),
-                    scorer=_scorer,
-                )
-            exported = export_blind_review(config, root, "fable_ab", root / "review")
-            blind_map = json.loads(Path(exported["sealed_map"]).read_text(encoding="utf-8"))
-            reviews = root / "reviews.jsonl"
-            reviews.write_text(
-                "".join(
-                    json.dumps(
-                        {
-                            "pair_id": pair_id,
-                            "reviewer_id": "reviewer-1",
-                            "choice": (
-                                "left"
-                                if mapping["left"] == "autotrainer"
-                                else "right"
-                            ),
-                        }
-                    )
-                    + "\n"
-                    for pair_id, mapping in blind_map["pairs"].items()
-                ),
-                encoding="utf-8",
-            )
-            import_blind_reviews(config, root, "fable_ab", reviews)
-
-            decision = build_evaluation_reports(config, root)["suites"]["fable_ab"][
-                "decision"
-            ]
-
-            self.assertTrue(decision["observed_better"])
-            self.assertEqual(decision["review"]["task_count"], 1)
-            self.assertEqual(decision["review"]["pair_count"], 2)
-            self.assertFalse(decision["verified_better"])
+            with self.assertRaisesRegex(EvaluationError, "independent task groups"):
+                write_evaluation_plan(config, root)
 
     def test_ingest_report_and_blind_review_complete_both_v1_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1312,6 +1466,49 @@ class EvaluationWorkflowTests(unittest.TestCase):
             manifest = json.loads(Path(package["manifest"]).read_text(encoding="utf-8"))
             self.assertTrue(manifest["v1_success_criteria_verified"])
             self.assertEqual(manifest["candidate_id"], "autotrainer")
+
+    def test_reports_reject_modified_scored_or_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            write_evaluation_plan(config, root)
+            plan, run_dir = load_current_plan(config, root)
+            trial = plan["trials"][0]
+            ingest_evaluation_results(
+                config,
+                root,
+                trial["suite_id"],
+                _result(plan, trial, root / "tamper-result"),
+                scorer=_scorer,
+            )
+            scored_path = run_dir / "scored-trials" / f"{trial['trial_id']}.json"
+            scored = json.loads(scored_path.read_text(encoding="utf-8"))
+            scored["reward"] = 0.123
+            scored_path.write_text(json.dumps(scored), encoding="utf-8")
+
+            with self.assertRaisesRegex(EvaluationError, "content digest"):
+                build_evaluation_reports(config, root)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            write_evaluation_plan(config, root)
+            plan, run_dir = load_current_plan(config, root)
+            trial = plan["trials"][0]
+            ingest_evaluation_results(
+                config,
+                root,
+                trial["suite_id"],
+                _result(plan, trial, root / "tamper-raw"),
+                scorer=_scorer,
+            )
+            raw_path = run_dir / "raw" / trial["suite_id"] / f"{trial['trial_id']}.json"
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            raw["usage"]["tool_calls"] = 999
+            raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+            with self.assertRaisesRegex(EvaluationError, "raw result no longer matches"):
+                build_evaluation_reports(config, root)
 
     def test_missing_trials_remain_failures_and_duplicate_ingest_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

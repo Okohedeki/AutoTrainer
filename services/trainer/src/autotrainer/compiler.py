@@ -253,6 +253,38 @@ def _fingerprint(
     ).hexdigest()
 
 
+def _dataset_repository_provenance(
+    sft_records: Mapping[str, list[Mapping[str, Any]]],
+    rl_records: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Project record-level repository claims into the compiler report.
+
+    The compiler does not invent provenance for hand-authored SFT JSONL. A
+    missing identity remains explicit here so evaluation can fail closed rather
+    than silently treating an unknown demonstration as leak-free.
+    """
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    for kind, partitions in (("sft", sft_records), ("rl", rl_records)):
+        for partition, records in partitions.items():
+            key = f"{kind}_{partition}"
+            result[key] = [
+                {
+                    "record": index,
+                    "source_id": row.get("source_id")
+                    or (
+                        row.get("manifest", {}).get("task", {}).get("sourceId")
+                        if isinstance(row.get("manifest"), Mapping)
+                        else None
+                    ),
+                    "repository_identity": row.get("source_repository_identity"),
+                    "revision": row.get("source_revision"),
+                }
+                for index, row in enumerate(records, 1)
+            ]
+    return result
+
+
 def _report(
     *,
     sft_records: Mapping[str, list[Mapping[str, Any]]],
@@ -281,6 +313,9 @@ def _report(
         # This is the compiler-frozen exposure ledger used by direct evaluation.
         # IDs aid diagnostics; identity and commit enforce the holdout boundary.
         "repository_exposures": _repository_exposures(repository_locks),
+        "dataset_repository_provenance": _dataset_repository_provenance(
+            sft_records, rl_records
+        ),
         "errors": sorted(set(errors)),
         "warnings": sorted(set(warnings)),
     }

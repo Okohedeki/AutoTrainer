@@ -405,9 +405,9 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     if (
         not isinstance(model_minimum_tasks, int)
         or isinstance(model_minimum_tasks, bool)
-        or model_minimum_tasks < 2
+        or model_minimum_tasks < 5
     ):
-        errors.append("evaluation.decisions.model_benchmark.minimum_tasks must be at least 2")
+        errors.append("evaluation.decisions.model_benchmark.minimum_tasks must be at least 5")
 
     fable_decision = _mapping(decisions.get("fable_ab"), "evaluation.decisions.fable_ab", errors)
     if fable_decision.get("candidate") not in fable_members:
@@ -427,9 +427,9 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     if (
         not isinstance(fable_minimum_tasks, int)
         or isinstance(fable_minimum_tasks, bool)
-        or fable_minimum_tasks < 2
+        or fable_minimum_tasks < 5
     ):
-        errors.append("evaluation.decisions.fable_ab.minimum_tasks must be at least 2")
+        errors.append("evaluation.decisions.fable_ab.minimum_tasks must be at least 5")
 
 
 def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> ValidationReport:
@@ -837,14 +837,14 @@ def default_config(
                     "control": "reference_9b",
                     "metric": "verified_task_success",
                     "minimum_delta": 0.0,
-                    "minimum_tasks": 2,
+                    "minimum_tasks": 5,
                 },
                 "fable_ab": {
                     "candidate": "autotrainer",
                     "control": "base_fable",
                     "metric": "blind_preference_rate",
                     "minimum_rate": 0.5,
-                    "minimum_tasks": 2,
+                    "minimum_tasks": 5,
                 },
             },
         },
