@@ -8,6 +8,7 @@ No request field is ever interpreted as a command or package specification.
 from __future__ import annotations
 
 from copy import deepcopy
+import importlib.metadata
 import os
 from pathlib import Path
 import platform
@@ -30,6 +31,7 @@ _PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
 _ACTION_IDS = frozenset(
     {
         "install_training_packages",
+        "remove_incompatible_torchaudio",
         "install_wsl_ubuntu",
         "install_docker_desktop",
         "build_runtime_image",
@@ -143,6 +145,26 @@ def _action(
     }
 
 
+def _incompatible_torchaudio(doctor: Mapping[str, Any]) -> dict[str, str] | None:
+    """Identify an optional audio wheel that breaks the pinned text-only stack."""
+
+    packages = doctor.get("packages", [])
+    if not any(
+        "torchaudio" in str(item.get("detail", "")).casefold()
+        for item in packages
+        if isinstance(item, Mapping)
+    ):
+        return None
+    try:
+        audio_version = importlib.metadata.version("torchaudio")
+        torch_version = importlib.metadata.version("torch")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if audio_version.split("+", 1)[0] == torch_version.split("+", 1)[0]:
+        return None
+    return {"installed": audio_version, "torch": torch_version}
+
+
 def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     """Return Doctor evidence plus only the fixed actions relevant now."""
 
@@ -178,6 +200,20 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
                 command=["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"],
                 requires_admin=True,
                 restart_required=True,
+            )
+        )
+    incompatible_audio = _incompatible_torchaudio(doctor)
+    if incompatible_audio is not None:
+        actions.append(
+            _action(
+                "remove_incompatible_torchaudio",
+                "Remove incompatible optional audio wheel",
+                (
+                    f"Remove torchaudio {incompatible_audio['installed']}; it cannot load with "
+                    f"the pinned text-only Torch {incompatible_audio['torch']} runtime."
+                ),
+                status="available",
+                command=[sys.executable, "-m", "pip", "uninstall", "--yes", "torchaudio"],
             )
         )
     if not packages_ready or cuda_wheel_needed:

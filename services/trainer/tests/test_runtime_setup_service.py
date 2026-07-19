@@ -108,6 +108,51 @@ class RuntimeSetupServiceTests(unittest.TestCase):
         )
         self.assertIn("torch==2.13.0+cu130", result["actions"][0]["command"])
 
+    def test_inspection_offers_to_remove_an_incompatible_optional_audio_wheel(self) -> None:
+        doctor = {
+            "python": {"status": "ready", "version": "3.11.9", "expected": "3.11.x"},
+            "gpu": {"status": "ready", "driver": {"status": "ready"}},
+            "packages": [
+                {
+                    "name": "trl",
+                    "status": "import-error",
+                    "detail": "Could not load torchaudio/lib/libtorchaudio.pyd",
+                }
+            ],
+            "sandbox": {"status": "ready"},
+            "environment_image": {"status": "ready"},
+            "sft_ready": False,
+            "rl_ready": False,
+        }
+        windows = {
+            "applicable": True,
+            "wsl_status": "ready",
+            "ubuntu_installed": True,
+            "winget_available": True,
+        }
+        with (
+            patch("autotrainer.runtime_setup_service.run_doctor", return_value=doctor),
+            patch("autotrainer.runtime_setup_service._windows_host", return_value=windows),
+            patch("autotrainer.runtime_setup_service._checkout_root", return_value=self.root),
+            patch(
+                "autotrainer.runtime_setup_service.importlib.metadata.version",
+                side_effect=lambda name: {
+                    "torchaudio": "2.10.0+cu128",
+                    "torch": "2.13.0+cu130",
+                }[name],
+            ),
+        ):
+            result = inspect_runtime_setup(self.config_path)
+
+        self.assertEqual(
+            result["actions"][0]["id"],
+            "remove_incompatible_torchaudio",
+        )
+        self.assertEqual(
+            result["actions"][0]["command"],
+            [sys.executable, "-m", "pip", "uninstall", "--yes", "torchaudio"],
+        )
+
     def test_apply_uses_only_the_predeclared_command_without_a_shell(self) -> None:
         selected = {
             "id": "build_runtime_image",
