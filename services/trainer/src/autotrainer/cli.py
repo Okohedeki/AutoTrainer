@@ -864,7 +864,15 @@ def _run_train(arguments: argparse.Namespace) -> int:
             result = manager.snapshot()
         finally:
             manager.close()
-        _emit(result, as_json=arguments.json)
+        completed = result.get("result")
+        # Preserve the established agent-facing training result shape while
+        # exposing the exact durable GUI-equivalent lifecycle beside it.
+        payload = (
+            {**completed, "job": result}
+            if isinstance(completed, dict) and result.get("status") == "completed"
+            else result
+        )
+        _emit(payload, as_json=arguments.json)
         return 0 if result.get("status") == "completed" else 3
 
     from .device_gate import device_run_gate

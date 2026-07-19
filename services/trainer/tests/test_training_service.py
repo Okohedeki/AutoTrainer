@@ -528,6 +528,7 @@ class TrainingServiceTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn('"recipe": "teach"', output.getvalue())
         self.assertIn('"status": "completed"', output.getvalue())
+        self.assertIn('"job": {', output.getvalue())
         run.assert_called_once()
         self.assertEqual(run.call_args.args, (self.config_path,))
         self.assertTrue(callable(run.call_args.kwargs["on_progress"]))
