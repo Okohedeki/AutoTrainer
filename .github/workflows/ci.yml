@@ -28,3 +28,20 @@ jobs:
       - run: python -m pip install -e services/trainer
       - run: python -m unittest discover -s services/trainer/tests -v
       - run: autotrainer models show qwen3.5-9b-text --json
+
+  training-contract:
+    runs-on: ubuntu-latest
+    env:
+      # Core tests may skip optional CUDA-stack contracts. This job must not.
+      AUTOTRAINER_REQUIRE_TRAINING_STACK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e "services/trainer[training]"
+      - run: >-
+          python -m unittest -v
+          services.trainer.tests.test_training_dependency_contract
+          services.trainer.tests.test_environment.PolicyToolSurfaceTests
