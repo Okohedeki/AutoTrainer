@@ -103,7 +103,14 @@ class TaskAuthoringServiceTests(unittest.TestCase):
         self.assertEqual(manifest["verifier"]["bundle"], str(self.verifier.resolve()))
         self.assertEqual(
             manifest["tools"],
-            ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
+            [
+                "list_files",
+                "read_file",
+                "search_code",
+                "apply_patch",
+                "replace_text",
+                "run_check",
+            ],
         )
         task_pack = next(
             source

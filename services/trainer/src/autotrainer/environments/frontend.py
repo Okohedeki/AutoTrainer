@@ -274,6 +274,76 @@ class FrontendEnvironment:
             self._cleanup()
             raise
 
+    def replace_text(self, path: str, old: str, new: str) -> str:
+        """Replace one exact UTF-8 text occurrence in an editable file.
+
+        Args:
+            path: Repository-relative path to the text file.
+            old: Exact text that must occur once in the current file.
+            new: Replacement text. It may be empty when deleting the occurrence.
+
+        Returns:
+            A bounded success message or a short rejection reason visible to the
+            policy. The operation preserves the file's existing newline style.
+        """
+
+        self._use_tool("replace_text")
+        try:
+            if not isinstance(old, str) or not old or len(old) > 100_000:
+                raise ValueError("old text must contain between 1 and 100000 characters")
+            if not isinstance(new, str) or len(new) > 200_000:
+                raise ValueError("new text must contain at most 200000 characters")
+            if "\x00" in old or "\x00" in new:
+                raise ValueError("replacement text cannot contain a null byte")
+
+            candidate = self._safe_path(path)
+            if not candidate.is_file():
+                raise ValueError(f"not a file: {path}")
+            if candidate.stat().st_size > 1_000_000:
+                raise ValueError("file is larger than the 1 MB tool limit")
+            try:
+                raw = candidate.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError("binary or non-UTF-8 file") from error
+
+            newline = "\r\n" if "\r\n" in raw else "\n"
+            normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+            normalized_old = old.replace("\r\n", "\n").replace("\r", "\n")
+            normalized_new = new.replace("\r\n", "\n").replace("\r", "\n")
+            occurrences = normalized.count(normalized_old)
+            if occurrences != 1:
+                detail = "not found" if occurrences == 0 else f"found {occurrences} times"
+                raise LookupError(f"old text must occur exactly once ({detail})")
+            updated = normalized.replace(normalized_old, normalized_new, 1)
+            if updated == normalized:
+                raise ValueError("replacement would not change the file")
+
+            encoded = updated.replace("\n", newline).encode("utf-8")
+            candidate.write_bytes(encoded)
+            self._check_deadline()
+            captured = self._capture_unified_diff()
+            if not captured:
+                candidate.write_bytes(raw.encode("utf-8"))
+                raise ValueError("replacement did not produce a tracked change")
+            self._patch_applied_count += 1
+            self._latest_diff = captured
+            return self._bounded("text replaced")
+        except EpisodeTimeoutError:
+            raise
+        except LookupError as error:
+            self._patch_rejections_by_reason["context_mismatch"] = (
+                self._patch_rejections_by_reason.get("context_mismatch", 0) + 1
+            )
+            return self._bounded(f"replacement rejected: {error}")
+        except (OSError, RuntimeError, ValueError) as error:
+            self._patch_rejections_by_reason["invalid_patch"] = (
+                self._patch_rejections_by_reason.get("invalid_patch", 0) + 1
+            )
+            return self._bounded(f"replacement rejected: {error}")
+        except Exception:
+            self._cleanup()
+            raise
+
     def run_check(self, check: str) -> str:
         """Run one trusted check declared by the task author.
 

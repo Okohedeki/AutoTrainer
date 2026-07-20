@@ -169,6 +169,7 @@ class TrainingDependencyContractTests(unittest.TestCase):
                     "apply_patch",
                     "list_files",
                     "read_file",
+                    "replace_text",
                     "run_check",
                     "search_code",
                 },

@@ -30,7 +30,7 @@ from .training.common import REFERENCE_DEPENDENCIES, import_factory
 
 
 PRODUCER_NAME = "autotrainer-local-patch"
-PRODUCER_VERSION = "1.0.0"
+PRODUCER_VERSION = "1.1.0"
 MAX_SOURCE_FILES = 40
 MAX_SOURCE_PATHS = 400
 MAX_SOURCE_CHARS = 32_000
@@ -45,7 +45,7 @@ TOP_P = 0.9
 MAX_TOOL_CALLING_ITERATIONS = 8
 
 # Keep this schema code-owned and frozen in the runner identity. It mirrors the
-# five public methods on FrontendEnvironment, which TRL exposes during GRPO.
+# six public methods on FrontendEnvironment, which TRL exposes during GRPO.
 _TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -153,6 +153,42 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": (
                     "A bounded success message or the reason the patch was rejected."
+                ),
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_text",
+            "description": (
+                "Replace one exact UTF-8 text occurrence in an editable file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-relative path to the text file.",
+                    },
+                    "old": {
+                        "type": "string",
+                        "description": "Exact text that must occur once in the current file.",
+                    },
+                    "new": {
+                        "type": "string",
+                        "description": (
+                            "Replacement text. It may be empty when deleting the occurrence."
+                        ),
+                    },
+                },
+                "required": ["path", "old", "new"],
+            },
+            "return": {
+                "type": "string",
+                "description": (
+                    "A bounded success message or a short rejection reason visible to the\n"
+                    "    policy. The operation preserves the file's existing newline style."
                 ),
             },
         },
@@ -774,6 +810,7 @@ _TOOL_ARGUMENTS: dict[str, tuple[set[str], set[str]]] = {
     "read_file": ({"path"}, {"start", "end"}),
     "search_code": ({"query"}, {"path"}),
     "apply_patch": ({"patch"}, set()),
+    "replace_text": ({"path", "old", "new"}, set()),
     "run_check": ({"check"}, set()),
 }
 

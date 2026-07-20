@@ -45,7 +45,14 @@ _DEFAULT_WEIGHTS = {
     "designRules": 0.15,
     "patchQuality": 0.10,
 }
-_DEFAULT_TOOLS = ["list_files", "read_file", "search_code", "apply_patch", "run_check"]
+_DEFAULT_TOOLS = [
+    "list_files",
+    "read_file",
+    "search_code",
+    "apply_patch",
+    "replace_text",
+    "run_check",
+]
 
 
 def _text(value: object, field: str, *, minimum: int = 1, maximum: int = 4_000) -> str:

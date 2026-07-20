@@ -45,13 +45,21 @@ class PolicyToolSurfaceTests(unittest.TestCase):
                 "read_file",
                 "search_code",
                 "apply_patch",
+                "replace_text",
                 "run_check",
             },
         )
 
     def test_policy_tools_describe_every_argument_for_trl_schema_generation(self) -> None:
         environment = FrontendEnvironment()
-        for name in ("list_files", "read_file", "search_code", "apply_patch", "run_check"):
+        for name in (
+            "list_files",
+            "read_file",
+            "search_code",
+            "apply_patch",
+            "replace_text",
+            "run_check",
+        ):
             with self.subTest(tool=name):
                 tool = getattr(environment, name)
                 documentation = inspect.getdoc(tool) or ""
@@ -68,7 +76,14 @@ class PolicyToolSurfaceTests(unittest.TestCase):
             self.skipTest("transformers is available in the pinned training extra")
 
         environment = FrontendEnvironment()
-        for name in ("list_files", "read_file", "search_code", "apply_patch", "run_check"):
+        for name in (
+            "list_files",
+            "read_file",
+            "search_code",
+            "apply_patch",
+            "replace_text",
+            "run_check",
+        ):
             with self.subTest(tool=name):
                 schema = get_json_schema(getattr(environment, name))
                 properties = schema["function"]["parameters"]["properties"]
@@ -124,7 +139,14 @@ def executable_manifest(*, browser_tests: str = "npm run test:browser") -> dict[
             "tests": "npm test",
             "browserTests": browser_tests,
         },
-        "tools": ["list_files", "read_file", "search_code", "apply_patch", "run_check"],
+        "tools": [
+            "list_files",
+            "read_file",
+            "search_code",
+            "apply_patch",
+            "replace_text",
+            "run_check",
+        ],
         "verifier": {
             "bundle": "verifier",
             "command": "hidden verify",
@@ -719,6 +741,43 @@ class PatchNormalizationTests(unittest.TestCase):
             )
             self.assertFalse(applied)
             self.assertIn("must stay inside", message)
+
+    def test_replace_text_changes_one_exact_occurrence_and_captures_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            message = environment.replace_text(
+                "project/src/styles.css",
+                ".grid {\n  display: grid;\n}",
+                (
+                    ".grid {\n  display: grid;\n}\n\n"
+                    "@media (max-width: 767px) {\n"
+                    "  .grid { grid-template-columns: 1fr; }\n"
+                    "}"
+                ),
+            )
+
+            self.assertEqual(message, "text replaced")
+            self.assertEqual(environment._patch_applied_count, 1)
+            self.assertIn("grid-template-columns: 1fr", environment._latest_diff)
+
+    def test_replace_text_rejects_missing_context_without_changing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            target = environment._require_workspace() / "project" / "src" / "styles.css"
+            before = target.read_bytes()
+
+            message = environment.replace_text(
+                "project/src/styles.css",
+                ".missing { display: none; }",
+                ".missing { display: block; }",
+            )
+
+            self.assertIn("must occur exactly once", message)
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(
+                environment._patch_rejections_by_reason,
+                {"context_mismatch": 1},
+            )
 
 
 class DiffCaptureTests(unittest.TestCase):

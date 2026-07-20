@@ -11,7 +11,14 @@ class ManifestError(ValueError):
     """Raised when a task manifest violates a supported contract."""
 
 
-V1_TOOLS = {"list_files", "read_file", "search_code", "apply_patch", "run_check"}
+V1_TOOLS = {
+    "list_files",
+    "read_file",
+    "search_code",
+    "apply_patch",
+    "replace_text",
+    "run_check",
+}
 REWARD_KEYS = {
     "regressionSafety",
     "taskTests",

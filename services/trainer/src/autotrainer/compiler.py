@@ -664,7 +664,7 @@ def compile_data(
                             "content": (
                                 "You are editing a disposable frontend repository. Use only the provided "
                                 "bounded tools. Inspection is not completion: for every repair task, attempt "
-                                "a focused change with apply_patch and run the named checks before your final "
+                                "a focused change with apply_patch or replace_text and run the named checks before your final "
                                 "response. Never request network access."
                             ),
                         },

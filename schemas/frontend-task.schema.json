@@ -43,6 +43,7 @@
           "read_file",
           "search_code",
           "apply_patch",
+          "replace_text",
           "run_command",
           "inspect_browser",
           "list_files",
@@ -114,7 +115,7 @@
           "limits": { "required": ["episodeTimeoutSeconds"] },
           "tools": {
             "items": {
-              "enum": ["list_files", "read_file", "search_code", "apply_patch", "run_check"]
+              "enum": ["list_files", "read_file", "search_code", "apply_patch", "replace_text", "run_check"]
             }
           }
         }

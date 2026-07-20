@@ -183,6 +183,10 @@ class _FakeEnvironment:
         self.patch = patch
         return "patch applied"
 
+    def replace_text(self, path: str, old: str, new: str) -> str:
+        self.patch = f"replace {path}: {old} -> {new}"
+        return "text replaced"
+
     def run_check(self, check: str) -> str:
         return f"{check} passed"
 
@@ -223,6 +227,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 "read_file",
                 "search_code",
                 "apply_patch",
+                "replace_text",
                 "run_check",
             )
         ]
