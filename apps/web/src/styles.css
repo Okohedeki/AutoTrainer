@@ -936,6 +936,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .dataset-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .dataset-heading h2 { margin: 7px 0 0; font-size: 20px; letter-spacing: -.025em; }
 .dataset-heading p:last-child { max-width: 720px; margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.dataset-flow { margin: 18px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; list-style: none; }
+.dataset-flow li { min-width: 0; padding: 10px 11px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-subtle); }
+.dataset-flow li > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: #303842; font: 750 8px/1 "SFMono-Regular", Consolas, monospace; }
+.dataset-flow li > div { min-width: 0; display: grid; gap: 2px; }
+.dataset-flow strong { font-size: 9px; }
+.dataset-flow small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .dataset-policy { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 18px; }
 .dataset-policy > div { display: grid; gap: 4px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.46); }
 .dataset-policy span { color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
@@ -964,6 +970,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 @media (max-width: 760px) {
   .dataset-workspace { padding: 18px; }
   .dataset-heading, .dataset-catalog-row, .dataset-freeze { align-items: stretch; flex-direction: column; }
+  .dataset-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dataset-policy { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dataset-designer { grid-template-columns: 1fr; }
   .dataset-designer .dataset-endpoint { grid-column: auto; }
@@ -1294,6 +1301,20 @@ textarea { font: inherit; }
 .source-submit-row { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .source-submit-row p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .source-cards li > div > small { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.source-next-step { margin-top: 14px; padding: 13px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 11px; align-items: start; border: 1px solid #c7ded2; border-radius: 9px; background: var(--good-soft); }
+.source-next-step > span { min-width: 38px; padding: 5px 7px; border-radius: 999px; color: #08784d; background: #fff; font-size: 8px; font-weight: 850; letter-spacing: .06em; text-align: center; text-transform: uppercase; }
+.source-next-step strong { font-size: 11px; }
+.source-next-step p { margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+
+.manual-authoring { margin-top: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
+.manual-authoring > summary { min-height: 68px; padding: 13px 15px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; cursor: pointer; list-style-position: inside; }
+.manual-authoring > summary::marker { color: var(--muted); }
+.manual-authoring > summary > span { display: inline-grid; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.manual-authoring > summary strong { font-size: 11px; }
+.manual-authoring > summary small { color: var(--muted); font-size: 9px; font-weight: 500; line-height: 1.45; }
+.manual-authoring > summary > b { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.manual-authoring[open] > summary { border-bottom: 1px solid var(--line); background: #fff; }
+.manual-authoring-body { padding: 0 15px 15px; }
 
 /* Guided executable-task authoring stays in Data beside repository intent. */
 .task-authoring { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
@@ -1709,6 +1730,8 @@ textarea { font: inherit; }
   .source-submit-row .primary-button { width: 100%; }
   .task-authoring > header,
   .task-authoring-submit { align-items: stretch; flex-direction: column; }
+  .manual-authoring > summary { grid-template-columns: 1fr; }
+  .manual-authoring > summary > b { margin-left: 22px; }
   .task-authoring-submit .primary-button { width: 100%; }
   .authored-task-list li { grid-template-columns: 36px minmax(0, 1fr) auto; }
   .authored-task-list li > button { grid-column: 2 / -1; justify-self: start; }

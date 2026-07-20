@@ -356,10 +356,10 @@ def _serialize_manifest(
         "status": "blocked" if blockers else "declared",
         "blockers": blockers,
         "next_action": {
-            "title": "Run Prepare",
+            "title": "Check readiness before training",
             "detail": (
-                "Prepare will execute the install, build, tests, and hidden verifier "
-                "against the locked starting state before GRPO can start."
+                "After the dataset is locked, Train > Check readiness executes the "
+                "install, build, tests, and hidden verifier against this starting state."
             ),
         },
     }

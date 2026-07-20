@@ -84,6 +84,7 @@ class ExampleAuthoringServiceTests(unittest.TestCase):
         example = result["example"]
         self.assertEqual(example["source_id"], source_id)
         self.assertTrue(example["rights_confirmed"])
+        self.assertEqual(example["next_action"]["title"], "Review and lock the dataset")
         self.assertEqual(list_authored_examples(self.config_path), {"examples": result["examples"]})
         config = load_config(self.config_path)
         managed = next(

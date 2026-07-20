@@ -96,7 +96,7 @@ class TaskAuthoringServiceTests(unittest.TestCase):
         self.assertEqual(task["source_id"], source_id)
         self.assertEqual(task["locked_revision"], self.revision)
         self.assertEqual(task["working_directory"], "app")
-        self.assertIn("Prepare will execute", task["next_action"]["detail"])
+        self.assertIn("Train > Check readiness", task["next_action"]["detail"])
         manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
         self.assertEqual(manifest["task"]["startingRevision"], "locked")
         self.assertEqual(manifest["runtime"]["build"], "npm run build")

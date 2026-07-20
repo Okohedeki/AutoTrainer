@@ -44,10 +44,11 @@ test("Data treats merged-PR datasets as an inspectable local training asset", as
   for (const operation of ["getDatasetWorkspace", "syncDatasetSources", "designDatasetCandidate", "freezeDataset"]) assert.match(panel, new RegExp(operation));
   assert.match(panel, /Local model/);
   assert.match(panel, /Anthropic Claude/);
+  for (const step of ["Import", "Analyze", "Review", "Lock"]) assert.match(panel, new RegExp(step));
   assert.match(panel, /Accepted patch/);
-  assert.match(panel, /Approve QLoRA example/);
+  assert.match(panel, /Add to QLoRA dataset/);
   assert.match(panel, /GRPO task/);
-  assert.match(panel, /Freeze dataset/);
+  assert.match(panel, /Lock dataset for training/);
   assert.match(api, /\/api\/v1\/dataset\/sync/);
   assert.match(api, /\/api\/v1\/dataset\/design/);
   assert.match(api, /\/api\/v1\/dataset\/freeze/);
@@ -107,13 +108,14 @@ test("model setup detects and adopts existing local base models without download
   assert.doesNotMatch(localHandler, /downloadProjectModel|cache_dir|snapshot_path/);
 });
 
-test("repository search resolves names before explicit purpose and advanced scope", async () => {
+test("repository search defaults selected GitHub results to the merged-PR workflow", async () => {
   const panel = await source("src/SourceSetupPanel.tsx");
   const api = await source("src/api.ts");
   for (const mode of ["accepted_changes", "practice_tasks", "reference_only", "evaluation_holdout"]) {
     assert.match(panel, new RegExp(mode));
   }
-  assert.match(panel, /Search GitHub or enter a local path/);
+  assert.match(panel, /Repository or local folder/);
+  assert.match(panel, /setModes\(\["accepted_changes"\]\)/);
   assert.match(panel, /searchGitHubRepositories/);
   assert.match(panel, /repository\.full_name/);
   assert.match(panel, /setRepositorySearchEnabled\(false\)/);
@@ -129,7 +131,7 @@ test("repository search resolves names before explicit purpose and advanced scop
   assert.match(api, /body: JSON\.stringify\(input\)/);
 });
 
-test("Data guides users from a locked repository to an executable authored task", async () => {
+test("Data keeps manual examples and verifier authoring behind an advanced path", async () => {
   const panel = await source("src/SourceSetupPanel.tsx");
   const api = await source("src/api.ts");
   assert.match(api, /request\("\/api\/v1\/tasks", \{ signal \}\)/);
@@ -138,11 +140,13 @@ test("Data guides users from a locked repository to an executable authored task"
   assert.match(api, /request\("\/api\/v1\/examples", \{ signal \}\)/);
   assert.match(api, /export async function createAuthoredExample/);
   assert.match(api, /export async function removeAuthoredExample/);
-  assert.match(panel, /Create a supervised teaching example/);
+  assert.match(panel, /Advanced: add training records by hand/);
+  assert.match(panel, /Most projects can skip this/);
+  assert.match(panel, /Add an instruction and accepted answer/);
   assert.match(panel, /I confirm I have the right to use this accepted response for training/);
   assert.match(panel, /createAuthoredExample/);
   assert.match(panel, /deleteExample/);
-  assert.match(panel, /Create a practice or evaluation task/);
+  assert.match(panel, /Add a GRPO or evaluation task/);
   assert.match(panel, /held-out groups/);
   for (const field of [
     "Locked source",
@@ -157,7 +161,7 @@ test("Data guides users from a locked repository to an executable authored task"
   assert.match(panel, /repository files are not silently converted into training examples/i);
   assert.match(panel, /AutoTrainer does not generate hidden tests or guess correctness/);
   for (const signal of ["build_passed", "regression_pass_rate", "task_pass_rate", "responsive_pass_rate", "design_rule_pass_rate", "code_quality_pass_rate"]) assert.match(panel, new RegExp(signal));
-  assert.match(panel, /Prepare must still execute every gate/);
+  assert.match(panel, /In Train, <strong>Check readiness/);
   assert.match(panel, /authoredTaskSplit/);
   assert.match(panel, /createAuthoredTask/);
   assert.match(panel, /deleteTask/);
@@ -197,9 +201,9 @@ test("Train owns one-click start, observed SFT loss, and the shared GRPO evidenc
   assert.match(panel, />Start training</);
   assert.match(panel, /Check readiness/);
   assert.match(panel, /Actual GPU training happens here/);
-  assert.match(panel, /Accepted examples → QLoRA SFT/);
-  assert.match(panel, /Executable tasks → GRPO/);
-  assert.match(panel, /GRPO continues training the same adapter/);
+  assert.match(panel, /Learn from merged PRs/);
+  assert.match(panel, /Practice with verified tasks/);
+  assert.match(panel, /verified practice then continues that same adapter/);
   assert.match(panel, /onClick={onOpenData}>Open Data/);
   assert.match(panel, /const recipeCopy/);
   assert.match(panel, /await startTraining\(\)/);

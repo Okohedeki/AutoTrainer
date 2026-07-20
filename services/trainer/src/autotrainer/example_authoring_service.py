@@ -165,8 +165,11 @@ def _serialize(record: Mapping[str, Any]) -> dict[str, Any]:
         "rights_confirmed": record.get("rights_confirmed") is True,
         "status": "declared",
         "next_action": {
-            "title": "Run Prepare",
-            "detail": "Prepare will compile this accepted response into the supervised dataset.",
+            "title": "Review and lock the dataset",
+            "detail": (
+                "This example is ready to inspect in Data. Lock the dataset when "
+                "you are satisfied with every training record."
+            ),
         },
     }
 

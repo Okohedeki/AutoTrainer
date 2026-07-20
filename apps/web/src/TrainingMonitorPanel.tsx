@@ -221,10 +221,10 @@ export default function TrainingMonitorPanel({
               <button className="secondary-button" type="button" onClick={onOpenData}>Open Data</button>
             </div>
             <div className="training-data-options">
-              <section><strong>Accepted examples → QLoRA SFT</strong><p>Add instruction-and-accepted-response JSONL, or choose Accepted changes on a repository and approve useful commits.</p></section>
-              <section><strong>Executable tasks → GRPO</strong><p>Add resettable code tasks with an instruction and an executable verifier that scores the result.</p></section>
+              <section><strong>Learn from merged PRs</strong><p>Connect a licensed repository, let an LLM structure its accepted changes, and approve the QLoRA examples you want.</p></section>
+              <section><strong>Practice with verified tasks</strong><p>Add reproducible coding tasks whose checks can score a GRPO attempt automatically.</p></section>
             </div>
-            <p className="training-data-sequence"><strong>Add both:</strong> AutoTrainer runs SFT first, then GRPO continues training the same adapter.</p>
+            <p className="training-data-sequence"><strong>Choose both:</strong> AutoTrainer teaches the adapter from accepted work first, then improves it through verified practice.</p>
           </div>
         )}
         {preparation?.recipe !== "needs_training_data" && preparation?.next_action && (

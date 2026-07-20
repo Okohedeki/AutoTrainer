@@ -20,10 +20,10 @@ import {
 } from "./api";
 
 const modeCopy: Record<SourceMode, { label: string; detail: string }> = {
-  accepted_changes: { label: "Accepted changes → QLoRA SFT", detail: "Review useful commits and turn approved work into supervised teaching examples." },
-  practice_tasks: { label: "Executable tasks → GRPO", detail: "Use resettable tasks and executable verifiers for reward-driven practice." },
-  reference_only: { label: "Reference only", detail: "Learn project structure and conventions without training on its history." },
-  evaluation_holdout: { label: "Isolated evaluation holdout", detail: "Keep this source out of training and use it only to measure the frozen model." },
+  accepted_changes: { label: "Learn from merged PRs", detail: "Find licensed PRs merged into main or master, then review LLM-designed QLoRA examples." },
+  practice_tasks: { label: "Practice with verified tasks", detail: "Use resettable coding tasks with executable checks for GRPO." },
+  reference_only: { label: "Context only", detail: "Let the specialist inspect project structure without training on its history." },
+  evaluation_holdout: { label: "Measure on held-out tasks", detail: "Keep this repository out of training and use it only for evaluation." },
 };
 
 function displayedModes(source: ProjectSource): SourceMode[] {
@@ -202,6 +202,7 @@ export default function SourceSetupPanel({
     setRepositorySearchEnabled(false);
     setRepositoryResults([]);
     setRepositorySearchError(null);
+    if (modes.length === 0) setModes(["accepted_changes"]);
     if (!licenseSpdx.trim() && repository.license_spdx !== "UNDECLARED") {
       setLicenseSpdx(repository.license_spdx);
     }
@@ -360,12 +361,12 @@ export default function SourceSetupPanel({
     <section className="panel setup-step source-setup" aria-labelledby="source-setup-heading" data-tour="sources">
       <header className="step-heading source-setup-header">
         <span className="step-number" aria-hidden="true">2</span>
-        <div><h2 id="source-setup-heading">Add a GitHub repo or local folder</h2><p>Accepted examples run QLoRA SFT. Executable tasks run GRPO. Adding both runs SFT first, then GRPO.</p></div>
+        <div><h2 id="source-setup-heading">Connect the code this specialist should learn</h2><p>Choose a repository and a plain-language purpose. For the normal path, select “Learn from merged PRs” and AutoTrainer will build a review queue below.</p></div>
         <span className={`status-chip ${connected === false ? "danger" : sources.length ? "good" : "muted"}`}>{connected === false ? "Backend offline" : `${sources.length} configured`}</span>
       </header>
 
       <form className="source-entry source-definition" onSubmit={(event) => { event.preventDefault(); void addSource(); }}>
-        <label htmlFor="source-value">Search GitHub or enter a local path</label>
+        <label htmlFor="source-value">Repository or local folder</label>
         <div className="source-repository-picker">
           <input
             id="source-value"
@@ -397,7 +398,7 @@ export default function SourceSetupPanel({
         </div>
 
         {!intrinsicPurpose ? <fieldset className="source-purpose-options">
-          <legend>What should AutoTrainer use from it?</legend>
+          <legend>How should AutoTrainer use this code?</legend>
           {Object.entries(modeCopy).map(([id, copy]) => {
             const mode = id as SourceMode;
             return (
@@ -410,7 +411,7 @@ export default function SourceSetupPanel({
         </fieldset> : <div className="intrinsic-purpose-note"><strong>Purpose comes from this file type</strong><p>AutoTrainer will keep a demonstration JSONL or executable task pack in its intrinsic role.</p></div>}
 
         <details className="advanced-options source-advanced">
-          <summary>Revision, paths, and license</summary>
+          <summary>Advanced source settings</summary>
           <div className="source-advanced-grid">
             <label htmlFor="source-revision"><span>Revision</span><input id="source-revision" value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="main or commit SHA" disabled={connected !== true || busy !== null || disabled} /></label>
             <label htmlFor="source-license"><span>SPDX license</span><input id="source-license" value={licenseSpdx} onChange={(event) => setLicenseSpdx(event.target.value)} placeholder="MIT" disabled={connected !== true || busy !== null || disabled} /></label>
@@ -420,7 +421,7 @@ export default function SourceSetupPanel({
           </div>
         </details>
 
-        <div className="source-submit-row"><p>{connected === null ? "Loading existing sources..." : intrinsicPurpose ? "Intrinsic demonstration or task-pack role" : modes.length === 0 ? "Choose at least one purpose." : modes.map((mode) => modeCopy[mode].label).join(" + ")}</p><button className="primary-button" type="submit" disabled={connected !== true || busy !== null || disabled || !value.trim() || (!intrinsicPurpose && modes.length === 0)}>{busy === "add" ? "Adding..." : "Add source"}</button></div>
+        <div className="source-submit-row"><p>{connected === null ? "Loading existing sources..." : intrinsicPurpose ? "AutoTrainer recognizes this dataset or task-pack file." : modes.length === 0 ? "Choose how this code should be used." : modes.map((mode) => modeCopy[mode].label).join(" + ")}</p><button className="primary-button" type="submit" disabled={connected !== true || busy !== null || disabled || !value.trim() || (!intrinsicPurpose && modes.length === 0)}>{busy === "add" ? "Connecting..." : "Connect source"}</button></div>
       </form>
 
       {error && <div className="source-error" role="alert">{error}</div>}
@@ -437,15 +438,28 @@ export default function SourceSetupPanel({
           ))}
         </ul>
       ) : connected !== false ? (
-        <div className="source-empty"><strong>No sources configured</strong><p>Add the repository or local folder that represents the work this specialist should master.</p></div>
+        <div className="source-empty"><strong>No code connected yet</strong><p>Start with a GitHub repository whose merged pull requests represent work the specialist should learn.</p></div>
       ) : null}
 
+      {sources.some((source) => displayedModes(source).includes("accepted_changes")) && (
+        <div className="source-next-step" role="note">
+          <span aria-hidden="true">Next</span>
+          <div><strong>Build the review queue below</strong><p>AutoTrainer will import licensed pull requests merged into main or master. Choose a local model or Claude to turn each accepted change into a proposed training record, then approve only what you want.</p></div>
+        </div>
+      )}
+
+      <details className="manual-authoring">
+        <summary>
+          <span><strong>Advanced: add training records by hand</strong><small>Most projects can skip this. Use it only when the work does not exist in merged pull requests.</small></span>
+          <b>{authoredExamples.length} examples · {authoredTasks.length} tasks</b>
+        </summary>
+        <div className="manual-authoring-body">
       <div className="task-authoring example-authoring" aria-labelledby="example-authoring-heading">
         <header>
           <div>
-            <span className="eyebrow">Accepted work</span>
-            <h3 id="example-authoring-heading">Create a supervised teaching example</h3>
-            <p>Pair a concrete instruction with an accepted response from a locked training repository. AutoTrainer records provenance and compiles it into QLoRA SFT data.</p>
+            <span className="eyebrow">Manual QLoRA record</span>
+            <h3 id="example-authoring-heading">Add an instruction and accepted answer</h3>
+            <p>This is a fallback for accepted work that is not represented by a merged PR. AutoTrainer records its source and includes it in the same reviewable local dataset.</p>
           </div>
           <span className="status-chip muted">{authoredExamples.length} authored</span>
         </header>
@@ -457,7 +471,7 @@ export default function SourceSetupPanel({
             <div className="task-form-section">
               <span className="task-form-number" aria-hidden="true">1</span>
               <div>
-                <label htmlFor="example-source">Locked training source</label>
+                <label htmlFor="example-source">Source repository</label>
                 <select id="example-source" value={exampleSourceId} onChange={(event) => setExampleSourceId(event.target.value)} disabled={exampleBusy || busy !== null || disabled}>
                   {exampleSources.map((source) => <option key={source.id} value={source.id}>{source.label}</option>)}
                 </select>
@@ -467,15 +481,15 @@ export default function SourceSetupPanel({
             <div className="task-form-section example-copy-fields">
               <span className="task-form-number" aria-hidden="true">2</span>
               <div>
-                <label htmlFor="example-instruction">Instruction</label>
+                <label htmlFor="example-instruction">What was requested?</label>
                 <textarea id="example-instruction" value={exampleInstruction} onChange={(event) => setExampleInstruction(event.target.value)} placeholder="Describe the concrete change or question that produced the accepted work." rows={3} disabled={exampleBusy || disabled} />
-                <label htmlFor="example-response">Accepted response</label>
+                <label htmlFor="example-response">What answer was accepted?</label>
                 <textarea id="example-response" value={exampleResponse} onChange={(event) => setExampleResponse(event.target.value)} placeholder="Paste the reviewed response or solution that the model should learn from." rows={6} disabled={exampleBusy || disabled} />
               </div>
             </div>
             <div className="task-authoring-submit example-authoring-submit">
               <label className="rights-confirmation"><input type="checkbox" checked={exampleRightsConfirmed} onChange={(event) => setExampleRightsConfirmed(event.target.checked)} disabled={exampleBusy || disabled} /><span>I confirm I have the right to use this accepted response for training.</span></label>
-              <button className="primary-button" type="submit" disabled={!exampleFormReady || exampleBusy || disabled}>{exampleBusy ? "Creating..." : "Create example"}</button>
+              <button className="primary-button" type="submit" disabled={!exampleFormReady || exampleBusy || disabled}>{exampleBusy ? "Adding..." : "Add QLoRA example"}</button>
             </div>
           </form>
         ) : (
@@ -499,9 +513,9 @@ export default function SourceSetupPanel({
       <div className="task-authoring" aria-labelledby="task-authoring-heading">
         <header>
           <div>
-            <span className="eyebrow">Executable work</span>
-            <h3 id="task-authoring-heading">Create a practice or evaluation task</h3>
-            <p>A repository supplies the locked starting state. You supply the exact instruction, commands, and hidden verifier that define success.</p>
+            <span className="eyebrow">Manual verified task</span>
+            <h3 id="task-authoring-heading">Add a GRPO or evaluation task</h3>
+            <p>This expert path defines one reproducible coding task. The repository supplies its starting state; your external verifier determines whether the model actually succeeded.</p>
           </div>
           <span className={`status-chip ${taskSummary?.evaluation_groups_remaining === 0 ? "good" : "muted"}`}>
             {authoredTasks.length} tasks · {taskSummary?.evaluation_group_count ?? 0}/{taskSummary?.required_evaluation_groups ?? 5} held-out groups
@@ -561,14 +575,14 @@ export default function SourceSetupPanel({
             </div>
 
             <div className="task-authoring-submit">
-              <p>Creating this task declares its manifest. <strong>Prepare must still execute every gate</strong> before training is ready.</p>
-              <button className="primary-button" type="submit" disabled={!taskFormReady || taskBusy || disabled}>{taskBusy ? "Creating..." : "Create task"}</button>
+              <p>Save the definition now. In Train, <strong>Check readiness</strong> runs its build, tests, and verifier before any GPU work starts.</p>
+              <button className="primary-button" type="submit" disabled={!taskFormReady || taskBusy || disabled}>{taskBusy ? "Adding..." : "Add verified task"}</button>
             </div>
           </form>
         ) : (
           <div className="source-empty task-authoring-empty">
             <strong>Choose a task-capable repository first</strong>
-            <p>Add a repository as “Executable tasks → GRPO” for practice, or as an isolated evaluation holdout. Reference-only code cannot become a task.</p>
+            <p>Connect a repository as “Practice with verified tasks” for GRPO, or “Measure on held-out tasks” for evaluation. Context-only code cannot become a task.</p>
           </div>
         )}
 
@@ -585,6 +599,8 @@ export default function SourceSetupPanel({
           </ul>
         )}
       </div>
+        </div>
+      </details>
     </section>
   );
 }

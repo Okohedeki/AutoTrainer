@@ -135,14 +135,21 @@ export default function DatasetWorkspacePanel({
     <section className="panel dataset-workspace" aria-labelledby="dataset-heading">
       <header className="dataset-heading">
         <div>
-          <p className="panel-kicker">Local training asset</p>
-          <h2 id="dataset-heading">Inspect and freeze your dataset</h2>
-          <p>Only licensed PRs merged into main or master qualify. Nothing trains until you review and freeze the local result.</p>
+          <p className="panel-kicker">Review before training</p>
+          <h2 id="dataset-heading">Build the local training dataset</h2>
+          <p>AutoTrainer imports licensed PRs merged into main or master, asks your chosen LLM to structure each one, and waits for your approval before locking anything for training.</p>
         </div>
         <span className={`status-chip ${frozen ? "ready" : "muted"}`}>
           {frozen ? "Frozen" : workspace?.freeze.status === "stale" ? "Changed" : "Draft"}
         </span>
       </header>
+
+      <ol className="dataset-flow" aria-label="Dataset workflow">
+        <li><span>1</span><div><strong>Import</strong><small>Find merged PRs</small></div></li>
+        <li><span>2</span><div><strong>Analyze</strong><small>Use local or Claude</small></div></li>
+        <li><span>3</span><div><strong>Review</strong><small>Approve each record</small></div></li>
+        <li><span>4</span><div><strong>Lock</strong><small>Make it trainable</small></div></li>
+      </ol>
 
       <div className="dataset-policy" aria-label="Dataset policy">
         <div><span>Quality rule</span><strong>Merged PR</strong></div>
@@ -164,7 +171,7 @@ export default function DatasetWorkspacePanel({
               </strong>
               <p>
                 {workspace.catalog.status === "needs_sync"
-                  ? "Sync the allowlisted repositories before reviewing candidates."
+                  ? "Import merged pull requests to create the review queue."
                   : workspace.catalog.source_count > 0
                     ? `${workspace.catalog.source_count} licensed allowlisted ${workspace.catalog.source_count === 1 ? "repository" : "repositories"}.`
                     : "Local examples and executable tasks can still be inspected and frozen."}
@@ -172,7 +179,7 @@ export default function DatasetWorkspacePanel({
             </div>
             {workspace.catalog.source_count > 0 && (
               <button className="secondary-button" type="button" onClick={() => void run("sync", syncDatasetSources)} disabled={Boolean(busy) || disabled}>
-                {busy === "sync" ? "Syncing…" : workspace.catalog.status === "needs_sync" ? "Sync merged PRs" : "Refresh PRs"}
+                {busy === "sync" ? "Importing…" : workspace.catalog.status === "needs_sync" ? "Import merged PRs" : "Refresh merged PRs"}
               </button>
             )}
           </div>
@@ -203,14 +210,14 @@ export default function DatasetWorkspacePanel({
               </div>
 
               <div className="dataset-designer">
-                <label><span>Dataset designer</span><select value={provider} onChange={(event) => {
+                <label><span>Analyze with</span><select value={provider} onChange={(event) => {
                   const next = event.target.value as "local" | "anthropic";
                   setProvider(next);
                   setModel(next === "anthropic" ? "claude-haiku-4-5" : "qwen-local");
                 }} disabled={Boolean(busy) || disabled}><option value="local">Local model</option><option value="anthropic">Anthropic Claude</option></select></label>
-                <label><span>Model</span><input value={model} onChange={(event) => setModel(event.target.value)} disabled={Boolean(busy) || disabled} /></label>
+                <label><span>LLM</span><input value={model} onChange={(event) => setModel(event.target.value)} disabled={Boolean(busy) || disabled} /></label>
                 {provider === "local" && <label className="dataset-endpoint"><span>Loopback endpoint</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} disabled={Boolean(busy) || disabled} /></label>}
-                <button className="secondary-button" type="button" onClick={design} disabled={Boolean(busy) || disabled || !model.trim()}>{busy === "design" ? "Designing…" : "Design with LLM"}</button>
+                <button className="secondary-button" type="button" onClick={design} disabled={Boolean(busy) || disabled || !model.trim()}>{busy === "design" ? "Analyzing…" : "Analyze this PR"}</button>
               </div>
 
               {candidate.design && (
@@ -218,12 +225,12 @@ export default function DatasetWorkspacePanel({
                   <strong>{candidate.design.recommended_method === "qlora" ? "QLoRA example" : "GRPO task"} · {languageLabels[candidate.design.language]}</strong>
                   <p>{candidate.design.reason}</p>
                   {candidate.design.grpo_task && <p><b>Verifier focus:</b> {candidate.design.grpo_task.verifier_focus}</p>}
-                  {candidate.design.recommended_method === "grpo" && <p><b>Next:</b> use this proposal in the executable task form and supply its hidden verifier. Then reject this candidate as an SFT example. You can still approve it below if you intentionally prefer QLoRA.</p>}
+                  {candidate.design.recommended_method === "grpo" && <p><b>Recommendation:</b> this change is better suited to verified practice than imitation. Reject it as a QLoRA example unless you intentionally want the accepted patch in supervised training. Expert users can create the suggested task under manual data tools above.</p>}
                 </div>
               )}
 
               <label className="history-instruction" htmlFor="dataset-instruction">
-                <span>What request did this accepted change answer?</span>
+                <span>Training instruction</span>
                 <textarea id="dataset-instruction" value={instruction} onChange={(event) => setInstruction(event.target.value)} disabled={Boolean(busy) || disabled} rows={3} />
               </label>
 
@@ -235,7 +242,7 @@ export default function DatasetWorkspacePanel({
               <label className="rights-check"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} disabled={Boolean(busy) || disabled} /><span>I have the right to use this change for local refinement.</span></label>
               <div className="history-actions">
                 <button className="text-button" type="button" onClick={() => review("rejected")} disabled={Boolean(busy) || disabled}>Reject</button>
-                <button className="primary-button" type="button" onClick={() => review("approved")} disabled={Boolean(busy) || disabled || !rightsConfirmed || !instruction.trim()}>{busy === "review" ? "Saving…" : candidate.design?.recommended_method === "grpo" ? "Use as QLoRA instead" : "Approve QLoRA example"}</button>
+                <button className="primary-button" type="button" onClick={() => review("approved")} disabled={Boolean(busy) || disabled || !rightsConfirmed || !instruction.trim()}>{busy === "review" ? "Saving…" : candidate.design?.recommended_method === "grpo" ? "Add to QLoRA anyway" : "Add to QLoRA dataset"}</button>
               </div>
             </div>
           )}
@@ -244,11 +251,11 @@ export default function DatasetWorkspacePanel({
 
           <div className="dataset-freeze">
             <div>
-              <strong>{frozen ? "Dataset is frozen for refinement" : workspace.freeze.status === "stale" ? "Dataset changed after freeze" : "Freeze the inspected dataset"}</strong>
-              <p>{frozen ? `${workspace.freeze.receipt?.counts.sft_train || 0} QLoRA examples and ${workspace.freeze.receipt?.counts.rl_train || 0} GRPO tasks are bound to this receipt.` : "Compilation writes local training JSONL and a fingerprint. Any later source or review change makes it stale."}</p>
+              <strong>{frozen ? "Dataset is locked for training" : workspace.freeze.status === "stale" ? "Review changes before locking again" : "Lock the reviewed dataset"}</strong>
+              <p>{frozen ? `${workspace.freeze.receipt?.counts.sft_train || 0} QLoRA examples and ${workspace.freeze.receipt?.counts.rl_train || 0} GRPO tasks are locked to this version.` : "Locking writes the local training files and a reproducible fingerprint. Changing a source or decision unlocks it again."}</p>
               {workspace.freeze.receipt?.compiler_fingerprint && <code>{workspace.freeze.receipt.compiler_fingerprint}</code>}
             </div>
-            <button className="primary-button" type="button" onClick={() => void run("freeze", freezeDataset)} disabled={Boolean(busy) || disabled || !canFreeze}>{busy === "freeze" ? "Freezing…" : frozen ? "Freeze again" : "Freeze dataset"}</button>
+            <button className="primary-button" type="button" onClick={() => void run("freeze", freezeDataset)} disabled={Boolean(busy) || disabled || !canFreeze}>{busy === "freeze" ? "Locking…" : frozen ? "Lock new version" : "Lock dataset for training"}</button>
           </div>
         </>
       )}
