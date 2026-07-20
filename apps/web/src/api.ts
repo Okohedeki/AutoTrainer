@@ -378,6 +378,8 @@ export type TrainingEvent = {
   task_id?: string;
   reward?: number;
   message?: string;
+  round?: number;
+  total_rounds?: number;
   metrics?: Record<string, number | boolean | string | null>;
   rubric?: Record<string, number>;
   hard_gate_passed?: boolean;

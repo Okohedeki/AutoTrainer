@@ -176,6 +176,14 @@ export default function TrainingMonitorPanel({
   ), [events]);
 
   const completedStages = new Set(job?.result?.stages.map((stage) => stage.stage) ?? []);
+  const calibrationProgress = [...events].reverse().find((event) =>
+    event.type === "calibration_round_started" || event.type === "calibration_round_completed",
+  );
+  const calibrationDetail = job?.status === "running" && job.stage === "grpo" && calibrationProgress?.round && calibrationProgress.total_rounds
+    ? calibrationProgress.type === "calibration_round_completed"
+      ? `Calibration round ${calibrationProgress.round} of ${calibrationProgress.total_rounds} verified.`
+      : `Calibration round ${calibrationProgress.round} of ${calibrationProgress.total_rounds} is sampling the frozen starting policy.`
+    : null;
   const statusTone = job?.status === "completed"
     ? "good"
     : job?.status === "failed" || job?.status === "interrupted"
@@ -222,7 +230,7 @@ export default function TrainingMonitorPanel({
         {preparation?.recipe !== "needs_training_data" && preparation?.next_action && (
           <div className="training-next-action" role="note"><span>Do this next</span><strong>{preparation.next_action.title}</strong><p>{preparation.next_action.detail}</p></div>
         )}
-        {job && job.status !== "idle" && <div className="run-message training-run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"}><span className={`health-dot ${statusTone}`} aria-hidden="true" /><div><strong>{stageNames[job.stage || ""] || "Training run"}</strong><p>{job.message}</p></div></div>}
+        {job && job.status !== "idle" && <div className="run-message training-run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"}><span className={`health-dot ${statusTone}`} aria-hidden="true" /><div><strong>{stageNames[job.stage || ""] || "Training run"}</strong><p>{calibrationDetail ?? job.message}</p></div></div>}
       </article>
 
       <GrpoEvidencePanel context="training" refreshKey={`${revision}-${job?.id ?? "idle"}`} live={trainingActive} teachingLoss={sftLoss} />

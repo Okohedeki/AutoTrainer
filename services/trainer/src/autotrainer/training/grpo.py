@@ -357,6 +357,8 @@ def _summarize_starting_policy_calibration(
         changed_rollout_count = 0
         tool_call_count = 0
         tool_calls_by_name: dict[str, int] = defaultdict(int)
+        patch_applied_count = 0
+        patch_rejections_by_reason: dict[str, int] = defaultdict(int)
         for round_number in range(1, repetitions + 1):
             rewards = grouped[task_id].get(round_number, [])
             if len(rewards) != num_generations:
@@ -383,19 +385,39 @@ def _summarize_starting_policy_calibration(
                 and not isinstance(event.get("tool_call_count"), bool)
             )
             round_tools: dict[str, int] = defaultdict(int)
+            round_patch_applied = 0
+            round_patch_rejections: dict[str, int] = defaultdict(int)
             for event in round_events:
                 named_calls = event.get("tool_calls_by_name")
-                if not isinstance(named_calls, Mapping):
-                    continue
-                for name, count in named_calls.items():
-                    if (
-                        isinstance(name, str)
-                        and isinstance(count, int)
-                        and not isinstance(count, bool)
-                        and count >= 0
-                    ):
-                        round_tools[name] += count
-                        tool_calls_by_name[name] += count
+                if isinstance(named_calls, Mapping):
+                    for name, count in named_calls.items():
+                        if (
+                            isinstance(name, str)
+                            and isinstance(count, int)
+                            and not isinstance(count, bool)
+                            and count >= 0
+                        ):
+                            round_tools[name] += count
+                            tool_calls_by_name[name] += count
+                applied_count = event.get("patch_applied_count")
+                if (
+                    isinstance(applied_count, int)
+                    and not isinstance(applied_count, bool)
+                    and applied_count >= 0
+                ):
+                    round_patch_applied += applied_count
+                    patch_applied_count += applied_count
+                raw_rejections = event.get("patch_rejections_by_reason")
+                if isinstance(raw_rejections, Mapping):
+                    for name, count in raw_rejections.items():
+                        if (
+                            isinstance(name, str)
+                            and isinstance(count, int)
+                            and not isinstance(count, bool)
+                            and count >= 0
+                        ):
+                            round_patch_rejections[name] += count
+                            patch_rejections_by_reason[name] += count
             changed_rollout_count += round_changed_count
             tool_call_count += round_tool_count
             round_summaries.append(
@@ -407,6 +429,10 @@ def _summarize_starting_policy_calibration(
                     "changed_rollout_count": round_changed_count,
                     "tool_call_count": round_tool_count,
                     "tool_calls_by_name": dict(sorted(round_tools.items())),
+                    "patch_applied_count": round_patch_applied,
+                    "patch_rejections_by_reason": dict(
+                        sorted(round_patch_rejections.items())
+                    ),
                 }
             )
         if len(round_summaries) == repetitions and varied_rounds == 0:
@@ -423,6 +449,10 @@ def _summarize_starting_policy_calibration(
                 "changed_rollout_count": changed_rollout_count,
                 "tool_call_count": tool_call_count,
                 "tool_calls_by_name": dict(sorted(tool_calls_by_name.items())),
+                "patch_applied_count": patch_applied_count,
+                "patch_rejections_by_reason": dict(
+                    sorted(patch_rejections_by_reason.items())
+                ),
                 "rounds": round_summaries,
             }
         )
@@ -703,11 +733,29 @@ def run_grpo(
         )
         for round_index in range(calibration_repetitions):
             calibration_round = round_index + 1
+            if on_event is not None:
+                on_event(
+                    {
+                        "type": "calibration_round_started",
+                        "stage": "grpo",
+                        "round": calibration_round,
+                        "total_rounds": calibration_repetitions,
+                    }
+                )
             metrics = trainer.evaluate(
                 eval_dataset=train_dataset,
                 metric_key_prefix=f"starting_policy_calibration_{calibration_round}",
             )
             calibration_metrics.append(as_serializable(metrics))
+            if on_event is not None:
+                on_event(
+                    {
+                        "type": "calibration_round_completed",
+                        "stage": "grpo",
+                        "round": calibration_round,
+                        "total_rounds": calibration_repetitions,
+                    }
+                )
         calibration_round = None
         canary_tasks = environment_canary.get("tasks")
         if not isinstance(canary_tasks, list):

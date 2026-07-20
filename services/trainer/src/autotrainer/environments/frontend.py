@@ -60,6 +60,8 @@ class FrontendEnvironment:
         self._verifier_identity: dict[str, Any] | None = None
         self._tool_calls = 0
         self._tool_calls_by_name: dict[str, int] = {}
+        self._patch_applied_count = 0
+        self._patch_rejections_by_reason: dict[str, int] = {}
         self._max_output_chars = 12_000
         self._install_result: CheckResult | None = None
         self._install_untracked_paths: set[str] = set()
@@ -230,7 +232,20 @@ class FrontendEnvironment:
         try:
             applied, message = self._apply_unified_diff(patch)
             if applied:
+                self._patch_applied_count += 1
                 self._latest_diff = self._capture_unified_diff()
+            else:
+                if message.startswith("rejected patch:"):
+                    reason = "invalid_format_or_path"
+                elif message.startswith("patch check failed:"):
+                    reason = "context_mismatch"
+                elif message.startswith("patch apply failed:"):
+                    reason = "apply_failed"
+                else:
+                    reason = "invalid_patch"
+                self._patch_rejections_by_reason[reason] = (
+                    self._patch_rejections_by_reason.get(reason, 0) + 1
+                )
             return self._bounded(message)
         except subprocess.TimeoutExpired as error:
             result = CheckResult(
@@ -558,6 +573,8 @@ class FrontendEnvironment:
         self._episode_id = uuid4().hex[:12]
         self._tool_calls = 0
         self._tool_calls_by_name = {}
+        self._patch_applied_count = 0
+        self._patch_rejections_by_reason = {}
         self._install_result = None
         self._install_untracked_paths = set()
         self._check_results = {}
@@ -731,6 +748,10 @@ class FrontendEnvironment:
                     "gate_reason": result.hard_gate_reason,
                     "tool_call_count": result.tool_call_count,
                     "tool_calls_by_name": dict(sorted(self._tool_calls_by_name.items())),
+                    "patch_applied_count": self._patch_applied_count,
+                    "patch_rejections_by_reason": dict(
+                        sorted(self._patch_rejections_by_reason.items())
+                    ),
                     "elapsed_seconds": result.elapsed_seconds,
                     "changed_file_count": sum(
                         line.startswith("diff --git ")
@@ -1628,6 +1649,8 @@ class FrontendEnvironment:
         self._verifier_identity = None
         self._episode_id = None
         self._tool_calls_by_name = {}
+        self._patch_applied_count = 0
+        self._patch_rejections_by_reason = {}
         self._install_result = None
         self._started_at = None
         self._deadline = None

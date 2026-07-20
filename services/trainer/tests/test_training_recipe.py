@@ -348,6 +348,10 @@ class TrainingRecipeTests(unittest.TestCase):
                 "changed_file_count": changed_files,
                 "tool_call_count": tool_count,
                 "tool_calls_by_name": named_calls,
+                "patch_applied_count": 1 if changed_files else 0,
+                "patch_rejections_by_reason": (
+                    {} if changed_files else {"context_mismatch": 1}
+                ),
             }
             for reward, changed_files, tool_count, named_calls in (
                 (0.2, 0, 2, {"list_files": 1, "read_file": 1}),
@@ -370,6 +374,11 @@ class TrainingRecipeTests(unittest.TestCase):
             {"apply_patch": 1, "list_files": 1, "read_file": 2, "run_check": 1},
         )
         self.assertEqual(task["rounds"][0]["changed_rollout_count"], 1)
+        self.assertEqual(task["patch_applied_count"], 1)
+        self.assertEqual(
+            task["patch_rejections_by_reason"],
+            {"context_mismatch": 1},
+        )
 
     def test_starting_policy_calibration_rejects_flat_or_incomplete_tasks(self) -> None:
         events = [

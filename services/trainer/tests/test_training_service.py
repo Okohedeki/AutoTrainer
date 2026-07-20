@@ -270,6 +270,15 @@ class TrainingServiceTests(unittest.TestCase):
             on_event({"type": "stage_started", "stage": "grpo"})  # type: ignore[operator]
             on_event(  # type: ignore[operator]
                 {
+                    "type": "calibration_round_started",
+                    "stage": "grpo",
+                    "round": 1,
+                    "total_rounds": 2,
+                    "prompt": secret,
+                }
+            )
+            on_event(  # type: ignore[operator]
+                {
                     "type": "trainer_log",
                     "stage": "grpo",
                     "step": 5,
@@ -302,6 +311,11 @@ class TrainingServiceTests(unittest.TestCase):
                     "gate_reason": None,
                     "tool_call_count": 7,
                     "tool_calls_by_name": {"read_file": 4, "apply_patch": 3, "shell": 99},
+                    "patch_applied_count": 1,
+                    "patch_rejections_by_reason": {
+                        "context_mismatch": 2,
+                        "secret_reason": 99,
+                    },
                     "changed_file_count": 2,
                     "elapsed_seconds": 12.5,
                     "rubric": {
@@ -312,6 +326,15 @@ class TrainingServiceTests(unittest.TestCase):
                         "task_tests": 1.0,
                     },
                     "patch": secret,
+                }
+            )
+            on_event(  # type: ignore[operator]
+                {
+                    "type": "calibration_round_completed",
+                    "stage": "grpo",
+                    "round": 1,
+                    "total_rounds": 2,
+                    "rewards": secret,
                 }
             )
             on_event({"type": "stage_completed", "stage": "grpo"})  # type: ignore[operator]
@@ -329,21 +352,26 @@ class TrainingServiceTests(unittest.TestCase):
             [
                 "stage_completed",
                 "stage_started",
+                "calibration_round_started",
                 "trainer_log",
                 "episode_started",
                 "episode_scored",
+                "calibration_round_completed",
                 "stage_completed",
                 "job_completed",
             ],
         )
         self.assertEqual(
             [event["sequence"] for event in page["events"]],
-            list(range(1, 8)),
+            list(range(1, 10)),
         )
         self.assertEqual(page["events"][0]["catalog_fingerprint"], "a" * 64)
-        trainer_log = page["events"][2]
+        calibration_started = page["events"][2]
+        self.assertEqual(calibration_started["round"], 1)
+        self.assertEqual(calibration_started["total_rounds"], 2)
+        trainer_log = page["events"][3]
         self.assertEqual(trainer_log["metrics"], {"loss": 0.25, "reward": 0.75})
-        episode = page["events"][4]
+        episode = page["events"][5]
         self.assertEqual(episode["rubric"]["task_tests"], 1.0)
         self.assertEqual(episode["episode_id"], "0123456789ab")
         self.assertEqual(
@@ -351,14 +379,19 @@ class TrainingServiceTests(unittest.TestCase):
             {"apply_patch": 3, "read_file": 4},
         )
         self.assertEqual(episode["changed_file_count"], 2)
+        self.assertEqual(episode["patch_applied_count"], 1)
+        self.assertEqual(
+            episode["patch_rejections_by_reason"],
+            {"context_mismatch": 2},
+        )
         self.assertEqual(episode["elapsed_seconds"], 12.5)
         serialized = json.dumps(page)
         self.assertNotIn(secret, serialized)
         self.assertNotIn('"patch":', serialized)
 
         tail = manager.events(after=2)
-        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5, 6, 7])
-        self.assertEqual(tail["cursor"], 7)
+        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(tail["cursor"], 9)
         self.assertFalse(tail["truncated"])
 
         restored = TrainingJobManager(self.config_path)

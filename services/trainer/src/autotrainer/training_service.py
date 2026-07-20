@@ -58,6 +58,8 @@ _EVENT_SCHEMA_VERSION = 1
 _EVENT_TYPES = frozenset(
     {
         "stage_started",
+        "calibration_round_started",
+        "calibration_round_completed",
         "trainer_log",
         "episode_started",
         "episode_scored",
@@ -336,7 +338,20 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
     if stage in _STAGES:
         event["stage"] = stage
 
-    if event_type == "trainer_log":
+    if event_type in {"calibration_round_started", "calibration_round_completed"}:
+        event["stage"] = "grpo"
+        round_number = _bounded_integer(value.get("round"), maximum=10_000)
+        total_rounds = _bounded_integer(value.get("total_rounds"), maximum=10_000)
+        if (
+            round_number is None
+            or total_rounds is None
+            or round_number < 1
+            or total_rounds < round_number
+        ):
+            return None
+        event["round"] = round_number
+        event["total_rounds"] = total_rounds
+    elif event_type == "trainer_log":
         if stage not in {"sft", "grpo"}:
             return None
         metrics = _telemetry_metrics(value.get("metrics"))
@@ -393,6 +408,7 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
         for field, maximum in (
             ("tool_call_count", 100_000),
             ("changed_file_count", 100_000),
+            ("patch_applied_count", 100_000),
         ):
             count = _bounded_integer(value.get(field), maximum=maximum)
             if count is not None:
@@ -403,6 +419,21 @@ def _sanitize_event(value: object) -> dict[str, Any] | None:
         tool_counts = _tool_call_counts(value.get("tool_calls_by_name"))
         if tool_counts:
             event["tool_calls_by_name"] = tool_counts
+        raw_rejections = value.get("patch_rejections_by_reason")
+        if isinstance(raw_rejections, Mapping):
+            allowed_rejections = {
+                "apply_failed",
+                "context_mismatch",
+                "invalid_format_or_path",
+                "invalid_patch",
+            }
+            rejections: dict[str, int] = {}
+            for name in sorted(allowed_rejections):
+                count = _bounded_integer(raw_rejections.get(name), maximum=100_000)
+                if count is not None:
+                    rejections[name] = count
+            if rejections:
+                event["patch_rejections_by_reason"] = rejections
     elif event_type == "job_completed":
         recipe = str(value.get("recipe", ""))
         if recipe in _RECIPES:
