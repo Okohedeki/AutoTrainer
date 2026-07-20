@@ -8,7 +8,7 @@ executable tasks only  -> QLoRA GRPO
 both signals           -> SFT, then GRPO continues the SFT adapter
 ```
 
-The base weights remain frozen in every path.
+The base weights remain frozen in every path. AutoTrainer verifies after PEFT setup that only LoRA adapter parameters are trainable and fails before optimization if that invariant is broken.
 
 ## Prepare before loading weights
 
@@ -24,6 +24,7 @@ Preparation:
 - validates YAML, paths, source intent, and recipes;
 - scans and locks repositories;
 - compiles explicit SFT and task JSONL;
+- verifies that the operator inspected and froze the current local dataset;
 - verifies the recorded Hugging Face snapshot;
 - selects teach, practice, or both;
 - checks Python, CUDA/GPU, training packages, and the container runtime;
@@ -48,7 +49,9 @@ evaluation:
   dataset: .autotrainer/compiled/rl/evaluation.jsonl
 ```
 
-Review the compiled rows and compile report before a costly run. SFT rows are text conversations. GRPO rows carry the conversational prompt, task manifest, locked source identity, and sandbox settings. Final evaluation tasks stay outside optimization and checkpoint selection.
+Review the Data workspace, compiled rows, language counts, patches, and compile report before a costly run, then explicitly freeze the dataset. SFT rows are text conversations. GRPO rows carry the conversational prompt, task manifest, locked source identity, and sandbox settings. Final evaluation tasks stay outside optimization and checkpoint selection.
+
+Any change to the configuration, PR catalog, LLM designs, approvals, task definitions, or compiled bytes makes the receipt stale. `prepare` and every real training entry point fail closed until the local dataset is frozen again.
 
 ## SFT
 
@@ -134,7 +137,19 @@ An exclusive cross-process GPU-0 lease covers:
 
 Only one of those operations may run across all local AutoTrainer projects. This prevents the GUI and an agent command from accidentally loading competing 9B models.
 
-For out-of-memory failures, reduce sequence/completion length, generation count, or the generation batch first. Record every change in the resolved recipe.
+The Train screen exposes the adapter-only resource policy:
+
+```yaml
+refinement:
+  mode: adapter_only
+  vram:
+    max_gib: 20
+    enforcement: hard
+```
+
+`hard` sets the CUDA per-process memory fraction before weights load and also passes a GPU `max_memory` map to the model loader. It is the default when sharing the computer matters most. `soft` records and displays the same ceiling as an operating target but does not ask CUDA to reject allocations beyond it. Both modes report allocated, reserved, and configured GiB in observed telemetry. The limit applies to the AutoTrainer process; GPU memory already consumed by unrelated applications remains outside its control.
+
+For out-of-memory failures, reduce the VRAM ceiling only if headroom exists; otherwise reduce sequence/completion length, generation count, or the generation batch first. Record every change in the resolved recipe.
 
 ## Evaluation after training
 
@@ -153,7 +168,9 @@ The benchmark compares:
 
 Both use the same held-out task snapshots, instructions, tools, limits, seeds, sampling settings, and trusted verifier. The built-in runner loads arms in a frozen grouped order so one 9B model occupies the GPU at a time. Each result, patch, verifier report, and rubric component is durable and appears in the Evaluation view only when observed.
 
-The separate Fable A/B remains external and deferred until its version and orchestration digest are pinned. Its absence does not prevent the local model benchmark, but both decisions are required before a final verified-winner claim.
+Before planning, AutoTrainer selects the shipped evaluation profile that matches the primary frozen training language: Python, TypeScript/React, C#, or C++. It blocks a manually selected mismatch and a held-out repository set with no code in that language. The profiles use language-appropriate build/test expectations and common code-generation metrics, informed by HumanEval, MBPP, MultiPL-E, and HumanEval-X without delegating execution or trust to those projects.
+
+Fable is an optional external compatibility add-on, not a V1 prerequisite. Running `autotrainer fable pin` explicitly adds its control arm, suite, and decision to that project; only then does Fable become part of that project's proof contract.
 
 ## Serve the result
 
@@ -189,4 +206,4 @@ Changing model/source revisions, compiler code, adapter architecture, reward pol
 - full-weight fine-tuning or merged-base redistribution;
 - arbitrary model/framework compatibility;
 - unreviewed conversion of any repository into demonstrations or tasks;
-- improvement claims without held-out model and Fable evidence.
+- improvement claims without language-matched held-out model evidence.

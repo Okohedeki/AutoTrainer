@@ -218,6 +218,7 @@ export default function DatasetWorkspacePanel({
                   <strong>{candidate.design.recommended_method === "qlora" ? "QLoRA example" : "GRPO task"} · {languageLabels[candidate.design.language]}</strong>
                   <p>{candidate.design.reason}</p>
                   {candidate.design.grpo_task && <p><b>Verifier focus:</b> {candidate.design.grpo_task.verifier_focus}</p>}
+                  {candidate.design.recommended_method === "grpo" && <p><b>Next:</b> use this proposal in the executable task form and supply its hidden verifier. Then reject this candidate as an SFT example. You can still approve it below if you intentionally prefer QLoRA.</p>}
                 </div>
               )}
 
@@ -234,7 +235,7 @@ export default function DatasetWorkspacePanel({
               <label className="rights-check"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} disabled={Boolean(busy) || disabled} /><span>I have the right to use this change for local refinement.</span></label>
               <div className="history-actions">
                 <button className="text-button" type="button" onClick={() => review("rejected")} disabled={Boolean(busy) || disabled}>Reject</button>
-                <button className="primary-button" type="button" onClick={() => review("approved")} disabled={Boolean(busy) || disabled || !rightsConfirmed || !instruction.trim()}>{busy === "review" ? "Saving…" : "Approve QLoRA example"}</button>
+                <button className="primary-button" type="button" onClick={() => review("approved")} disabled={Boolean(busy) || disabled || !rightsConfirmed || !instruction.trim()}>{busy === "review" ? "Saving…" : candidate.design?.recommended_method === "grpo" ? "Use as QLoRA instead" : "Approve QLoRA example"}</button>
               </div>
             </div>
           )}

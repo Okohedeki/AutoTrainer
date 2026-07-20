@@ -37,7 +37,7 @@ autotrainer source add ./data/accepted.jsonl --config autotrainer.yaml
 autotrainer source add ./tasks/train --config autotrainer.yaml
 ```
 
-An ordinary GitHub add is transactional: AutoTrainer clones it beneath the project's managed source directory, resolves the requested revision, checks out a detached commit, validates the resulting declaration, and then saves YAML. A failed clone or validation does not leave a configured source.
+An ordinary GitHub training add is transactional and requires an SPDX license declaration. AutoTrainer clones it beneath the project's managed source directory, resolves the requested revision, checks out a detached commit, validates the resulting declaration, and then saves YAML. A failed clone or validation does not leave a configured source.
 
 Local sources remain at their existing paths. A local repository must be the root of a Git working tree and have a resolvable commit. Local paths are resolved relative to `autotrainer.yaml` unless absolute.
 
@@ -106,9 +106,48 @@ Scanning:
 
 A configured source can still be blocked for its intended role. That result should be fixed, not hidden.
 
+## Merged pull requests are the dataset intake
+
+For a GitHub `accepted_changes` source, the quality rule is deliberately plain: the pull request must have been merged into `main` or `master`, and its merge commit must be part of the pinned checkout. AutoTrainer does not add popularity, author, diff-size, or style-score heuristics. The repository allowlist and SPDX declaration define the permitted source boundary.
+
+The Data workspace makes this intake inspectable and local:
+
+```bash
+autotrainer dataset sync --config autotrainer.yaml
+autotrainer dataset status --config autotrainer.yaml
+```
+
+`sync` queries GitHub for closed pull requests, retains only qualifying merged PRs, and stores a safe catalog under `.autotrainer/dataset/github-prs`. It does not execute upstream code or store credentials. A stale or unsynced GitHub catalog blocks accepted-history compilation.
+
+Each candidate can then be reviewed by an operator-selected inexpensive LLM:
+
+```bash
+# Local OpenAI-compatible loopback endpoint (defaults to 127.0.0.1:8000/v1/chat/completions).
+autotrainer dataset design CANDIDATE_ID \
+  --provider local \
+  --model LOCAL_MODEL_ID \
+  --config autotrainer.yaml
+
+# Anthropic/Claude; ANTHROPIC_API_KEY stays in the process environment.
+autotrainer dataset design CANDIDATE_ID \
+  --provider anthropic \
+  --model CLAUDE_MODEL_ID \
+  --config autotrainer.yaml
+```
+
+The model receives bounded PR metadata and the patch, then proposes the language, instruction, and whether the evidence belongs in QLoRA SFT or needs a GRPO task design. The proposal is not an approval. Inspect the patch and proposal in Data, then approve or reject it through the normal history review contract.
+
+When the rows, language mix, and selected learning path look correct, explicitly freeze them:
+
+```bash
+autotrainer dataset freeze --config autotrainer.yaml
+```
+
+The freeze receipt binds the config, PR catalogs, human reviews, designs, compiled files, and language counts. Training refuses a missing or stale receipt. Re-syncing, redesigning, changing an approval, or changing compiled data requires a new inspection and freeze.
+
 ## Accepted changes for SFT
 
-`accepted_changes` makes small Git changes eligible for review. It does not approve them automatically.
+`accepted_changes` makes qualifying merged pull requests eligible for review. It does not approve them automatically.
 
 ```bash
 autotrainer history list --config autotrainer.yaml
@@ -118,7 +157,7 @@ autotrainer history review CANDIDATE_ID --approve \
   --config autotrainer.yaml
 ```
 
-The instruction must describe the real task without revealing the patch. AutoTrainer rejects stale approvals and obvious answer leakage. Only reviewed, rights-confirmed examples reach SFT compilation.
+The instruction must describe the real task without revealing the patch. It can originate from the inspected LLM proposal and remains operator-owned at approval time. AutoTrainer rejects stale approvals and obvious answer leakage. Only reviewed, rights-confirmed examples reach SFT compilation.
 
 The Data screen can also create a supervised example directly when the
 accepted response is already known. It stores the example in a managed JSONL
@@ -234,11 +273,13 @@ The verifier report must contain `build_passed`, `regression_pass_rate`,
 `task_pass_rate`, `responsive_pass_rate`, `design_rule_pass_rate`, and
 `code_quality_pass_rate`; Prepare validates those observed values before GRPO.
 
-## Compile and inspect
+## Compile, inspect, and freeze
 
 ```bash
 autotrainer compile --config autotrainer.yaml
 autotrainer plan --write --config autotrainer.yaml
+autotrainer dataset status --config autotrainer.yaml
+autotrainer dataset freeze --config autotrainer.yaml
 ```
 
 Compilation writes inspectable artifacts below `project.artifact_dir`:
@@ -251,10 +292,11 @@ Compilation writes inspectable artifacts below `project.artifact_dir`:
   compiled/sft/train.jsonl
   compiled/rl/train.jsonl
   compiled/rl/evaluation.jsonl
+  dataset/freeze.json
   plan.json
 ```
 
-The presence of a repository never creates SFT rows. It contributes rows only through approved history examples or explicit task contracts.
+The presence of a repository never creates SFT rows. It contributes rows only through approved merged-PR examples or explicit task contracts, and neither may train until the resulting local dataset is frozen.
 
 ## Holdout isolation
 

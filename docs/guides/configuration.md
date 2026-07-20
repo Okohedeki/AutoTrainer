@@ -24,6 +24,7 @@ project: {}
 model: {}
 sources: []
 qlora: {}
+refinement: {}
 sft: {}
 grpo: {}
 environment: {}
@@ -120,6 +121,18 @@ qlora:
 
 The base is loaded in 4-bit NF4 and remains frozen. This section defines the trainable PEFT adapter. Changing its architecture creates a different experiment.
 
+## `refinement`
+
+```yaml
+refinement:
+  mode: adapter_only
+  vram:
+    max_gib: 20
+    enforcement: hard
+```
+
+V1 accepts only `adapter_only`; full-weight training is rejected. `max_gib` is a per-process ceiling from 4 through 192 GiB. `hard` installs a CUDA allocator fraction before model allocation and supplies the same maximum to the model loader. `soft` keeps the loader maximum and telemetry but omits the allocator fraction. The GUI edits both values through the validated refinement API.
+
 ## `sft`
 
 ```yaml
@@ -204,10 +217,11 @@ Docker or Podman runs one disposable frontend environment at a time. The policy 
 
 ## `evaluation`
 
-New projects receive a built-in local model benchmark and a deferred external Fable suite:
+New projects receive a built-in local model benchmark. `language: auto` resolves to the primary language recorded in the frozen training dataset; the supported values are `python`, `typescript_react`, `csharp`, and `cpp`:
 
 ```yaml
 evaluation:
+  language: auto
   task_pack: held-out-frontend
   dataset: .autotrainer/compiled/rl/evaluation.jsonl
   task_split: evaluation
@@ -215,7 +229,7 @@ evaluation:
   seeds: [1701, 1702, 1703]
   holdout_unit: repository
   primary_metric: verified_task_success
-  candidates: [reference_9b, base_fable, autotrainer]
+  candidates: [reference_9b, autotrainer]
   arms:
     reference_9b:
       label: Qwythos 9B reference
@@ -230,11 +244,6 @@ evaluation:
         dtype: bfloat16
         max_sequence_length: 2048
         quantization: project
-    base_fable:
-      label: Base 9B + Fable
-      role: control
-      parameter_class: 9b
-      model: project
     autotrainer:
       label: AutoTrainer 9B
       role: candidate
@@ -249,19 +258,6 @@ evaluation:
       arms: [reference_9b, autotrainer]
       runner:
         type: builtin
-    fable_ab:
-      kind: fable_ab
-      arms: [base_fable, autotrainer]
-      runner:
-        type: external
-        producer: fable
-        version: REPLACE_WITH_FABLE_VERSION
-        orchestration_sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
-        result_schema: autotrainer-evaluation-result-v1
-      review:
-        type: manual
-        blind: true
-        reviewers_per_pair: 3
   fairness:
     paired_by: [task_id, repetition, seed]
     same_task_snapshot: true
@@ -285,26 +281,17 @@ evaluation:
       metric: verified_task_success
       minimum_delta: 0.0
       minimum_tasks: 5
-    fable_ab:
-      candidate: autotrainer
-      control: base_fable
-      metric: blind_preference_rate
-      minimum_rate: 0.5
-      minimum_tasks: 5
 ```
 
 The candidate adapter path must point to the stage being evaluated. A project that trains only SFT should update the path/stage to its SFT output before freezing a proof plan.
 
-The built-in runner owns its prompt/loader protocol. Its identity includes the installed evaluator code digest and pinned dependency versions. `evaluate plan --write` also freezes tasks, model revisions, adapter bytes, environment, seeds, fairness settings, and the derived trial matrix. Plan or trial tampering fails closed.
+The built-in runner owns its prompt/loader protocol. Its identity includes the installed evaluator code digest and pinned dependency versions. Before planning, AutoTrainer verifies that the selected shipped profile matches the primary training language and that held-out repositories contain that language. The initial profiles are Python, TypeScript/React, C#, and C++; their check/metric design cites HumanEval, MBPP, MultiPL-E, and HumanEval-X as inspiration, while execution remains in AutoTrainer's trusted verifier.
+
+`evaluate plan --write` also freezes tasks, model revisions, adapter bytes, environment, seeds, fairness settings, and the derived trial matrix. Plan or trial tampering fails closed.
 
 Single-GPU execution is truthful: pair positions are counterbalanced for analysis, but trials run in a frozen grouped order so only one 9B arm is loaded at a time. The legacy `randomize_arm_order: true` fairness form remains readable for older projects; new configs use the explicit policies above.
 
-Fable placeholders make only `fable_ab` deferred. They do not block planning
-or running `model_benchmark`. In Evaluate, **Hash and pin** computes the
-orchestration digest from a supplied runtime file or directory and updates
-these fields transactionally. The equivalent agent command is
-`autotrainer fable pin --version VERSION --runtime PATH`; users do not need to
-calculate or paste a digest.
+Fable is not present in a new V1 project. For backward compatibility, `autotrainer fable pin --version VERSION --runtime PATH` explicitly adds the optional control arm, `fable_ab` suite, and decision while hashing the supplied runtime. Once enabled, it is validated and reported separately from the built-in benchmark.
 
 ### Evaluation evidence
 
@@ -312,7 +299,7 @@ Every planned trial has a durable `autotrainer-evaluation-result-v1` envelope va
 
 External result paths must remain relative to their envelope, stay inside its directory, and satisfy file limits. Failed or timed-out trials remain in decision denominators as zeroes.
 
-Fable blind-review imports use [`schemas/blind-review-row.schema.json`](../../schemas/blind-review-row.schema.json) and contain only a frozen `pair_id`, reviewer ID, and `left`, `right`, `tie`, or `both_fail` choice. Arm identities never belong in the reviewer file.
+Optional Fable blind-review imports use [`schemas/blind-review-row.schema.json`](../../schemas/blind-review-row.schema.json) and contain only a frozen `pair_id`, reviewer ID, and `left`, `right`, `tie`, or `both_fail` choice. Arm identities never belong in the reviewer file.
 
 ## `package`
 
@@ -322,6 +309,6 @@ package:
   merge_base_weights: false
 ```
 
-The normal package is an adapter plus provenance, hashes, resolved recipe, licenses, and evaluation reports; it is not a copy of base weights. A winner package requires both evaluation decisions. `--allow-unverified` creates a clearly labeled development artifact, never a winner claim.
+The normal package is an adapter plus provenance, hashes, resolved recipe, licenses, and evaluation reports; it is not a copy of base weights. A winner package requires every evaluation decision configured for that project. A default project has only the language-matched model benchmark decision. `--allow-unverified` creates a clearly labeled development artifact, never a winner claim.
 
 Packaging and hosting are separate. `autotrainer package` assembles files. `autotrainer host start` reads the downloaded base and a completed SFT/GRPO adapter directly from the configured output directories.

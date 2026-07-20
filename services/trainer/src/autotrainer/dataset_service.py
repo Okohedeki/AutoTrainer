@@ -550,6 +550,13 @@ def freeze_dataset(config_path: str | Path) -> dict[str, Any]:
             "status": "frozen",
         }
         _atomic_json(_freeze_path(config), receipt)
+        # A new dataset freeze can change the primary training language even
+        # when an older benchmark run remains useful audit evidence. Retire
+        # only the mutable pointer so evaluation must resolve and freeze the
+        # matching shipped language profile again.
+        (config.artifact_dir / "evaluation" / "current-plan.json").unlink(
+            missing_ok=True
+        )
         return get_dataset_workspace(config.path)
 
 

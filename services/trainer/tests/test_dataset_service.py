@@ -158,12 +158,21 @@ class DatasetServiceTests(unittest.TestCase):
             }
         ]
         write_config(self.config_path, config, overwrite=True)
+        current_plan = (
+            self.root / ".autotrainer" / "evaluation" / "current-plan.json"
+        )
+        current_plan.parent.mkdir(parents=True)
+        current_plan.write_text(
+            json.dumps({"path": "old", "plan_id": "old"}) + "\n",
+            encoding="utf-8",
+        )
 
         frozen = freeze_dataset(self.config_path)
 
         self.assertEqual(frozen["freeze"]["status"], "ready")
         self.assertEqual(frozen["freeze"]["receipt"]["counts"]["sft_train"], 1)
         self.assertTrue(require_frozen_dataset(self.config_path))
+        self.assertFalse(current_plan.exists())
 
         examples.write_text(examples.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         self.assertEqual(get_dataset_workspace(self.config_path)["freeze"]["status"], "stale")

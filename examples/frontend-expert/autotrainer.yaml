@@ -24,6 +24,11 @@ qlora:
   dropout: 0.0
   bias: none
   target_modules: all-linear
+refinement:
+  mode: adapter_only
+  vram:
+    max_gib: 20
+    enforcement: hard
 sft:
   enabled: true
   dataset: ./.autotrainer/compiled/sft/train.jsonl
@@ -75,6 +80,7 @@ environment:
   max_tool_output_chars: 20000
   episode_timeout_seconds: 900
 evaluation:
+  language: typescript_react
   task_pack: held-out-frontend
   dataset: ./.autotrainer/compiled/rl/evaluation.jsonl
   task_split: evaluation
@@ -87,27 +93,21 @@ evaluation:
   primary_metric: verified_task_success
   candidates:
   - reference_9b
-  - base_fable
   - autotrainer
   arms:
     reference_9b:
-      label: Base Qwen3.5 9B reference
+      label: Qwythos 9B reference
       role: reference
       parameter_class: 9b
       model:
         provider: huggingface
-        id: Qwen/Qwen3.5-9B
-        revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
-        loader: qwen3_5_text
+        id: empero-ai/Qwythos-9B-Claude-Mythos-5-1M
+        revision: 14a29bae5143091aeaf87ad37120de4cd57d592c
+        loader: auto_text_causal_lm
         trust_remote_code: false
         dtype: bfloat16
         max_sequence_length: 2048
         quantization: project
-    base_fable:
-      label: Base Qwen3.5 9B with Fable
-      role: control
-      parameter_class: 9b
-      model: project
     autotrainer:
       label: AutoTrainer Qwen3.5 9B adapter
       role: candidate
@@ -123,31 +123,7 @@ evaluation:
       - reference_9b
       - autotrainer
       runner:
-        type: command
-        producer: local-model-agent
-        version: REPLACE_WITH_RUNNER_VERSION
-        orchestration_sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
-        argv:
-        - REPLACE_WITH_MODEL_AGENT
-        - --request
-        - '{request}'
-        - --result
-        - '{result}'
-    fable_ab:
-      kind: fable_ab
-      arms:
-      - base_fable
-      - autotrainer
-      runner:
-        type: external
-        producer: fable
-        version: REPLACE_WITH_FABLE_VERSION
-        orchestration_sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
-        result_schema: autotrainer-evaluation-result-v1
-      review:
-        type: manual
-        blind: true
-        reviewers_per_pair: 3
+        type: builtin
   fairness:
     paired_by:
     - task_id
@@ -161,7 +137,9 @@ evaluation:
     same_sampling: true
     require_seed_control: true
     immutable_models_and_adapter: true
-    randomize_arm_order: true
+    pair_position_policy: deterministic_counterbalance
+    execution_order_policy: frozen_per_suite
+    per_trial_arm_randomization: false
     failures_score_zero: true
     allow_unplanned_reruns: false
   decisions:
@@ -171,12 +149,6 @@ evaluation:
       control: reference_9b
       metric: verified_task_success
       minimum_delta: 0.0
-      minimum_tasks: 5
-    fable_ab:
-      candidate: autotrainer
-      control: base_fable
-      metric: blind_preference_rate
-      minimum_rate: 0.5
       minimum_tasks: 5
 package:
   name: polished-frontend-9b

@@ -141,17 +141,30 @@ autotrainer source add ./tasks/train --config autotrainer.yaml
 autotrainer source list --config autotrainer.yaml
 ```
 
-A GitHub add clones into AutoTrainer-managed storage, checks out a detached pinned commit, and only then saves the source. Local Git repositories, `.jsonl` files, and task-pack directories stay where they are.
+A GitHub training add requires an SPDX license declaration, clones into AutoTrainer-managed storage, checks out a detached pinned commit, and only then saves the source. Local Git repositories, `.jsonl` files, and task-pack directories stay where they are.
 
-Raw repository code is not automatically a demonstration or an RL environment. The GUI shows the next required action for each source. For accepted Git history:
+For GitHub accepted changes, open the Dataset workspace and sync the source. AutoTrainer retains only pull requests merged into `main` or `master` whose merge is reachable from the pinned checkout. There is no hidden quality score beyond that merge decision.
+
+Choose a local OpenAI-compatible model or an Anthropic/Claude model to inspect each PR patch and propose its language, instruction, and QLoRA/GRPO treatment. The model designs; the operator decides. Inspect the patch and proposal, approve or reject it, and inspect language counts and compiled rows before freezing:
 
 ```bash
+autotrainer dataset sync --config autotrainer.yaml
+autotrainer dataset status --config autotrainer.yaml
+autotrainer dataset design CANDIDATE_ID \
+  --provider local \
+  --model LOCAL_MODEL_ID \
+  --config autotrainer.yaml
+
 autotrainer history list --config autotrainer.yaml
 autotrainer history review CANDIDATE_ID --approve \
   --instruction "Describe the task this accepted change solved" \
   --rights-confirmed \
   --config autotrainer.yaml
+
+autotrainer dataset freeze --config autotrainer.yaml
 ```
+
+For Claude, use `--provider anthropic --model CLAUDE_MODEL_ID` and expose `ANTHROPIC_API_KEY` only to the backend process. Dataset catalogs, proposals, reviews, compiled rows, and the freeze receipt stay inside the project artifact directory. Training refuses to begin if the receipt is missing or any bound input has changed.
 
 ## 3. Train
 
@@ -174,22 +187,24 @@ The Training view shows observed stages, logs, loss/reward metrics, and output a
 
 Only one Train, Evaluate, or Host operation may own GPU 0. A second local project or agent command receives a busy error instead of loading another 9B model.
 
+Before starting, choose the adapter-only VRAM policy in Train. `hard` installs a per-process CUDA allocator ceiling before loading weights; `soft` keeps the loader budget and telemetry without the allocator fraction. Both apply the selected GiB maximum to model loading. This limits AutoTrainer, not unrelated applications that already occupy the GPU.
+
 ## 4. Evaluate
 
-Add multiple task packs from repository/project families that contributed no training code, demonstrations, mutation seeds, or rollouts. Then freeze and run the local benchmark:
+Add multiple task packs from repository/project families that contributed no training code, demonstrations, mutation seeds, or rollouts. AutoTrainer selects the Python, TypeScript/React, C#, or C++ profile that matches the primary frozen training language and blocks mismatched held-out sources. Then freeze and run the local benchmark:
 
 ```bash
 autotrainer evaluate plan --write --config autotrainer.yaml
 autotrainer evaluate run --suite model_benchmark --config autotrainer.yaml
 ```
 
-The built-in runner compares the pinned Qwythos reference and the candidate adapter one arm at a time on the same task matrix. Results are generated, stored, applied, and scored with the trusted verifier. The GUI graphs actual build, regression, task, responsive, design, and patch-quality evidence as trials complete.
+The built-in runner compares the pinned Qwythos reference and the candidate adapter one arm at a time on the same task matrix. Results are generated, stored, applied, and scored with the trusted verifier. The GUI graphs actual build, regression, task, responsive, design, and patch-quality evidence as trials complete. The shipped language profiles borrow metric/check ideas from HumanEval, MBPP, MultiPL-E, and HumanEval-X; AutoTrainer owns the executable task and verifier contract.
 
-Fable is a separate external suite. Its missing runtime or placeholder identity
-does not block the local model benchmark. The Evaluate screen now manages the
-complete exchange: supply the real Fable runtime or orchestration bundle and
-version, let AutoTrainer hash and pin those bytes, then use the ordered actions
-to export requests, ingest results, manage blind review, and build the report.
+Fable is not required for V1. Existing users can explicitly opt a project into
+the separate external compatibility suite. Pinning adds its arm, suite, and
+decision to that project's proof contract, after which AutoTrainer manages the
+exchange: hash the runtime, export requests, ingest results, manage blind
+review, and build the separate report.
 
 Agents use the same workflow:
 
@@ -256,7 +271,7 @@ export AUTOTRAINER_HOME="$HOME/.local/share/autotrainer"
 - One local GPU; no cloud, distributed, or multi-GPU training.
 - GitHub repositories or supported local files only for normal V1 onboarding.
 - No bundled weights and no completed real 9B training/evaluation proof in this checkout.
-- No included Fable runtime, outputs, or blind reviews.
+- Optional Fable compatibility does not include a runtime, outputs, or blind reviews.
 - Local model hosting is loopback-only, non-streaming, and not public deployment.
 - Interrupted jobs leave durable evidence, but optimizer checkpoint resume is not automatic for every path.
 

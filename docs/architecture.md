@@ -28,7 +28,7 @@ They call the same Python services and persist the same project files. The GUI d
 The console is organized around the work, not internal commands:
 
 1. **Projects** - create or select one local specialist workspace.
-2. **Data** - select/download models and declare learning or held-out sources.
+2. **Data** - select/download models, declare licensed learning/held-out sources, inspect LLM-designed PR examples/tasks, and freeze the local dataset.
 3. **Train** - prepare, select SFT/GRPO stages, execute, and graph observed metrics.
 4. **Evaluate** - freeze the benchmark and show trusted generation/verifier results.
 5. **Serve** - load the downloaded base or a completed adapter behind a local endpoint.
@@ -60,7 +60,11 @@ Human-facing repository modes map to the canonical YAML roles:
 | `reference_only` | `style` | inspect code without turning it into training rows |
 | `evaluation_holdout` | `evaluation` | isolate the repository from optimization |
 
-Adding a GitHub source clones it into project-managed storage and pins a detached commit before the declaration is saved. Local sources remain in place. Scanning is read-only; compilation produces explicit JSONL and provenance below the project artifact directory.
+Adding a GitHub training source requires its SPDX license, clones it into project-managed storage, and pins a detached commit before the declaration is saved. The GitHub PR catalog admits only changes merged into `main` or `master` and reachable from that pin. Local sources remain in place.
+
+An operator-selected local or Anthropic model can inspect bounded PR metadata and patches to propose language, instruction, and QLoRA/GRPO treatment. Its output is stored as a design proposal, never silently accepted. Human review remains the authority. Scanning and design do not execute repository code; compilation produces explicit JSONL and provenance below the project artifact directory.
+
+The dataset workspace is a durable boundary of its own. A freeze receipt binds config, catalogs, designs, approvals, task contracts, compiled bytes, and language counts. Training repeats that integrity check before CUDA setup and fails if any input is stale.
 
 ## Model boundary
 
@@ -78,7 +82,7 @@ It has its own download receipt and cannot become the project training base.
 
 ## Training boundary
 
-QLoRA keeps the base weights frozen and trains a PEFT adapter. Compiled evidence selects one path:
+QLoRA keeps the base weights frozen and trains a PEFT adapter. After PEFT attachment, each trainer verifies that every trainable parameter is a LoRA parameter. Full-model training is outside the accepted configuration and fails closed. Compiled evidence selects one path:
 
 - demonstrations only -> SFT;
 - executable tasks only -> GRPO from the base or an explicitly compatible adapter;
@@ -88,7 +92,11 @@ GRPO tasks execute in disposable, network-disabled Docker or Podman environments
 
 Training records are durable. The UI polls observed trainer events and renders their real steps and metrics; it does not interpolate an optimizer curve or invent progress.
 
+The refinement policy carries a user-selected GiB ceiling and `hard` or `soft` enforcement. Both feed a maximum-memory map into model loading. Hard mode additionally installs the CUDA per-process memory fraction before allocating weights. Allocated, reserved, and configured memory are observed in telemetry.
+
 ## Evaluation boundary
+
+Before a plan is frozen, the language service resolves the primary frozen training language and requires a matching held-out repository set. Shipped profiles cover Python, TypeScript/React, C#, and C++. Their build/test/quality expectations and pass-at-1 reporting are informed by HumanEval, MBPP, MultiPL-E, and HumanEval-X, while task execution stays inside AutoTrainer's verifier boundary.
 
 `evaluate plan --write` freezes the held-out task matrix, model revisions, adapter digest, environment, runner identity, seeds, and fairness policy. The plan and trial matrix are cryptographically checked when loaded.
 
@@ -102,12 +110,11 @@ The `model_benchmark` suite uses AutoTrainer's built-in text-only producer. It:
 
 Arms are grouped so only one 9B model occupies the GPU. Analysis positions remain deterministically counterbalanced; V1 does not claim per-trial GPU arm randomization.
 
-The `fable_ab` suite is external. AutoTrainer can hash and pin a supplied Fable
-runtime bundle, freeze/export its requests, background-ingest envelopes,
-locally verify patches, manage blind-review rows, and report a separate
-decision. It does not include or emulate a Fable runtime. Placeholder Fable
-identity is marked deferred and does not block the built-in local model
-benchmark.
+The `fable_ab` suite is optional compatibility, not part of a new V1 project.
+Explicitly pinning a supplied Fable runtime adds its control arm, suite, and
+decision. AutoTrainer can then freeze/export requests, background-ingest
+envelopes, locally verify patches, manage blind-review rows, and report a
+separate decision. It does not include or emulate a Fable runtime.
 
 ## GPU coordination
 
@@ -124,4 +131,4 @@ The V1 model endpoint is OpenAI-compatible only for the implemented subset: text
 
 ## Proof status
 
-The services, contracts, UI, and local job/evidence paths are implemented. This repository does not bundle weights and has not yet completed a real 9B training run, a production held-out benchmark, or the external Fable comparison. Those results remain the release proof, not assumptions encoded in the architecture.
+The services, contracts, UI, and local job/evidence paths are implemented. This repository does not bundle weights and has not yet completed a real 9B training run or a production held-out benchmark. Those results remain the release proof, not assumptions encoded in the architecture. An external Fable comparison is relevant only for a project that explicitly opts into it.
