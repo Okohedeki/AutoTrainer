@@ -396,6 +396,10 @@ class CompilerTests(unittest.TestCase):
                 .splitlines()[0]
             )
             self.assertEqual(rl_row["source_revision"], scan["sources"][0]["commit"])
+            system_prompt = rl_row["prompt"][0]["content"]
+            self.assertIn("Inspection is not completion", system_prompt)
+            self.assertIn("apply_patch", system_prompt)
+            self.assertIn("run the named checks", system_prompt)
             self.assertEqual(
                 rl_row["source_repository_identity"],
                 scan["sources"][0]["repository_identity"],

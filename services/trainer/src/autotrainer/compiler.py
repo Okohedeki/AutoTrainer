@@ -663,7 +663,9 @@ def compile_data(
                             "role": "system",
                             "content": (
                                 "You are editing a disposable frontend repository. Use only the provided "
-                                "bounded tools. Finish with a verified focused patch; never request network access."
+                                "bounded tools. Inspection is not completion: for every repair task, attempt "
+                                "a focused change with apply_patch and run the named checks before your final "
+                                "response. Never request network access."
                             ),
                         },
                         {"role": "user", "content": manifest.instruction},
