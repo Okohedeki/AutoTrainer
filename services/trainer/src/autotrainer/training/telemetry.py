@@ -52,6 +52,8 @@ def make_trainer_log_callback(
     *,
     stage: str,
     on_event: TrainingEventCallback | None,
+    torch_module: Any | None = None,
+    vram_limit_gib: float | None = None,
 ) -> object:
     """Create a real TrainerCallback without importing Transformers eagerly."""
 
@@ -69,6 +71,25 @@ def make_trainer_log_callback(
             if on_event is None:
                 return control
             metrics = numeric_metrics(logs)
+            if torch_module is not None and vram_limit_gib is not None:
+                try:
+                    metrics.update(
+                        {
+                            "vram_allocated_gib": round(
+                                float(torch_module.cuda.memory_allocated(0)) / 1024**3,
+                                3,
+                            ),
+                            "vram_limit_gib": float(vram_limit_gib),
+                            "vram_reserved_gib": round(
+                                float(torch_module.cuda.memory_reserved(0)) / 1024**3,
+                                3,
+                            ),
+                        }
+                    )
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    # The hard policy is enforced by CUDA's allocator. Missing
+                    # counters affect observability, not the installed cap.
+                    pass
             if not metrics:
                 return control
             event: dict[str, Any] = {

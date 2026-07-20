@@ -54,6 +54,7 @@ from .model_service import (
 )
 from .model_download_service import ModelDownloadManager
 from .project_service import prepare_project
+from .refinement_service import get_refinement_settings, set_refinement_settings
 from .project_gate import (
     ProjectBusyError,
     acquire_project_lease,
@@ -660,6 +661,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         get_dataset_workspace(self.server.config_path),
                     )
+                elif path == f"{API_PREFIX}/refinement":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        get_refinement_settings(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/training":
                     _query_values(query, allowed=set())
                     self._send_json(
@@ -956,6 +963,26 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         freeze_dataset(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/refinement":
+                    _require_keys(
+                        payload,
+                        allowed={"max_vram_gib", "enforcement"},
+                        required={"max_vram_gib", "enforcement"},
+                    )
+                    max_vram_gib = payload.get("max_vram_gib")
+                    if (
+                        not isinstance(max_vram_gib, (int, float))
+                        or isinstance(max_vram_gib, bool)
+                    ):
+                        raise ConfigError("max_vram_gib must be a number")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        set_refinement_settings(
+                            self.server.config_path,
+                            max_vram_gib=float(max_vram_gib),
+                            enforcement=_required_text(payload, "enforcement"),
+                        ),
                     )
                 elif path == f"{API_PREFIX}/prepare":
                     _require_keys(payload, allowed=set())

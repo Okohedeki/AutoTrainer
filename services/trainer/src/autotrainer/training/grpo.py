@@ -17,11 +17,13 @@ from .common import (
     TrainingConfigurationError,
     TrainingDependencyError,
     TrainingRuntimeError,
+    assert_adapter_only,
     as_serializable,
     base_recipe,
     bool_value,
     claim_fresh_output_directory,
     choice_value,
+    configure_vram_budget,
     float_value,
     get_section,
     import_factory,
@@ -29,13 +31,13 @@ from .common import (
     inspect_grpo_dataset,
     int_value,
     mark_output_directory_complete,
+    model_max_memory,
     resolve_input_directory,
     resolve_input_file,
     string_value,
     validate_factory_path,
     validate_fresh_output_directory,
     validate_reference_dependencies,
-    validate_single_gpu,
     verify_adapter_tree_identity,
     verify_dataset_identity,
     verify_saved_adapter_provenance,
@@ -553,7 +555,7 @@ def run_grpo(
             f"{error}"
         ) from error
 
-    runtime = validate_single_gpu(torch)
+    runtime = configure_vram_budget(torch, recipe["refinement"])
     base_environment_factory = import_factory(recipe["environment"]["factory"])
     calibration_round: int | None = None
     calibration_events: list[dict[str, Any]] = []
@@ -614,6 +616,7 @@ def run_grpo(
             dtype=torch.bfloat16,
             quantization_config=quantization_config,
             device_map={"": 0},
+            max_memory=model_max_memory(recipe["refinement"]),
             trust_remote_code=False,
         )
         if base_model.__class__.__name__ != SUPPORTED_MODEL_CLASS:
@@ -652,15 +655,7 @@ def run_grpo(
                 stage["start_from"]["adapter"]["path"],
                 is_trainable=True,
             )
-        trainable_parameters = sum(
-            parameter.numel()
-            for parameter in policy.parameters()
-            if parameter.requires_grad
-        )
-        if trainable_parameters == 0:
-            raise TrainingRuntimeError(
-                "The GRPO policy has no trainable adapter parameters"
-            )
+        trainable_parameters = assert_adapter_only(policy, stage="GRPO")
 
         train_dataset = _bind_environment_image_identity(
             _load_json_dataset(load_dataset, stage["dataset"]),
@@ -724,6 +719,8 @@ def run_grpo(
                     TrainerCallback,
                     stage="grpo",
                     on_event=on_event,
+                    torch_module=torch,
+                    vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
                 )
             ],
         )

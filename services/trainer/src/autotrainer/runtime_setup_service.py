@@ -211,6 +211,7 @@ def inspect_runtime_setup(config_path: str | Path) -> dict[str, Any]:
     doctor = run_doctor(
         environment_backend=backend,
         environment_image=image,
+        vram_policy=dict(config.data.get("refinement", {}).get("vram", {})),
     )
     windows = _windows_host()
     checkout = _checkout_root()

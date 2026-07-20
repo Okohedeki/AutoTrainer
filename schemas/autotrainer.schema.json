@@ -16,6 +16,7 @@
     "qlora": { "$ref": "#/$defs/qlora" },
     "sft": { "$ref": "#/$defs/sft" },
     "grpo": { "$ref": "#/$defs/grpo" },
+    "refinement": { "$ref": "#/$defs/refinement" },
     "environment": { "$ref": "#/$defs/environment" },
     "evaluation": { "$ref": "#/$defs/evaluation" },
     "package": { "$ref": "#/$defs/package" }
@@ -115,6 +116,23 @@
         "dropout": { "type": "number", "minimum": 0, "maximum": 1 },
         "target_modules": { "const": "all-linear" },
         "bias": { "const": "none" }
+      }
+    },
+    "refinement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "vram"],
+      "properties": {
+        "mode": { "const": "adapter_only" },
+        "vram": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_gib", "enforcement"],
+          "properties": {
+            "max_gib": { "type": "number", "minimum": 4, "maximum": 192 },
+            "enforcement": { "enum": ["hard", "soft"] }
+          }
+        }
       }
     },
     "sft": {

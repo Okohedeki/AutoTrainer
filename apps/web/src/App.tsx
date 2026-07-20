@@ -12,6 +12,7 @@ import DatasetWorkspacePanel from "./DatasetWorkspacePanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import ProjectsPanel from "./ProjectsPanel";
 import RuntimeSetupPanel from "./RuntimeSetupPanel";
+import RefinementResourcePanel from "./RefinementResourcePanel";
 import ServePanel from "./ServePanel";
 import SourceSetupPanel from "./SourceSetupPanel";
 import TrainingMonitorPanel from "./TrainingMonitorPanel";
@@ -206,6 +207,7 @@ export default function App() {
               </div>
             ) : activeView === "train" ? (
               <div className="train-workspace" key={`train-${projects?.active_id}-${projectScopeRevision}`}>
+                <RefinementResourcePanel disabled={trainingActive} />
                 <RuntimeSetupPanel disabled={trainingActive} />
                 <TrainingMonitorPanel revision={projectRevision} onOpenData={() => openView("data", true)} onTrainingActiveChange={setTrainingActive} />
               </div>

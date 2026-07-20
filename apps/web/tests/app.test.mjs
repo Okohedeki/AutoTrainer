@@ -212,6 +212,7 @@ test("Train owns one-click start, observed SFT loss, and the shared GRPO evidenc
   assert.match(panel, /teachingLoss={sftLoss}/);
   assert.match(evidence, /Teaching loss/);
   assert.match(app, /<RuntimeSetupPanel disabled={trainingActive}/);
+  assert.match(app, /<RefinementResourcePanel disabled={trainingActive}/);
   assert.match(api, /request\("\/api\/v1\/runtime\/setup", \{ signal \}\)/);
   assert.match(api, /export async function applyRuntimeSetup/);
   for (const component of ["Python 3.11", "Pinned ML packages", "One CUDA GPU", "Container backend", "Pinned rollout image"]) assert.match(runtime, new RegExp(component));
@@ -222,6 +223,20 @@ test("Train owns one-click start, observed SFT loss, and the shared GRPO evidenc
   assert.doesNotMatch(runtime, /exec\(|spawn\(|shell/i);
   assert.doesNotMatch(panel, /Practice reward and rubric|events\.slice\(-24\)|Durable event rail/);
   assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b/i);
+});
+
+test("Train exposes adapter-only hard or soft VRAM governance", async () => {
+  const panel = await source("src/RefinementResourcePanel.tsx");
+  const api = await source("src/api.ts");
+  assert.match(panel, /Adapter-only refinement/);
+  assert.match(panel, /Base weights frozen/);
+  assert.match(panel, /Maximum VRAM/);
+  assert.match(panel, /Hard limit/);
+  assert.match(panel, /CUDA allocator cap/);
+  assert.match(panel, /Soft target/);
+  assert.match(panel, /Save GPU limit/);
+  assert.match(api, /request\("\/api\/v1\/refinement", \{ signal \}\)/);
+  assert.match(api, /max_vram_gib/);
 });
 
 test("Evaluate freezes weights, runs once, and renders real trial and verifier evidence", async () => {

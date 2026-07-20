@@ -389,7 +389,17 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
     }
     if preflight.get("status") == "ready":
         try:
-            doctor = run_doctor(environment_backend=backend, environment_image=image)
+            refinement = config.data.get("refinement", {})
+            vram_policy = (
+                refinement.get("vram")
+                if isinstance(refinement, Mapping)
+                else None
+            )
+            doctor = run_doctor(
+                environment_backend=backend,
+                environment_image=image,
+                vram_policy=dict(vram_policy) if isinstance(vram_policy, Mapping) else None,
+            )
         except Exception as error:
             doctor = {"sft_ready": False, "rl_ready": False, "errors": [str(error)]}
 

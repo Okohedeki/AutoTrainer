@@ -392,6 +392,41 @@ def resolve_qlora_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def resolve_refinement_policy(config: Mapping[str, Any]) -> dict[str, Any]:
+    section = config.get(
+        "refinement",
+        {"mode": "adapter_only", "vram": {"max_gib": 20, "enforcement": "hard"}},
+    )
+    if not isinstance(section, Mapping):
+        raise TrainingConfigurationError("refinement must be a mapping")
+    if section.get("mode", "adapter_only") != "adapter_only":
+        raise TrainingConfigurationError(
+            "refinement.mode must be adapter_only; full-model training is not supported"
+        )
+    vram = section.get("vram", {})
+    if not isinstance(vram, Mapping):
+        raise TrainingConfigurationError("refinement.vram must be a mapping")
+    max_gib = float_value(
+        vram,
+        "max_gib",
+        20.0,
+        "refinement.vram",
+        minimum=4.0,
+        maximum=192.0,
+    )
+    enforcement = choice_value(
+        vram,
+        "enforcement",
+        "hard",
+        {"hard", "soft"},
+        "refinement.vram",
+    )
+    return {
+        "mode": "adapter_only",
+        "vram": {"max_gib": max_gib, "enforcement": enforcement},
+    }
+
+
 def base_recipe(
     config: Mapping[str, Any], *, project_root: Path, output_dir: Path
 ) -> dict[str, Any]:
@@ -418,10 +453,11 @@ def base_recipe(
         "output_dir": str(destination),
         "model": model,
         "qlora": resolve_qlora_recipe(config),
+        "refinement": resolve_refinement_policy(config),
         "dependency_matrix": dict(REFERENCE_DEPENDENCIES),
         "runtime_requirements": {
             "visible_cuda_devices": 1,
-            "minimum_vram_gib": 20,
+            "configured_vram_gib": resolve_refinement_policy(config)["vram"]["max_gib"],
             "bf16": True,
             "network_during_episode": False,
         },
@@ -803,7 +839,10 @@ def validate_reference_dependencies() -> dict[str, str]:
     return installed
 
 
-def validate_single_gpu(torch_module: Any) -> dict[str, Any]:
+def validate_single_gpu(
+    torch_module: Any,
+    vram_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     if not torch_module.cuda.is_available():
         raise TrainingRuntimeError(
             "CUDA is not available. AutoTrainer V1 requires one visible NVIDIA GPU."
@@ -818,18 +857,74 @@ def validate_single_gpu(torch_module: Any) -> dict[str, Any]:
         raise TrainingRuntimeError("The visible CUDA GPU does not support bfloat16 training")
     properties = torch_module.cuda.get_device_properties(0)
     total_bytes = int(properties.total_memory)
-    minimum_bytes = 20 * 1024**3
-    if total_bytes < minimum_bytes:
+    policy = dict(vram_policy or {"max_gib": 20.0, "enforcement": "hard"})
+    limit_gib = float(policy.get("max_gib", 20.0))
+    if limit_gib < 4:
+        raise TrainingConfigurationError("refinement.vram.max_gib must be at least 4")
+    limit_bytes = int(limit_gib * 1024**3)
+    if total_bytes < limit_bytes:
         raise TrainingRuntimeError(
-            "The supported 9B QLoRA+GRPO recipe requires at least 20 GiB of VRAM; "
-            f"the visible GPU reports {total_bytes / 1024**3:.1f} GiB"
+            f"The configured {limit_gib:g} GiB VRAM budget exceeds the visible GPU's "
+            f"{total_bytes / 1024**3:.1f} GiB capacity"
         )
     return {
         "device_count": count,
         "device_name": str(properties.name),
         "vram_gib": round(total_bytes / 1024**3, 2),
+        "vram_limit_gib": limit_gib,
+        "vram_enforcement": str(policy.get("enforcement", "hard")),
         "bf16_supported": True,
     }
+
+
+def configure_vram_budget(
+    torch_module: Any,
+    refinement: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the selected CUDA allocator policy before model allocation."""
+
+    vram = refinement.get("vram", {})
+    if not isinstance(vram, Mapping):
+        raise TrainingConfigurationError("refinement.vram must be a mapping")
+    runtime = validate_single_gpu(torch_module, vram)
+    limit_gib = float(runtime["vram_limit_gib"])
+    enforcement = str(runtime["vram_enforcement"])
+    if enforcement == "hard":
+        fraction = min(1.0, limit_gib / float(runtime["vram_gib"]))
+        try:
+            torch_module.cuda.set_per_process_memory_fraction(fraction, 0)
+        except (AttributeError, RuntimeError) as error:
+            raise TrainingRuntimeError(
+                "The hard VRAM limit could not be installed before model loading"
+            ) from error
+        runtime["allocator_fraction"] = fraction
+    return runtime
+
+
+def model_max_memory(refinement: Mapping[str, Any]) -> dict[int, str]:
+    vram = refinement.get("vram", {})
+    if not isinstance(vram, Mapping):
+        raise TrainingConfigurationError("refinement.vram must be a mapping")
+    limit_gib = float(vram.get("max_gib", 20.0))
+    return {0: f"{limit_gib:g}GiB"}
+
+
+def assert_adapter_only(model: Any, *, stage: str) -> int:
+    """Reject any refinement stage that exposes base weights to optimization."""
+
+    trainable: list[tuple[str, int]] = [
+        (str(name), int(parameter.numel()))
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not trainable:
+        raise TrainingRuntimeError(f"The {stage} policy has no trainable adapter parameters")
+    unexpected = [name for name, _count in trainable if "lora_" not in name.casefold()]
+    if unexpected:
+        raise TrainingRuntimeError(
+            f"{stage} exposed non-adapter parameters; full-model training is forbidden"
+        )
+    return sum(count for _name, count in trainable)
 
 
 def inspect_adapter(path: Path, expected_model_id: str, expected_revision: str) -> dict[str, Any]:

@@ -435,6 +435,14 @@ export type TrainingJob = {
   } | null;
 };
 
+export type RefinementSettings = {
+  mode: "adapter_only";
+  vram: {
+    max_gib: number;
+    enforcement: "hard" | "soft";
+  };
+};
+
 export type TrainingEvent = {
   sequence: number;
   job_id?: string | null;
@@ -958,6 +966,17 @@ export async function freezeDataset(): Promise<DatasetWorkspace> {
 
 export async function getTrainingJob(signal?: AbortSignal): Promise<TrainingJob> {
   return request("/api/v1/training", { signal });
+}
+
+export async function getRefinementSettings(signal?: AbortSignal): Promise<RefinementSettings> {
+  return request("/api/v1/refinement", { signal });
+}
+
+export async function setRefinementSettings(input: {
+  max_vram_gib: number;
+  enforcement: "hard" | "soft";
+}): Promise<RefinementSettings> {
+  return request("/api/v1/refinement", { method: "POST", body: JSON.stringify(input) });
 }
 
 export async function startTraining(): Promise<TrainingJob> {

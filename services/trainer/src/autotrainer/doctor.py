@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -118,12 +119,18 @@ def _command_check(command: str, arguments: list[str]) -> dict[str, Any]:
         return {"name": command, "status": "error", "detail": str(error)}
 
 
-def _torch_gpu_check() -> dict[str, Any]:
+def _torch_gpu_check(vram_policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run the same no-weight CUDA guard used immediately before training."""
 
     try:
         torch_module = importlib.import_module("torch")
-        details = validate_single_gpu(torch_module)
+        policy = vram_policy
+        if policy is None and os.environ.get("AUTOTRAINER_VRAM_LIMIT_GIB"):
+            policy = {
+                "max_gib": float(os.environ["AUTOTRAINER_VRAM_LIMIT_GIB"]),
+                "enforcement": os.environ.get("AUTOTRAINER_VRAM_ENFORCEMENT", "hard"),
+            }
+        details = validate_single_gpu(torch_module, policy)
     except Exception as error:
         return {"status": "blocked", "detail": str(error)[:240]}
     return {"status": "ready", **details}
@@ -145,16 +152,21 @@ def _blocked_python_runtime(detail: str) -> dict[str, Any]:
     }
 
 
-def _probe_python_runtime() -> dict[str, Any]:
+def _probe_python_runtime(vram_policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """Import native training packages in a child so GUI repairs stay unlocked."""
 
     try:
+        environment = os.environ.copy()
+        if vram_policy is not None:
+            environment["AUTOTRAINER_VRAM_LIMIT_GIB"] = str(vram_policy["max_gib"])
+            environment["AUTOTRAINER_VRAM_ENFORCEMENT"] = str(vram_policy["enforcement"])
         completed = subprocess.run(
             [sys.executable, "-m", "autotrainer.runtime_probe"],
             capture_output=True,
             text=True,
             timeout=120,
             check=False,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return _blocked_python_runtime(f"training runtime probe failed: {error}")
@@ -178,10 +190,11 @@ def run_doctor(
     *,
     environment_backend: str = "docker",
     environment_image: str = "",
+    vram_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Inspect every prerequisite a selected local V1 run can verify early."""
 
-    runtime = _probe_python_runtime()
+    runtime = _probe_python_runtime(vram_policy)
     packages = runtime["packages"]
     gpu = runtime["gpu"]
     # Driver output is diagnostic only. The readiness decision uses PyTorch's

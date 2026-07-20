@@ -1408,6 +1408,20 @@ textarea { font: inherit; }
 
 /* Training */
 .runtime-setup-panel { padding: 20px; }
+.refinement-resource-panel { padding: 20px; }
+.refinement-resource-panel > .panel-header > div > p:last-child { max-width: 700px; margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.refinement-resource-form { display: grid; grid-template-columns: 150px minmax(300px, 1fr) auto; gap: 14px; align-items: end; }
+.refinement-resource-form > label { display: grid; gap: 6px; }
+.refinement-resource-form > label > span, .refinement-resource-form legend { color: var(--muted); font-size: 9px; font-weight: 750; }
+.vram-input { display: flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); }
+.vram-input input { min-width: 0; width: 100%; padding: 9px; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 11px; }
+.vram-input b { padding: 0 10px; color: var(--muted); font-size: 9px; }
+.refinement-resource-form fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; padding: 0; border: 0; }
+.refinement-resource-form legend { margin-bottom: 6px; }
+.refinement-resource-form fieldset label { display: flex; align-items: flex-start; gap: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+.refinement-resource-form fieldset label > span { display: grid; gap: 3px; }
+.refinement-resource-form fieldset strong { font-size: 9px; }
+.refinement-resource-form fieldset small { color: var(--muted); font-size: 8px; line-height: 1.35; }
 .runtime-setup-panel > .panel-header > div > p:last-child { max-width: 760px; margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .runtime-component-list { margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); list-style: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
 .runtime-component-list li { min-width: 0; padding: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border-left: 1px solid var(--line); }

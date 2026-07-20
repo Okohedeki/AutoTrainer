@@ -13,20 +13,22 @@ from .common import (
     TrainingConfigurationError,
     TrainingDependencyError,
     TrainingRuntimeError,
+    assert_adapter_only,
     as_serializable,
     base_recipe,
     bool_value,
     claim_fresh_output_directory,
+    configure_vram_budget,
     float_value,
     get_section,
     inspect_sft_dataset,
     int_value,
     mark_output_directory_complete,
+    model_max_memory,
     resolve_input_file,
     validate_reference_dependencies,
     validate_fresh_output_directory,
     validate_sft_token_lengths,
-    validate_single_gpu,
     verify_dataset_identity,
     verify_saved_adapter_provenance,
 )
@@ -179,7 +181,7 @@ def run_sft(
             f"{error}"
         ) from error
 
-    runtime = validate_single_gpu(torch)
+    runtime = configure_vram_budget(torch, recipe["refinement"])
     destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
@@ -222,6 +224,7 @@ def run_sft(
             dtype=torch.bfloat16,
             quantization_config=quantization_config,
             device_map={"": 0},
+            max_memory=model_max_memory(recipe["refinement"]),
             trust_remote_code=False,
         )
         if base_model.__class__.__name__ != SUPPORTED_MODEL_CLASS:
@@ -248,6 +251,7 @@ def run_sft(
                 bias=qlora["bias"],
             ),
         )
+        trainable_parameters = assert_adapter_only(model, stage="SFT")
 
         train_dataset = _load_json_dataset(load_dataset, stage["dataset"])
         eval_dataset = (
@@ -293,6 +297,8 @@ def run_sft(
                     TrainerCallback,
                     stage="sft",
                     on_event=on_event,
+                    torch_module=torch,
+                    vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
                 )
             ],
         )
@@ -330,5 +336,6 @@ def run_sft(
         "recipe": recipe,
         "dependencies": installed_versions,
         "runtime": runtime,
+        "trainable_adapter_parameters": trainable_parameters,
         "metrics": metrics,
     }

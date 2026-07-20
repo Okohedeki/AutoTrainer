@@ -445,6 +445,7 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         "qlora",
         "sft",
         "grpo",
+        "refinement",
         "environment",
         "evaluation",
         "package",
@@ -486,6 +487,24 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         errors.append("model.quantization.quant_type must be nf4")
     if quantization.get("compute_dtype") != "bfloat16":
         errors.append("model.quantization.compute_dtype must be bfloat16")
+
+    refinement_value = data.get(
+        "refinement",
+        {"mode": "adapter_only", "vram": {"max_gib": 20, "enforcement": "hard"}},
+    )
+    refinement = _mapping(refinement_value, "refinement", errors)
+    if refinement.get("mode") != "adapter_only":
+        errors.append("refinement.mode must be adapter_only")
+    vram = _mapping(refinement.get("vram"), "refinement.vram", errors)
+    max_gib = vram.get("max_gib")
+    if (
+        not isinstance(max_gib, (int, float))
+        or isinstance(max_gib, bool)
+        or not 4 <= float(max_gib) <= 192
+    ):
+        errors.append("refinement.vram.max_gib must be between 4 and 192")
+    if vram.get("enforcement") not in {"hard", "soft"}:
+        errors.append("refinement.vram.enforcement must be hard or soft")
 
     sources = data.get("sources")
     if not isinstance(sources, list):
@@ -698,6 +717,10 @@ def default_config(
             "dropout": 0.0,
             "target_modules": "all-linear",
             "bias": "none",
+        },
+        "refinement": {
+            "mode": "adapter_only",
+            "vram": {"max_gib": 20, "enforcement": "hard"},
         },
         "sft": {
             "enabled": True,

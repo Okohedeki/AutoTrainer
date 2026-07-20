@@ -982,6 +982,45 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_refinement_endpoint_reads_and_updates_the_user_vram_limit(self) -> None:
+        settings = {
+            "mode": "adapter_only",
+            "vram": {"max_gib": 12.0, "enforcement": "hard"},
+        }
+        with patch(
+            "autotrainer.local_api.get_refinement_settings",
+            return_value=settings,
+        ) as get_settings:
+            status, result = self.request("GET", "/api/v1/refinement")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, settings)
+        get_settings.assert_called_once_with(self.config_path.resolve())
+
+        with patch(
+            "autotrainer.local_api.set_refinement_settings",
+            return_value=settings,
+        ) as set_settings:
+            status, result = self.request(
+                "POST",
+                "/api/v1/refinement",
+                {"max_vram_gib": 12, "enforcement": "hard"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, settings)
+        set_settings.assert_called_once_with(
+            self.config_path.resolve(),
+            max_vram_gib=12.0,
+            enforcement="hard",
+        )
+
+        status, result = self.request(
+            "POST",
+            "/api/v1/refinement",
+            {"max_vram_gib": "all", "enforcement": "hard"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_active_training_returns_a_project_busy_conflict(self) -> None:
         with project_run_gate(self.config_path):
             status, result = self.request("POST", "/api/v1/prepare", {})

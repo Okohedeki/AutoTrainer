@@ -18,7 +18,10 @@ from autotrainer.training import (  # noqa: E402
     run_sft,
 )
 from autotrainer.training.common import (  # noqa: E402
+    assert_adapter_only,
     claim_fresh_output_directory,
+    configure_vram_budget,
+    model_max_memory,
     validate_sft_token_lengths,
     verify_adapter_tree_identity,
 )
@@ -129,6 +132,8 @@ class TrainingRecipeTests(unittest.TestCase):
             output_dir=Path("artifacts/sft-output"),
             dry_run=True,
         )
+        self.assertEqual(result["recipe"]["refinement"]["mode"], "adapter_only")
+        self.assertEqual(result["recipe"]["refinement"]["vram"]["max_gib"], 20.0)
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(result["recipe"]["stage"], "sft")
         self.assertEqual(result["recipe"]["sft"]["effective_batch_size"], 8)
@@ -145,6 +150,62 @@ class TrainingRecipeTests(unittest.TestCase):
             result["recipe"]["model"]["cache_dir"],
             str((self.project_root / ".autotrainer" / "model-cache").resolve()),
         )
+
+    def test_hard_vram_budget_installs_allocator_cap_and_model_ceiling(self) -> None:
+        cuda = MagicMock()
+        cuda.is_available.return_value = True
+        cuda.device_count.return_value = 1
+        cuda.is_bf16_supported.return_value = True
+        cuda.get_device_properties.return_value = type(
+            "Properties",
+            (),
+            {"name": "Test GPU", "total_memory": 24 * 1024**3},
+        )()
+        torch = type("Torch", (), {"cuda": cuda})()
+        refinement = {
+            "mode": "adapter_only",
+            "vram": {"max_gib": 12.0, "enforcement": "hard"},
+        }
+
+        runtime = configure_vram_budget(torch, refinement)
+
+        cuda.set_per_process_memory_fraction.assert_called_once_with(0.5, 0)
+        self.assertEqual(runtime["vram_limit_gib"], 12.0)
+        self.assertEqual(model_max_memory(refinement), {0: "12GiB"})
+
+    def test_soft_vram_budget_is_observed_without_allocator_abort_cap(self) -> None:
+        cuda = MagicMock()
+        cuda.is_available.return_value = True
+        cuda.device_count.return_value = 1
+        cuda.is_bf16_supported.return_value = True
+        cuda.get_device_properties.return_value = type(
+            "Properties",
+            (),
+            {"name": "Test GPU", "total_memory": 24 * 1024**3},
+        )()
+        torch = type("Torch", (), {"cuda": cuda})()
+
+        runtime = configure_vram_budget(
+            torch,
+            {"mode": "adapter_only", "vram": {"max_gib": 10.0, "enforcement": "soft"}},
+        )
+
+        cuda.set_per_process_memory_fraction.assert_not_called()
+        self.assertEqual(runtime["vram_enforcement"], "soft")
+
+    def test_non_adapter_trainable_parameter_is_rejected(self) -> None:
+        adapter = MagicMock(requires_grad=True)
+        adapter.numel.return_value = 32
+        base = MagicMock(requires_grad=True)
+        base.numel.return_value = 100
+        model = MagicMock()
+        model.named_parameters.return_value = [
+            ("layer.lora_A.weight", adapter),
+            ("layer.base.weight", base),
+        ]
+
+        with self.assertRaisesRegex(TrainingRuntimeError, "full-model training is forbidden"):
+            assert_adapter_only(model, stage="SFT")
 
     def test_sft_dry_run_rejects_an_uncompiled_messages_record(self) -> None:
         self.sft_dataset.write_text(

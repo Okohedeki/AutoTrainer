@@ -865,6 +865,7 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
     result = run_doctor(
         environment_backend=str(config.data["environment"]["backend"]),
         environment_image=str(config.data["environment"].get("image", "")),
+        vram_policy=dict(config.data.get("refinement", {}).get("vram", {})),
     )
     _emit(result, as_json=arguments.json)
     grpo = config.data.get("grpo", {})
