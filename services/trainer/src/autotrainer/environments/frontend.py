@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import unicodedata
+from difflib import unified_diff
 from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
@@ -774,7 +775,8 @@ class FrontendEnvironment:
         if not isinstance(patch, str) or not patch.strip() or len(patch) > 200_000:
             return False, "patch must contain between 1 and 200000 characters"
         try:
-            self._validate_patch_paths(patch)
+            normalized = self._normalize_patch(patch)
+            self._validate_patch_paths(normalized)
         except (RuntimeError, ValueError) as error:
             return False, f"rejected patch: {error}"
         workspace = self._require_workspace()
@@ -782,18 +784,20 @@ class FrontendEnvironment:
             workspace,
             "apply",
             "--check",
-            "--whitespace=error-all",
+            "--recount",
+            "--whitespace=nowarn",
             "-",
-            input_value=patch,
+            input_value=normalized,
         )
         if check.returncode:
             return False, self._truncate(f"patch check failed:\n{check.stderr or check.stdout}")
         applied = self._run_git(
             workspace,
             "apply",
+            "--recount",
             "--whitespace=nowarn",
             "-",
-            input_value=patch,
+            input_value=normalized,
         )
         if applied.returncode:
             return False, self._truncate(
@@ -801,6 +805,156 @@ class FrontendEnvironment:
             )
         self._check_deadline()
         return True, "patch applied"
+
+    def _normalize_patch(self, patch: str) -> str:
+        """Normalize common model patch forms without weakening path checks."""
+
+        normalized = patch.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.splitlines()
+        if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+            lines = lines[1:-1]
+            normalized = "\n".join(lines)
+        if normalized.lstrip().startswith("*** Begin Patch"):
+            normalized = normalized.lstrip()
+            normalized = self._convert_apply_patch_envelope(normalized)
+
+        rewritten: list[str] = []
+        for line in normalized.splitlines():
+            if line.startswith(("--- ", "+++ ")):
+                marker, value = line[:4], line[4:]
+                path, separator, metadata = value.partition("\t")
+                if path != "/dev/null":
+                    prefix = path[:2] if path.startswith(("a/", "b/")) else ""
+                    relative = path[2:] if prefix else path
+                    path = prefix + self._normalize_patch_path(relative)
+                line = marker + path + (separator + metadata if separator else "")
+            elif line.startswith("diff --git "):
+                match = re.fullmatch(r"diff --git (a/\S+) (b/\S+)", line)
+                if match:
+                    left = "a/" + self._normalize_patch_path(match.group(1)[2:])
+                    right = "b/" + self._normalize_patch_path(match.group(2)[2:])
+                    line = f"diff --git {left} {right}"
+            rewritten.append(line)
+        return "\n".join(rewritten) + "\n"
+
+    def _normalize_patch_path(self, value: str) -> str:
+        relative = PurePosixPath(value)
+        if relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+            raise RuntimeError("path must stay inside the editable workspace and outside .git")
+        relative_value = relative.as_posix()
+        direct = self._safe_path(relative_value)
+        if direct.exists():
+            return relative_value
+
+        manifest = self._require_manifest()
+        working = PurePosixPath(manifest.working_directory or ".")
+        if working.as_posix() != "." and tuple(relative.parts[: len(working.parts)]) != working.parts:
+            candidate_value = (working / relative).as_posix()
+            candidate = self._safe_path(candidate_value)
+            if candidate.exists() or candidate.parent.exists():
+                return candidate_value
+        return relative_value
+
+    def _convert_apply_patch_envelope(self, patch: str) -> str:
+        """Convert the widely emitted ``*** Begin Patch`` update form to Git diff."""
+
+        lines = patch.splitlines()
+        if not lines or lines[0].strip() != "*** Begin Patch":
+            raise ValueError("invalid apply_patch envelope")
+        index = 1
+        converted: list[str] = []
+        while index < len(lines):
+            marker = lines[index]
+            if marker.strip() == "*** End Patch":
+                break
+            match = re.fullmatch(r"\*\*\* (Update|Add|Delete) File: (.+)", marker)
+            if match is None:
+                raise ValueError("invalid apply_patch file marker")
+            operation, raw_path = match.groups()
+            path = self._normalize_patch_path(raw_path.strip())
+            index += 1
+            body: list[str] = []
+            while index < len(lines) and not re.fullmatch(
+                r"\*\*\* (?:Update|Add|Delete) File: .+|\*\*\* End Patch",
+                lines[index],
+            ):
+                body.append(lines[index])
+                index += 1
+
+            candidate = self._safe_path(path)
+            if operation == "Add":
+                if candidate.exists():
+                    raise ValueError(f"add target already exists: {path}")
+                if any(line and not line.startswith("+") for line in body):
+                    raise ValueError("added file lines must start with '+'")
+                original_lines: list[str] = []
+                updated_lines = [line[1:] if line.startswith("+") else "" for line in body]
+            elif operation == "Delete":
+                if not candidate.is_file():
+                    raise ValueError(f"delete target is not a file: {path}")
+                original_lines = candidate.read_text(encoding="utf-8").splitlines()
+                updated_lines = []
+            else:
+                if not candidate.is_file():
+                    raise ValueError(f"update target is not a file: {path}")
+                original_lines = candidate.read_text(encoding="utf-8").splitlines()
+                updated_lines = self._apply_envelope_hunks(original_lines, body, path)
+
+            converted.extend(
+                unified_diff(
+                    original_lines,
+                    updated_lines,
+                    fromfile="/dev/null" if operation == "Add" else f"a/{path}",
+                    tofile="/dev/null" if operation == "Delete" else f"b/{path}",
+                    lineterm="",
+                )
+            )
+        if not converted or index >= len(lines) or lines[index].strip() != "*** End Patch":
+            raise ValueError("apply_patch envelope did not contain a complete file change")
+        return "\n".join(converted) + "\n"
+
+    @staticmethod
+    def _apply_envelope_hunks(original: list[str], body: list[str], path: str) -> list[str]:
+        hunks: list[list[str]] = []
+        current: list[str] | None = None
+        for line in body:
+            if line.startswith("@@"):
+                if current is not None:
+                    hunks.append(current)
+                current = []
+            elif line == "*** End of File":
+                continue
+            elif current is None:
+                raise ValueError(f"update for {path} must begin with a hunk marker")
+            else:
+                current.append(line)
+        if current is not None:
+            hunks.append(current)
+        if not hunks:
+            raise ValueError(f"update for {path} did not contain a hunk")
+
+        updated = list(original)
+        cursor = 0
+        for hunk in hunks:
+            if any(not line or line[0] not in " +-" for line in hunk):
+                raise ValueError(f"update for {path} contains an invalid hunk line")
+            before = [line[1:] for line in hunk if line.startswith((" ", "-"))]
+            after = [line[1:] for line in hunk if line.startswith((" ", "+"))]
+            if not before:
+                raise ValueError(f"update for {path} needs context or removed lines")
+            location = next(
+                (
+                    start
+                    for start in range(cursor, len(updated) - len(before) + 1)
+                    if updated[start : start + len(before)] == before
+                ),
+                None,
+            )
+            if location is None:
+                raise ValueError(f"update context was not found in {path}")
+            updated[location : location + len(before)] = after
+            cursor = location + len(after)
+        return updated
 
     def _capture_unified_diff(self) -> str:
         workspace = self._require_workspace()

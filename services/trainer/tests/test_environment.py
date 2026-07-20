@@ -630,6 +630,97 @@ class SnapshotIsolationTests(unittest.TestCase):
                         )
 
 
+class PatchNormalizationTests(unittest.TestCase):
+    @staticmethod
+    def _environment(root: Path) -> FrontendEnvironment:
+        workspace = root / "workspace"
+        target = workspace / "project" / "src" / "styles.css"
+        target.parent.mkdir(parents=True)
+        target.write_text(".grid {\n  display: grid;\n}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
+        subprocess.run(["git", "-C", str(workspace), "add", "--all"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+        )
+        payload = executable_manifest()
+        payload["runtime"]["workingDirectory"] = "project"
+        environment = FrontendEnvironment()
+        environment._manifest = TaskManifest.from_mapping(payload)
+        environment._workspace = workspace
+        environment._started_at = time.monotonic()
+        environment._deadline = environment._started_at + 60
+        return environment
+
+    def test_accepts_fenced_working_directory_relative_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            applied, message = environment._apply_unified_diff(
+                "```diff\n"
+                "diff --git a/src/styles.css b/src/styles.css\n"
+                "--- a/src/styles.css\n"
+                "+++ b/src/styles.css\n"
+                "@@ -1,3 +1,7 @@\n"
+                " .grid {\n"
+                "   display: grid;\n"
+                " }\n"
+                "+@media (max-width: 767px) {\n"
+                "+  .grid { grid-template-columns: 1fr; }\n"
+                "+}\n"
+                "+\n"
+                "```"
+            )
+            self.assertTrue(applied, message)
+            target = environment._require_workspace() / "project" / "src" / "styles.css"
+            self.assertIn("max-width: 767px", target.read_text(encoding="utf-8"))
+
+    def test_accepts_apply_patch_update_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            applied, message = environment._apply_unified_diff(
+                "*** Begin Patch\n"
+                "*** Update File: src/styles.css\n"
+                "@@\n"
+                " .grid {\n"
+                "   display: grid;\n"
+                " }\n"
+                "+\n"
+                "+@media (max-width: 767px) {\n"
+                "+  .grid { grid-template-columns: 1fr; }\n"
+                "+}\n"
+                "*** End Patch"
+            )
+            self.assertTrue(applied, message)
+            target = environment._require_workspace() / "project" / "src" / "styles.css"
+            self.assertIn("grid-template-columns: 1fr", target.read_text(encoding="utf-8"))
+
+    def test_rejects_envelope_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            applied, message = environment._apply_unified_diff(
+                "*** Begin Patch\n"
+                "*** Update File: ../outside.css\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch"
+            )
+            self.assertFalse(applied)
+            self.assertIn("must stay inside", message)
+
+
 class DiffCaptureTests(unittest.TestCase):
     def test_excludes_install_artifacts_but_includes_policy_edits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
