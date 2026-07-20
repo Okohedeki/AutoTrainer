@@ -298,7 +298,7 @@ export type FableJob = {
 };
 
 export type FableWorkspace = {
-  status: "needs_pin" | "in_progress" | "report_ready";
+  status: "optional" | "needs_pin" | "in_progress" | "report_ready";
   runner: {
     producer: "fable";
     version?: string;
