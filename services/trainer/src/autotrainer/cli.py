@@ -261,6 +261,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(history_retire)
 
+    dataset = subparsers.add_parser(
+        "dataset",
+        help="sync, design, inspect, and freeze the local refinement dataset",
+    )
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_status = dataset_sub.add_parser("status", help="inspect the local dataset workspace")
+    _config_argument(dataset_status)
+    dataset_sync = dataset_sub.add_parser("sync", help="sync licensed PRs merged to main or master")
+    _config_argument(dataset_sync)
+    dataset_design = dataset_sub.add_parser("design", help="design one candidate with a selected LLM")
+    dataset_design.add_argument("candidate_id")
+    dataset_design.add_argument("--provider", choices=("local", "anthropic"), required=True)
+    dataset_design.add_argument("--model", required=True)
+    dataset_design.add_argument("--endpoint", default=None)
+    _config_argument(dataset_design)
+    dataset_freeze = dataset_sub.add_parser("freeze", help="compile and freeze the inspected local dataset")
+    _config_argument(dataset_freeze)
+
     curriculum = subparsers.add_parser(
         "curriculum",
         help="inspect executable GRPO tasks and their observed learning signal",
@@ -734,6 +752,32 @@ def _run_curriculum(arguments: argparse.Namespace) -> int:
     return 0 if result["status"] != "blocked" else 3
 
 
+def _run_dataset(arguments: argparse.Namespace) -> int:
+    from .dataset_service import (
+        design_dataset_candidate,
+        freeze_dataset,
+        get_dataset_workspace,
+        sync_dataset_sources,
+    )
+
+    if arguments.dataset_command == "status":
+        result = get_dataset_workspace(arguments.config)
+    elif arguments.dataset_command == "sync":
+        result = sync_dataset_sources(arguments.config)
+    elif arguments.dataset_command == "freeze":
+        result = freeze_dataset(arguments.config)
+    else:
+        result = design_dataset_candidate(
+            arguments.config,
+            candidate_id=arguments.candidate_id,
+            provider=arguments.provider,
+            model=arguments.model,
+            endpoint=arguments.endpoint,
+        )
+    _emit(result, as_json=arguments.json)
+    return 0
+
+
 def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
     from .planner import build_plan
     from .sources import scan_sources
@@ -1083,6 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_example(arguments)
         if arguments.command == "history":
             return _run_history(arguments)
+        if arguments.command == "dataset":
+            return _run_dataset(arguments)
         if arguments.command == "curriculum":
             return _run_curriculum(arguments)
         if arguments.command == "validate":

@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from .config import ConfigError, write_config
+from .dataset_service import require_frozen_dataset
 from .device_gate import (
     DeviceLease,
     acquire_device_lease,
@@ -144,6 +145,12 @@ def _run_project_training_owned(
 ) -> dict[str, Any]:
     """Run exactly the stages recommended by the project's prepared evidence."""
 
+    # Dataset authority is explicit and local. This check runs before model
+    # loading or any CUDA work, and a changed source/review invalidates it.
+    try:
+        require_frozen_dataset(config_path)
+    except ConfigError as error:
+        raise TrainingServiceError(str(error)) from error
     _notify(on_progress, "prepare", "Checking the project.")
     _notify_event(on_event, "stage_started", stage="prepare")
     preparation = prepare_project(config_path)

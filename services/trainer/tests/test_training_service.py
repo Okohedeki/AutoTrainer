@@ -15,7 +15,7 @@ from unittest.mock import patch
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
-from autotrainer.config import default_config, load_config, write_config  # noqa: E402
+from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.cli import main  # noqa: E402
 from autotrainer.device_gate import DeviceBusyError  # noqa: E402
 from autotrainer.model_service import select_model  # noqa: E402
@@ -42,6 +42,11 @@ class TrainingServiceTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.config_path = self.root / "autotrainer.yaml"
         write_config(self.config_path, default_config(), overwrite=False)
+        self.frozen_dataset = patch(
+            "autotrainer.training_service.require_frozen_dataset",
+            return_value={"status": "frozen"},
+        ).start()
+        self.addCleanup(self.frozen_dataset.stop)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -74,6 +79,22 @@ class TrainingServiceTests(unittest.TestCase):
                 {"type": "stage_completed", "stage": "sft"},
             ],
         )
+
+    def test_unfrozen_dataset_starts_no_preparation_or_gpu_stage(self) -> None:
+        self.frozen_dataset.side_effect = ConfigError(
+            "freeze and inspect the local dataset before training"
+        )
+        with (
+            patch("autotrainer.training_service.prepare_project") as prepare,
+            patch("autotrainer.training_service.run_sft") as run_sft,
+            patch("autotrainer.training_service.run_grpo") as run_grpo,
+            self.assertRaisesRegex(TrainingServiceError, "freeze and inspect"),
+        ):
+            run_project_training(self.config_path)
+
+        prepare.assert_not_called()
+        run_sft.assert_not_called()
+        run_grpo.assert_not_called()
 
     def test_practice_runs_only_verified_rl(self) -> None:
         rl_result = {"status": "completed", "stage": "grpo"}

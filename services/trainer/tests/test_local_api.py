@@ -918,6 +918,70 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result, prepared)
 
+    def test_dataset_endpoints_share_the_curation_service_contract(self) -> None:
+        workspace = {
+            "catalog": {"status": "ready", "source_count": 1},
+            "candidates": [],
+            "freeze": {"status": "not_frozen"},
+        }
+        with patch(
+            "autotrainer.local_api.get_dataset_workspace",
+            return_value=workspace,
+        ) as get_workspace:
+            status, result = self.request("GET", "/api/v1/dataset")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        get_workspace.assert_called_once_with(self.config_path.resolve())
+
+        for endpoint, service in (
+            ("sync", "sync_dataset_sources"),
+            ("freeze", "freeze_dataset"),
+        ):
+            with self.subTest(endpoint=endpoint), patch(
+                f"autotrainer.local_api.{service}",
+                return_value=workspace,
+            ) as operation:
+                status, result = self.request(
+                    "POST",
+                    f"/api/v1/dataset/{endpoint}",
+                    {},
+                )
+            self.assertEqual(status, 200)
+            self.assertEqual(result, workspace)
+            operation.assert_called_once_with(self.config_path.resolve())
+
+        with patch(
+            "autotrainer.local_api.design_dataset_candidate",
+            return_value=workspace,
+        ) as design:
+            status, result = self.request(
+                "POST",
+                "/api/v1/dataset/design",
+                {
+                    "candidate_id": "sha256:" + "a" * 64,
+                    "provider": "local",
+                    "model": "qwen-local",
+                    "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+                },
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        design.assert_called_once_with(
+            self.config_path.resolve(),
+            candidate_id="sha256:" + "a" * 64,
+            provider="local",
+            model="qwen-local",
+            endpoint="http://127.0.0.1:8000/v1/chat/completions",
+        )
+
+        status, result = self.request(
+            "POST",
+            "/api/v1/dataset/design",
+            {"candidate_id": "candidate", "provider": "local"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+
     def test_active_training_returns_a_project_busy_conflict(self) -> None:
         with project_run_gate(self.config_path):
             status, result = self.request("POST", "/api/v1/prepare", {})

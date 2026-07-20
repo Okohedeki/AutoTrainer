@@ -27,14 +27,31 @@ test("the operating console follows Projects, Data, Train, Evaluate, Serve", asy
   assert.match(app, /<ModelSetupPanel/);
   assert.match(app, /<SourceSetupPanel/);
   assert.match(app, /<GrpoEvidencePanel context="data"/);
-  assert.match(app, /<HistoryReviewPanel/);
+  assert.match(app, /<DatasetWorkspacePanel/);
   assert.match(app, /<TrainingMonitorPanel/);
   assert.match(app, /<EvaluationMonitorPanel/);
   assert.match(app, /<ServePanel/);
   assert.doesNotMatch(app, /<PreparePanel/);
   assert.doesNotMatch(app, /className="hero"|site-footer|CommandDrawer/);
-  assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<GrpoEvidencePanel context=\"data\""));
-  assert.ok(app.indexOf("<GrpoEvidencePanel context=\"data\"") < app.indexOf("<HistoryReviewPanel"));
+  assert.ok(app.indexOf("<SourceSetupPanel") < app.indexOf("<DatasetWorkspacePanel"));
+  assert.ok(app.indexOf("<DatasetWorkspacePanel") < app.indexOf("<GrpoEvidencePanel context=\"data\""));
+});
+
+test("Data treats merged-PR datasets as an inspectable local training asset", async () => {
+  const panel = await source("src/DatasetWorkspacePanel.tsx");
+  const api = await source("src/api.ts");
+  for (const rule of ["Merged PR", "main / master", "Required", "Local only"]) assert.match(panel, new RegExp(rule));
+  for (const operation of ["getDatasetWorkspace", "syncDatasetSources", "designDatasetCandidate", "freezeDataset"]) assert.match(panel, new RegExp(operation));
+  assert.match(panel, /Local model/);
+  assert.match(panel, /Anthropic Claude/);
+  assert.match(panel, /Accepted patch/);
+  assert.match(panel, /Approve QLoRA example/);
+  assert.match(panel, /GRPO task/);
+  assert.match(panel, /Freeze dataset/);
+  assert.match(api, /\/api\/v1\/dataset\/sync/);
+  assert.match(api, /\/api\/v1\/dataset\/design/);
+  assert.match(api, /\/api\/v1\/dataset\/freeze/);
+  assert.doesNotMatch(panel, /Math\.random|estimated time|token counter/i);
 });
 
 test("projects can be created and switched through durable backend state", async () => {

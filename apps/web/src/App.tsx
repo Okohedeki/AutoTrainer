@@ -8,7 +8,7 @@ import {
 } from "./api";
 import EvaluationMonitorPanel from "./EvaluationMonitorPanel";
 import GrpoEvidencePanel from "./GrpoEvidencePanel";
-import HistoryReviewPanel from "./HistoryReviewPanel";
+import DatasetWorkspacePanel from "./DatasetWorkspacePanel";
 import ModelSetupPanel from "./ModelSetupPanel";
 import ProjectsPanel from "./ProjectsPanel";
 import RuntimeSetupPanel from "./RuntimeSetupPanel";
@@ -201,8 +201,8 @@ export default function App() {
               <div className="data-workspace" key={`data-${projects?.active_id}-${projectScopeRevision}`}>
                 <ModelSetupPanel onModelChanged={projectChanged} disabled={trainingActive} />
                 <SourceSetupPanel onSourcesChanged={sourcesChanged} disabled={trainingActive} />
+                <DatasetWorkspacePanel refreshKey={sourceRevision} onDatasetChanged={projectChanged} disabled={trainingActive} />
                 <GrpoEvidencePanel context="data" refreshKey={sourceRevision} />
-                <HistoryReviewPanel refreshKey={sourceRevision} onHistoryChanged={projectChanged} disabled={trainingActive} />
               </div>
             ) : activeView === "train" ? (
               <div className="train-workspace" key={`train-${projects?.active_id}-${projectScopeRevision}`}>

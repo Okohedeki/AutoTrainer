@@ -349,6 +349,73 @@ export type HistoryWorkspace = {
   candidates: HistoryCandidate[];
 };
 
+export type DatasetDesign = {
+  instruction: string;
+  language: "python" | "typescript_react" | "csharp" | "cpp";
+  recommended_method: "qlora" | "grpo";
+  reason: string;
+  grpo_task: { instruction: string; verifier_focus: string } | null;
+  designer: { provider: "local" | "anthropic"; model: string };
+};
+
+export type DatasetCandidate = HistoryCandidate & {
+  decision: "pending" | "approved" | "rejected";
+  languages: string[];
+  pull_request?: {
+    number: number;
+    title: string;
+    base_branch: "main" | "master" | string;
+    merge_commit: string;
+    merged_at: string;
+  } | null;
+  design?: DatasetDesign;
+};
+
+export type DatasetWorkspace = {
+  catalog: {
+    status: "ready" | "needs_sync" | "no_github_training_sources";
+    source_count: number;
+    merged_pull_request_count: number;
+    sources: Array<{
+      source_id: string;
+      repository: string;
+      license_spdx: string;
+      status: "synced" | "needs_sync";
+      merged_pull_request_count: number;
+    }>;
+  };
+  candidates: DatasetCandidate[];
+  designers: {
+    local: { default_endpoint: string };
+    anthropic: { configured: boolean; models: string[] };
+  };
+  errors: string[];
+  freeze: {
+    status: "not_frozen" | "stale" | "ready";
+    receipt?: {
+      artifact_sha256: Record<string, string>;
+      compiler_fingerprint: string;
+      counts: Record<string, number>;
+      input_fingerprint: string;
+      language_counts: Record<string, number>;
+    };
+  };
+  policy: {
+    allowed_base_branches: string[];
+    license_required: boolean;
+    quality_rule: "merged_pull_request";
+    storage: "local_only";
+  };
+  summary: {
+    approved_count: number;
+    pending_count: number;
+    rejected_count: number;
+    reviewable_count: number;
+    stale_review_count: number;
+    language_counts: Record<string, number>;
+  };
+};
+
 export type TrainingJob = {
   id: string | null;
   status: "idle" | "queued" | "running" | "completed" | "failed" | "interrupted";
@@ -866,6 +933,27 @@ export async function reviewHistoryCandidate(input: {
 
 export async function retireStaleHistoryReviews(): Promise<HistoryWorkspace> {
   return request("/api/v1/history/retire-stale", { method: "POST", body: "{}" });
+}
+
+export async function getDatasetWorkspace(signal?: AbortSignal): Promise<DatasetWorkspace> {
+  return request("/api/v1/dataset", { signal });
+}
+
+export async function syncDatasetSources(): Promise<DatasetWorkspace> {
+  return request("/api/v1/dataset/sync", { method: "POST", body: "{}" });
+}
+
+export async function designDatasetCandidate(input: {
+  candidate_id: string;
+  provider: "local" | "anthropic";
+  model: string;
+  endpoint?: string;
+}): Promise<DatasetWorkspace> {
+  return request("/api/v1/dataset/design", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function freezeDataset(): Promise<DatasetWorkspace> {
+  return request("/api/v1/dataset/freeze", { method: "POST", body: "{}" });
 }
 
 export async function getTrainingJob(signal?: AbortSignal): Promise<TrainingJob> {
