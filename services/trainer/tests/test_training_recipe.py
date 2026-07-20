@@ -334,6 +334,42 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(result["generations_per_task"], 4)
         self.assertEqual(result["tasks"][0]["varied_round_count"], 1)
         self.assertEqual(result["tasks"][1]["varied_round_count"], 2)
+        self.assertEqual(result["tasks"][0]["changed_rollout_count"], 0)
+        self.assertEqual(result["tasks"][0]["tool_call_count"], 0)
+        self.assertEqual(result["tasks"][0]["tool_calls_by_name"], {})
+
+    def test_starting_policy_calibration_retains_safe_rollout_diagnostics(self) -> None:
+        events = [
+            {
+                "task_id": "pricing-page-001",
+                "calibration_round": 1,
+                "reward": reward,
+                "hard_gate_passed": True,
+                "changed_file_count": changed_files,
+                "tool_call_count": tool_count,
+                "tool_calls_by_name": named_calls,
+            }
+            for reward, changed_files, tool_count, named_calls in (
+                (0.2, 0, 2, {"list_files": 1, "read_file": 1}),
+                (0.8, 1, 3, {"read_file": 1, "apply_patch": 1, "run_check": 1}),
+            )
+        ]
+
+        result = _summarize_starting_policy_calibration(
+            events,
+            task_ids=["pricing-page-001"],
+            repetitions=1,
+            num_generations=2,
+        )
+
+        task = result["tasks"][0]
+        self.assertEqual(task["changed_rollout_count"], 1)
+        self.assertEqual(task["tool_call_count"], 5)
+        self.assertEqual(
+            task["tool_calls_by_name"],
+            {"apply_patch": 1, "list_files": 1, "read_file": 2, "run_check": 1},
+        )
+        self.assertEqual(task["rounds"][0]["changed_rollout_count"], 1)
 
     def test_starting_policy_calibration_rejects_flat_or_incomplete_tasks(self) -> None:
         events = [

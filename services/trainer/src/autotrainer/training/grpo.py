@@ -315,6 +315,9 @@ def _summarize_starting_policy_calibration(
             "starting-policy calibration requires unique executable task ids"
         )
     grouped: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    observed_events: dict[str, dict[int, list[Mapping[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     gate_passes: dict[str, int] = defaultdict(int)
     for event in events:
         task_id = str(event.get("task_id", "")).strip()
@@ -341,6 +344,7 @@ def _summarize_starting_policy_calibration(
                 f"starting-policy calibration returned invalid reward for {task_id!r}"
             )
         grouped[task_id][round_number].append(float(reward))
+        observed_events[task_id][round_number].append(event)
         if event.get("hard_gate_passed") is True:
             gate_passes[task_id] += 1
 
@@ -350,6 +354,9 @@ def _summarize_starting_policy_calibration(
         round_summaries: list[dict[str, Any]] = []
         varied_rounds = 0
         all_rewards: list[float] = []
+        changed_rollout_count = 0
+        tool_call_count = 0
+        tool_calls_by_name: dict[str, int] = defaultdict(int)
         for round_number in range(1, repetitions + 1):
             rewards = grouped[task_id].get(round_number, [])
             if len(rewards) != num_generations:
@@ -362,12 +369,44 @@ def _summarize_starting_policy_calibration(
             if reward_range > 1e-8:
                 varied_rounds += 1
             all_rewards.extend(rewards)
+            round_events = observed_events[task_id].get(round_number, [])
+            round_changed_count = sum(
+                1
+                for event in round_events
+                if isinstance(event.get("changed_file_count"), int)
+                and event["changed_file_count"] > 0
+            )
+            round_tool_count = sum(
+                event.get("tool_call_count", 0)
+                for event in round_events
+                if isinstance(event.get("tool_call_count"), int)
+                and not isinstance(event.get("tool_call_count"), bool)
+            )
+            round_tools: dict[str, int] = defaultdict(int)
+            for event in round_events:
+                named_calls = event.get("tool_calls_by_name")
+                if not isinstance(named_calls, Mapping):
+                    continue
+                for name, count in named_calls.items():
+                    if (
+                        isinstance(name, str)
+                        and isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and count >= 0
+                    ):
+                        round_tools[name] += count
+                        tool_calls_by_name[name] += count
+            changed_rollout_count += round_changed_count
+            tool_call_count += round_tool_count
             round_summaries.append(
                 {
                     "round": round_number,
                     "reward_min": round(min(rewards), 6),
                     "reward_max": round(max(rewards), 6),
                     "reward_range": round(reward_range, 6),
+                    "changed_rollout_count": round_changed_count,
+                    "tool_call_count": round_tool_count,
+                    "tool_calls_by_name": dict(sorted(round_tools.items())),
                 }
             )
         if len(round_summaries) == repetitions and varied_rounds == 0:
@@ -381,6 +420,9 @@ def _summarize_starting_policy_calibration(
                 "rollout_count": len(all_rewards),
                 "hard_gate_pass_count": gate_passes[task_id],
                 "varied_round_count": varied_rounds,
+                "changed_rollout_count": changed_rollout_count,
+                "tool_call_count": tool_call_count,
+                "tool_calls_by_name": dict(sorted(tool_calls_by_name.items())),
                 "rounds": round_summaries,
             }
         )
