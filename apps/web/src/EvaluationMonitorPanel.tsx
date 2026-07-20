@@ -10,7 +10,7 @@ import {
   type EvaluationTrial,
   type EvaluationWorkspace,
 } from "./api";
-import FableWorkflowPanel from "./FableWorkflowPanel";
+import LanguageEvaluationPanel from "./LanguageEvaluationPanel";
 import TelemetryChart, { type ChartPoint, type ChartSeries } from "./TelemetryChart";
 
 const liveStatuses = new Set(["queued", "running"]);
@@ -336,7 +336,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
         <ResultRows results={results} />
       </article>
 
-      <FableWorkflowPanel />
+      <LanguageEvaluationPanel />
     </section>
   );
 }

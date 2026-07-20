@@ -47,6 +47,7 @@ ALLOWED_SOURCE_KINDS = {"repository", "sft_jsonl", "task_pack"}
 ALLOWED_PARTITIONS = {"train", "evaluation"}
 EVALUATION_ROLES = {"reference", "control", "candidate"}
 EVALUATION_SUITES = {"model_benchmark", "fable_ab"}
+REQUIRED_EVALUATION_SUITES = {"model_benchmark"}
 IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}")
 FAIRNESS_TRUE_FIELDS = (
     "same_task_snapshot",
@@ -156,6 +157,16 @@ def _evaluation_model_ref(value: Any, label: str, errors: list[str]) -> str:
 
 
 def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> None:
+    if evaluation.get("language", "auto") not in {
+        "auto",
+        "python",
+        "typescript_react",
+        "csharp",
+        "cpp",
+    }:
+        errors.append(
+            "evaluation.language must be auto, python, typescript_react, csharp, or cpp"
+        )
     dataset = evaluation.get("dataset")
     if not isinstance(dataset, (str, Path)) or not str(dataset).strip():
         errors.append("evaluation.dataset is required")
@@ -191,8 +202,8 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
         arms: dict[str, Any] = {}
     else:
         arms = dict(arms_value)
-    if len(arms) != 3:
-        errors.append("evaluation.arms must declare exactly reference, control, and candidate arms")
+    if len(arms) not in {2, 3}:
+        errors.append("evaluation.arms must declare reference and candidate, plus optional control")
 
     candidates = evaluation.get("candidates")
     if not isinstance(candidates, list) or not candidates or any(
@@ -246,8 +257,10 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
             if digest is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", str(digest)):
                 errors.append(f"{label}.adapter.sha256 must be a 64 character digest")
     role_counts = {role: list(arm_roles.values()).count(role) for role in EVALUATION_ROLES}
-    if any(role_counts[role] != 1 for role in EVALUATION_ROLES):
-        errors.append("evaluation.arms must contain exactly one reference, one control, and one candidate role")
+    if role_counts["reference"] != 1 or role_counts["candidate"] != 1:
+        errors.append("evaluation.arms must contain exactly one reference and one candidate role")
+    if role_counts["control"] > 1:
+        errors.append("evaluation.arms may contain at most one optional control role")
 
     suites_value = evaluation.get("suites")
     if not isinstance(suites_value, Mapping):
@@ -255,11 +268,15 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
         suites: dict[str, Any] = {}
     else:
         suites = dict(suites_value)
-    if set(suites) != EVALUATION_SUITES:
-        errors.append("evaluation.suites must contain exactly model_benchmark and fable_ab")
+    unknown_suites = sorted(set(suites) - EVALUATION_SUITES)
+    if unknown_suites:
+        errors.append("evaluation.suites contains unsupported suites: " + ", ".join(unknown_suites))
+    missing_suites = sorted(REQUIRED_EVALUATION_SUITES - set(suites))
+    if missing_suites:
+        errors.append("evaluation.suites must contain model_benchmark")
 
     suite_arms: dict[str, list[str]] = {}
-    for suite_id in sorted(EVALUATION_SUITES):
+    for suite_id in sorted(suites):
         suite = _mapping(suites.get(suite_id), f"evaluation.suites.{suite_id}", errors)
         if suite.get("kind") != suite_id:
             errors.append(f"evaluation.suites.{suite_id}.kind must be {suite_id}")
@@ -334,21 +351,22 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
         errors.append("model_benchmark runner must use type: builtin or command")
 
     fable_members = suite_arms.get("fable_ab", [])
-    fable_roles = {arm_roles.get(member) for member in fable_members}
-    if len(fable_members) != 2 or fable_roles != {"control", "candidate"}:
-        errors.append("fable_ab must contain exactly the control and candidate arms")
-    fable_suite = _mapping(suites.get("fable_ab"), "evaluation.suites.fable_ab", errors)
-    fable_runner = _mapping(
-        fable_suite.get("runner"), "evaluation.suites.fable_ab.runner", errors
-    )
-    if fable_runner.get("type") != "external":
-        errors.append("fable_ab runner must use type: external")
-    review = _mapping(fable_suite.get("review"), "evaluation.suites.fable_ab.review", errors)
-    if review.get("type") != "manual":
-        errors.append("evaluation.suites.fable_ab.review.type must be manual")
-    if review.get("blind") is not True:
-        errors.append("evaluation.suites.fable_ab.review.blind must be true")
-    _positive_int(review, "reviewers_per_pair", errors)
+    if "fable_ab" in suites:
+        fable_roles = {arm_roles.get(member) for member in fable_members}
+        if len(fable_members) != 2 or fable_roles != {"control", "candidate"}:
+            errors.append("fable_ab must contain exactly the control and candidate arms")
+        fable_suite = _mapping(suites.get("fable_ab"), "evaluation.suites.fable_ab", errors)
+        fable_runner = _mapping(
+            fable_suite.get("runner"), "evaluation.suites.fable_ab.runner", errors
+        )
+        if fable_runner.get("type") != "external":
+            errors.append("fable_ab runner must use type: external")
+        review = _mapping(fable_suite.get("review"), "evaluation.suites.fable_ab.review", errors)
+        if review.get("type") != "manual":
+            errors.append("evaluation.suites.fable_ab.review.type must be manual")
+        if review.get("blind") is not True:
+            errors.append("evaluation.suites.fable_ab.review.blind must be true")
+        _positive_int(review, "reviewers_per_pair", errors)
 
     fairness = _mapping(evaluation.get("fairness"), "evaluation.fairness", errors)
     if fairness.get("paired_by") != ["task_id", "repetition", "seed"]:
@@ -409,27 +427,28 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     ):
         errors.append("evaluation.decisions.model_benchmark.minimum_tasks must be at least 5")
 
-    fable_decision = _mapping(decisions.get("fable_ab"), "evaluation.decisions.fable_ab", errors)
-    if fable_decision.get("candidate") not in fable_members:
-        errors.append("evaluation.decisions.fable_ab.candidate must reference a suite arm")
-    elif arm_roles.get(str(fable_decision.get("candidate"))) != "candidate":
-        errors.append("evaluation.decisions.fable_ab.candidate must use the candidate role")
-    if fable_decision.get("control") not in fable_members:
-        errors.append("evaluation.decisions.fable_ab.control must reference a suite arm")
-    elif arm_roles.get(str(fable_decision.get("control"))) != "control":
-        errors.append("evaluation.decisions.fable_ab.control must use the control role")
-    if fable_decision.get("metric") != "blind_preference_rate":
-        errors.append("evaluation.decisions.fable_ab.metric must be blind_preference_rate")
-    minimum_rate = fable_decision.get("minimum_rate")
-    if not isinstance(minimum_rate, (int, float)) or isinstance(minimum_rate, bool) or not 0 <= minimum_rate <= 1:
-        errors.append("evaluation.decisions.fable_ab.minimum_rate must be between 0 and 1")
-    fable_minimum_tasks = fable_decision.get("minimum_tasks")
-    if (
-        not isinstance(fable_minimum_tasks, int)
-        or isinstance(fable_minimum_tasks, bool)
-        or fable_minimum_tasks < 5
-    ):
-        errors.append("evaluation.decisions.fable_ab.minimum_tasks must be at least 5")
+    if "fable_ab" in suites:
+        fable_decision = _mapping(decisions.get("fable_ab"), "evaluation.decisions.fable_ab", errors)
+        if fable_decision.get("candidate") not in fable_members:
+            errors.append("evaluation.decisions.fable_ab.candidate must reference a suite arm")
+        elif arm_roles.get(str(fable_decision.get("candidate"))) != "candidate":
+            errors.append("evaluation.decisions.fable_ab.candidate must use the candidate role")
+        if fable_decision.get("control") not in fable_members:
+            errors.append("evaluation.decisions.fable_ab.control must reference a suite arm")
+        elif arm_roles.get(str(fable_decision.get("control"))) != "control":
+            errors.append("evaluation.decisions.fable_ab.control must use the control role")
+        if fable_decision.get("metric") != "blind_preference_rate":
+            errors.append("evaluation.decisions.fable_ab.metric must be blind_preference_rate")
+        minimum_rate = fable_decision.get("minimum_rate")
+        if not isinstance(minimum_rate, (int, float)) or isinstance(minimum_rate, bool) or not 0 <= minimum_rate <= 1:
+            errors.append("evaluation.decisions.fable_ab.minimum_rate must be between 0 and 1")
+        fable_minimum_tasks = fable_decision.get("minimum_tasks")
+        if (
+            not isinstance(fable_minimum_tasks, int)
+            or isinstance(fable_minimum_tasks, bool)
+            or fable_minimum_tasks < 5
+        ):
+            errors.append("evaluation.decisions.fable_ab.minimum_tasks must be at least 5")
 
 
 def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> ValidationReport:
@@ -780,6 +799,7 @@ def default_config(
             "episode_timeout_seconds": 900,
         },
         "evaluation": {
+            "language": "auto",
             "dataset": ".autotrainer/compiled/rl/evaluation.jsonl",
             "task_pack": "held-out-frontend",
             "task_split": "evaluation",
@@ -789,7 +809,7 @@ def default_config(
             "primary_metric": "verified_task_success",
             # ``candidates`` is retained as the ordered, display-facing arm list.
             # Runtime identity and comparison roles live in ``arms`` and ``suites``.
-            "candidates": ["reference_9b", "base_fable", "autotrainer"],
+            "candidates": ["reference_9b", "autotrainer"],
             "arms": {
                 "reference_9b": {
                     "label": "Qwythos 9B reference",
@@ -805,12 +825,6 @@ def default_config(
                         "max_sequence_length": 2048,
                         "quantization": "project",
                     },
-                },
-                "base_fable": {
-                    "label": "Base 9B + Fable",
-                    "role": "control",
-                    "parameter_class": "9b",
-                    "model": "project",
                 },
                 "autotrainer": {
                     "label": "AutoTrainer 9B",
@@ -832,22 +846,6 @@ def default_config(
                         # loader. Its immutable identity is frozen into the
                         # evaluation plan from the installed code.
                         "type": "builtin",
-                    },
-                },
-                "fable_ab": {
-                    "kind": "fable_ab",
-                    "arms": ["base_fable", "autotrainer"],
-                    "runner": {
-                        "type": "external",
-                        "producer": "fable",
-                        "version": "REPLACE_WITH_FABLE_VERSION",
-                        "orchestration_sha256": "sha256:" + "0" * 64,
-                        "result_schema": "autotrainer-evaluation-result-v1",
-                    },
-                    "review": {
-                        "type": "manual",
-                        "blind": True,
-                        "reviewers_per_pair": 3,
                     },
                 },
             },
@@ -876,13 +874,6 @@ def default_config(
                     "control": "reference_9b",
                     "metric": "verified_task_success",
                     "minimum_delta": 0.0,
-                    "minimum_tasks": 5,
-                },
-                "fable_ab": {
-                    "candidate": "autotrainer",
-                    "control": "base_fable",
-                    "metric": "blind_preference_rate",
-                    "minimum_rate": 0.5,
                     "minimum_tasks": 5,
                 },
             },

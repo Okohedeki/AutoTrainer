@@ -49,6 +49,33 @@ def _project(root: Path) -> Path:
     reference = config["evaluation"]["arms"]["reference_9b"]["model"]
     reference["id"] = "Qwen/Qwen3.5-9B"
     reference["revision"] = REVISION
+    config["evaluation"].pop("language", None)
+    config["evaluation"]["candidates"].insert(1, "base_fable")
+    config["evaluation"]["arms"]["base_fable"] = {
+        "label": "Base 9B + Fable",
+        "role": "control",
+        "parameter_class": "9b",
+        "model": "project",
+    }
+    config["evaluation"]["suites"]["fable_ab"] = {
+        "kind": "fable_ab",
+        "arms": ["base_fable", "autotrainer"],
+        "runner": {
+            "type": "external",
+            "producer": "fable",
+            "version": "1.0.0",
+            "orchestration_sha256": ORCHESTRATION,
+            "result_schema": "autotrainer-evaluation-result-v1",
+        },
+        "review": {"type": "manual", "blind": True, "reviewers_per_pair": 1},
+    }
+    config["evaluation"]["decisions"]["fable_ab"] = {
+        "candidate": "autotrainer",
+        "control": "base_fable",
+        "metric": "blind_preference_rate",
+        "minimum_rate": 0.5,
+        "minimum_tasks": 5,
+    }
     fable_runner = config["evaluation"]["suites"]["fable_ab"]["runner"]
     fable_runner["version"] = "1.0.0"
     fable_runner["orchestration_sha256"] = ORCHESTRATION

@@ -583,9 +583,9 @@ def build_plan(
             evaluation_blockers.append(
                 "evaluation.candidates must contain exactly the declared arm ids"
             )
-        if set(evaluation_suites) != {"model_benchmark", "fable_ab"}:
+        if "model_benchmark" not in evaluation_suites:
             evaluation_blockers.append(
-                "evaluation.suites must declare model_benchmark and fable_ab"
+                "evaluation.suites must declare model_benchmark"
             )
         if not isinstance(evaluation_repetitions, int) or isinstance(
             evaluation_repetitions, bool

@@ -1021,6 +1021,35 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
 
+    def test_language_evaluation_endpoint_reads_and_updates_the_suite(self) -> None:
+        workspace = {
+            "status": "ready",
+            "configured": "auto",
+            "selected": "python",
+            "blockers": [],
+        }
+        with patch(
+            "autotrainer.local_api.get_language_evaluation_workspace",
+            return_value=workspace,
+        ) as get_language:
+            status, result = self.request("GET", "/api/v1/evaluation/language")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        get_language.assert_called_once_with(self.config_path.resolve())
+
+        with patch(
+            "autotrainer.local_api.set_evaluation_language",
+            return_value=workspace,
+        ) as set_language:
+            status, result = self.request(
+                "POST",
+                "/api/v1/evaluation/language",
+                {"language": "python"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        set_language.assert_called_once_with(self.config_path.resolve(), "python")
+
     def test_active_training_returns_a_project_busy_conflict(self) -> None:
         with project_run_gate(self.config_path):
             status, result = self.request("POST", "/api/v1/prepare", {})

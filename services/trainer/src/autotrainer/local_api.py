@@ -41,6 +41,10 @@ from .history_service import (
     retire_stale_reviews,
     review_history_candidate,
 )
+from .language_evaluation import (
+    get_language_evaluation_workspace,
+    set_evaluation_language,
+)
 from .model_cache import inspect_reference_model, ModelCacheError
 from .model_service import (
     discover_local_models,
@@ -684,6 +688,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         self.server.evaluation.workspace(),
                     )
+                elif path == f"{API_PREFIX}/evaluation/language":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        get_language_evaluation_workspace(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/evaluation/events":
                     self._send_json(
                         HTTPStatus.OK,
@@ -982,6 +992,19 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                             self.server.config_path,
                             max_vram_gib=float(max_vram_gib),
                             enforcement=_required_text(payload, "enforcement"),
+                        ),
+                    )
+                elif path == f"{API_PREFIX}/evaluation/language":
+                    _require_keys(
+                        payload,
+                        allowed={"language"},
+                        required={"language"},
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        set_evaluation_language(
+                            self.server.config_path,
+                            _required_text(payload, "language"),
                         ),
                     )
                 elif path == f"{API_PREFIX}/prepare":

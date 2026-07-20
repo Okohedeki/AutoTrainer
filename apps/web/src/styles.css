@@ -969,6 +969,17 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .dataset-designer .dataset-endpoint { grid-column: auto; }
 }
 
+.language-evaluation-panel { padding: 20px; }
+.language-evaluation-panel > .panel-header p:last-child { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+.evaluation-language-select { display: grid; grid-template-columns: 150px minmax(220px, 420px); align-items: center; gap: 10px; margin-bottom: 13px; }
+.evaluation-language-select > span { color: var(--muted); font-size: 9px; font-weight: 750; }
+.evaluation-language-select select { min-height: 35px; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; font-size: 10px; }
+.language-suite-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.language-suite-grid > div { display: grid; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); }
+.language-suite-grid span { color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.language-suite-grid strong { font-size: 9px; line-height: 1.5; }
+.language-suite-grid small { color: var(--muted); font-size: 8px; line-height: 1.4; }
+
 .status-chip { min-height: 22px; padding: 0 8px; border-radius: 999px; font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .status-chip.info { border-color: #d7d9ff; color: #5358cf; background: #eeefff; }
 .status-chip.muted { border-color: #d7dce1; color: #59636e; background: #f2f4f6; }

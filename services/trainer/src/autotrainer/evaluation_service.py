@@ -35,6 +35,7 @@ from .evaluation import (
     run_command_suite,
     write_evaluation_plan,
 )
+from .language_evaluation import require_language_matched_evaluation
 from .project_gate import (
     ProjectLease,
     acquire_project_lease,
@@ -465,6 +466,9 @@ def plan_project_evaluation(config_path: str | Path) -> dict[str, Any]:
 
     with project_run_gate(config_path), device_run_gate():
         config = _load_project(config_path)
+        evaluation = config.data.get("evaluation", {})
+        if isinstance(evaluation, Mapping) and "language" in evaluation:
+            require_language_matched_evaluation(config.path)
         return write_evaluation_plan(config.data, config.root)
 
 

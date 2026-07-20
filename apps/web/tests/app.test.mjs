@@ -241,7 +241,7 @@ test("Train exposes adapter-only hard or soft VRAM governance", async () => {
 
 test("Evaluate freezes weights, runs once, and renders real trial and verifier evidence", async () => {
   const panel = await source("src/EvaluationMonitorPanel.tsx");
-  const fable = await source("src/FableWorkflowPanel.tsx");
+  const language = await source("src/LanguageEvaluationPanel.tsx");
   const api = await source("src/api.ts");
   assert.match(panel, /Weights are frozen\. Nothing learns here\./);
   assert.match(panel, /Run held-out evaluation/);
@@ -263,16 +263,12 @@ test("Evaluate freezes weights, runs once, and renders real trial and verifier e
   assert.match(panel, /planIdRef/);
   assert.match(panel, /page\.cursor_reset \|\| planRolledOver/);
   assert.match(panel, /hardGatePassed === false/);
-  assert.match(panel, /<FableWorkflowPanel/);
-  assert.match(api, /request\("\/api\/v1\/fable", \{ signal \}\)/);
-  assert.match(api, /export async function pinFableRunner/);
-  assert.match(api, /export async function runFableAction/);
-  assert.match(fable, /Fable A\/B exchange/);
-  assert.match(fable, /Hash and pin/);
-  assert.match(fable, /workspace\.actions\.map/);
-  assert.match(fable, /action\.id === "ingest"/);
-  assert.match(fable, /review_import/);
-  assert.match(fable, /trusted local verifier/);
+  assert.match(panel, /<LanguageEvaluationPanel/);
+  assert.match(api, /\/api\/v1\/evaluation\/language/);
+  assert.match(language, /Language-matched code proof/);
+  assert.match(language, /workspace\.available\.map/);
+  assert.match(language, /Open benchmark inspiration/);
+  assert.match(language, /Auto-detect from frozen dataset/);
   assert.match(panel, /resultsTruncated/);
   assert.match(panel, /trialsTruncated/);
   assert.match(panel, /visible-window means rather than whole-run means/);

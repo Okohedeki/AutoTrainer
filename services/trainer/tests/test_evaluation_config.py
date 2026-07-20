@@ -21,6 +21,36 @@ EVALUATION_COMMIT = "d" * 40
 
 def evaluation_config() -> dict:
     payload = default_config(revision="a" * 40)
+    payload["evaluation"]["candidates"].insert(1, "base_fable")
+    payload["evaluation"]["arms"]["base_fable"] = {
+        "label": "Base 9B + Fable",
+        "role": "control",
+        "parameter_class": "9b",
+        "model": "project",
+    }
+    payload["evaluation"]["suites"]["fable_ab"] = {
+        "kind": "fable_ab",
+        "arms": ["base_fable", "autotrainer"],
+        "runner": {
+            "type": "external",
+            "producer": "fable",
+            "version": "REPLACE_WITH_FABLE_VERSION",
+            "orchestration_sha256": "sha256:" + "0" * 64,
+            "result_schema": "autotrainer-evaluation-result-v1",
+        },
+        "review": {
+            "type": "manual",
+            "blind": True,
+            "reviewers_per_pair": 3,
+        },
+    }
+    payload["evaluation"]["decisions"]["fable_ab"] = {
+        "candidate": "autotrainer",
+        "control": "base_fable",
+        "metric": "blind_preference_rate",
+        "minimum_rate": 0.5,
+        "minimum_tasks": 5,
+    }
     reference = payload["evaluation"]["arms"]["reference_9b"]["model"]
     reference["id"] = "example/reference-9b"
     reference["revision"] = "b" * 40
@@ -102,17 +132,19 @@ def write_adapter(root: Path) -> Path:
 
 
 class EvaluationConfigTests(unittest.TestCase):
-    def test_default_declares_two_distinct_suites_and_three_roles(self) -> None:
+    def test_default_requires_only_the_shipped_local_suite_and_two_roles(self) -> None:
         payload = default_config()
         report = validate_mapping(payload)
 
         self.assertEqual(report.errors, ())
         evaluation = payload["evaluation"]
-        self.assertEqual(set(evaluation["suites"]), {"model_benchmark", "fable_ab"})
+        self.assertEqual(set(evaluation["suites"]), {"model_benchmark"})
         self.assertEqual(
             {arm["role"] for arm in evaluation["arms"].values()},
-            {"reference", "control", "candidate"},
+            {"reference", "candidate"},
         )
+        self.assertNotIn("fable_ab", evaluation["decisions"])
+        self.assertEqual(evaluation["language"], "auto")
         self.assertEqual(set(evaluation["candidates"]), set(evaluation["arms"]))
         self.assertEqual(
             evaluation["suites"]["model_benchmark"]["runner"],
@@ -263,8 +295,9 @@ class EvaluationPlannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             payload = evaluation_config()
-            payload["evaluation"]["suites"]["fable_ab"]["runner"] = dict(
-                default_config()["evaluation"]["suites"]["fable_ab"]["runner"]
+            payload["evaluation"]["suites"]["fable_ab"]["runner"].update(
+                version="REPLACE_WITH_FABLE_VERSION",
+                orchestration_sha256="sha256:" + "0" * 64,
             )
             write_compiled_evaluation(root)
             write_adapter(root)

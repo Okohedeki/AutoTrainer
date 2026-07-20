@@ -441,7 +441,7 @@
     "evaluation_decisions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["confidence", "model_benchmark", "fable_ab"],
+      "required": ["confidence", "model_benchmark"],
       "properties": {
         "confidence": { "type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1 },
         "model_benchmark": {
@@ -487,16 +487,17 @@
         },
         "holdout_unit": { "const": "repository" },
         "primary_metric": { "const": "verified_task_success" },
+        "language": { "enum": ["auto", "python", "typescript_react", "csharp", "cpp"] },
         "candidates": {
           "type": "array",
-          "minItems": 3,
+          "minItems": 2,
           "maxItems": 3,
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
         "arms": {
           "type": "object",
-          "minProperties": 3,
+          "minProperties": 2,
           "maxProperties": 3,
           "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]*$" },
           "additionalProperties": { "$ref": "#/$defs/evaluation_arm" }
@@ -504,7 +505,7 @@
         "suites": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["model_benchmark", "fable_ab"],
+          "required": ["model_benchmark"],
           "properties": {
             "model_benchmark": { "$ref": "#/$defs/evaluation_model_suite" },
             "fable_ab": { "$ref": "#/$defs/evaluation_fable_suite" }

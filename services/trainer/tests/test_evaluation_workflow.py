@@ -576,12 +576,13 @@ class EvaluationPlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             config = _config(root)
-            defaults = default_config()
             config["evaluation"]["suites"]["model_benchmark"]["runner"] = {
                 "type": "builtin"
             }
-            config["evaluation"]["suites"]["fable_ab"]["runner"] = dict(
-                defaults["evaluation"]["suites"]["fable_ab"]["runner"]
+            config["evaluation"]["suites"]["fable_ab"]["runner"].update(
+                version="REPLACE_WITH_FABLE_VERSION",
+                orchestration_sha256="sha256:" + "0" * 64,
+                result_schema="autotrainer-evaluation-result-v1",
             )
 
             plan = build_evaluation_plan(config, root)
@@ -835,9 +836,36 @@ class EvaluationPlanTests(unittest.TestCase):
             config["sft"]["enabled"] = False
             config["grpo"]["dataset"] = ".artifacts/compiled/rl/train.jsonl"
             config["evaluation"]["dataset"] = ".artifacts/compiled/rl/evaluation.jsonl"
+            config["evaluation"].pop("language", None)
             config["environment"]["image"] = IMAGE_ID
             config["evaluation"]["arms"]["reference_9b"]["model"]["id"] = "Qwen/Qwen3.5-9B"
             config["evaluation"]["arms"]["reference_9b"]["model"]["revision"] = REVISION
+            config["evaluation"]["candidates"].insert(1, "base_fable")
+            config["evaluation"]["arms"]["base_fable"] = {
+                "label": "Base 9B + Fable",
+                "role": "control",
+                "parameter_class": "9b",
+                "model": "project",
+            }
+            config["evaluation"]["suites"]["fable_ab"] = {
+                "kind": "fable_ab",
+                "arms": ["base_fable", "autotrainer"],
+                "runner": {
+                    "type": "external",
+                    "producer": "fable",
+                    "version": "1.0.0",
+                    "orchestration_sha256": ORCHESTRATION,
+                    "result_schema": "autotrainer-evaluation-result-v1",
+                },
+                "review": {"type": "manual", "blind": True, "reviewers_per_pair": 1},
+            }
+            config["evaluation"]["decisions"]["fable_ab"] = {
+                "candidate": "autotrainer",
+                "control": "base_fable",
+                "metric": "blind_preference_rate",
+                "minimum_rate": 0.5,
+                "minimum_tasks": 5,
+            }
             fable_runner = config["evaluation"]["suites"]["fable_ab"]["runner"]
             fable_runner["version"] = "1.0.0"
             fable_runner["orchestration_sha256"] = ORCHESTRATION

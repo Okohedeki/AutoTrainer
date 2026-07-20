@@ -677,6 +677,29 @@ export type EvaluationWorkspace = {
   suites: EvaluationSuite[];
 };
 
+export type LanguageEvaluationWorkspace = {
+  available: Array<{
+    id: "python" | "typescript_react" | "csharp" | "cpp";
+    label: string;
+    benchmark_inspirations: string[];
+    checks: string[];
+    metrics: string[];
+  }>;
+  blockers: string[];
+  configured: "auto" | "python" | "typescript_react" | "csharp" | "cpp";
+  evaluation_language_counts: Record<string, number>;
+  inferred_training_language: string | null;
+  selected: string | null;
+  selected_suite: {
+    label: string;
+    benchmark_inspirations: string[];
+    checks: string[];
+    metrics: string[];
+  } | null;
+  status: "ready" | "blocked";
+  training_language_counts: Record<string, number>;
+};
+
 export type EvaluationEvent = {
   sequence: number;
   type?: string;
@@ -993,6 +1016,17 @@ export async function getCurriculumWorkspace(signal?: AbortSignal): Promise<Curr
 
 export async function getEvaluationWorkspace(signal?: AbortSignal): Promise<EvaluationWorkspace> {
   return request("/api/v1/evaluation", { signal });
+}
+
+export async function getLanguageEvaluation(signal?: AbortSignal): Promise<LanguageEvaluationWorkspace> {
+  return request("/api/v1/evaluation/language", { signal });
+}
+
+export async function setEvaluationLanguage(language: LanguageEvaluationWorkspace["configured"]): Promise<LanguageEvaluationWorkspace> {
+  return request("/api/v1/evaluation/language", {
+    method: "POST",
+    body: JSON.stringify({ language }),
+  });
 }
 
 export async function planEvaluation(): Promise<EvaluationWorkspace> {
