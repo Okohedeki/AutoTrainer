@@ -276,7 +276,7 @@ class TrainingRecipeTests(unittest.TestCase):
             "autotrainer-rollout:latest",
         )
         self.assertEqual(recipe["grpo"]["effective_batch_size"], 2)
-        self.assertEqual(recipe["grpo"]["per_device_eval_batch_size"], 1)
+        self.assertEqual(recipe["grpo"]["per_device_eval_batch_size"], 2)
         self.assertEqual(recipe["grpo"]["num_generations"], 2)
         self.assertEqual(recipe["grpo"]["calibration_generations"], 4)
         self.assertEqual(recipe["grpo"]["dataset"]["record_count"], 1)

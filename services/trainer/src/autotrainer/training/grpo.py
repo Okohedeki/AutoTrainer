@@ -228,9 +228,11 @@ def resolve_grpo_recipe(
         # Compatibility projection for clients that still display this field.
         "sft_adapter": adapter,
         "per_device_train_batch_size": batch_size,
-        # The inherited Transformers default is eight and can OOM a 9B QLoRA
-        # as soon as an optional validation dataset enables periodic eval.
-        "per_device_eval_batch_size": 1,
+        # TRL's evaluation sampler emits one contiguous reward-normalization
+        # group per prompt.  Keep the whole group in a single batch: smaller
+        # batches fail when TRL reshapes rewards by num_generations, while the
+        # inherited Transformers default of eight can OOM a 9B QLoRA.
+        "per_device_eval_batch_size": num_generations,
         "gradient_accumulation_steps": accumulation,
         "effective_batch_size": effective_batch_size,
         "num_generations": num_generations,
