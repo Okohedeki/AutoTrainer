@@ -239,6 +239,14 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
         : "Decision pending";
   const verdictTone = decision?.verified_better ? "good" : report ? "warning" : "muted";
   const resultRowsShown = Math.min(results.length, 16);
+  const hasEvaluationEvidence = Boolean(
+    workspace?.plan
+    || workspace?.job.id
+    || trials.length
+    || results.length
+    || events.length
+    || report,
+  );
 
   const run = async () => {
     setStarting(true);
@@ -269,6 +277,17 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
         {(workspace?.readiness.blockers.length ?? 0) > 0 && <div className="evaluation-blocked"><ul>{workspace?.readiness.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul><button className="secondary-button" type="button" onClick={onOpenData}>Review Data</button></div>}
       </article>
 
+      {!hasEvaluationEvidence ? (
+        <article className="panel evaluation-before-run">
+          <div><p className="panel-kicker">What you will get</p><h2>No evaluation evidence yet</h2><p>Nothing is missing or broken. Detailed plots and trial tables appear only after the first held-out evaluation starts.</p></div>
+          <ol>
+            <li><span>1</span><div><strong>Freeze the comparison</strong><small>The same tasks, repeats, and seeds are assigned to both model outputs.</small></div></li>
+            <li><span>2</span><div><strong>Run trusted checks</strong><small>AutoTrainer uses the evaluator that matches the project’s primary language.</small></div></li>
+            <li><span>3</span><div><strong>Show the proof</strong><small>Plots, scored trials, and the improvement decision appear as real results arrive.</small></div></li>
+          </ol>
+        </article>
+      ) : (
+        <>
       <div className="evaluation-summary">
         <article className="panel"><span>Held-out tasks</span><strong>{workspace?.readiness.ready_task_count ?? "-"}</strong><small>Isolated from training</small></article>
         <article className="panel"><span>Frozen plan</span><strong>{workspace?.plan ? workspace.plan.plan_id.slice(0, 14) : "Not frozen"}</strong><small>{workspace?.plan ? `${workspace.plan.repetitions} repetitions` : "Created when evaluation starts"}</small></article>
@@ -335,6 +354,8 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
         {!resultsTruncated && results.length > resultRowsShown && <div className="evidence-disclosure"><strong>Showing the latest {resultRowsShown} rows.</strong><span>The graphs above still include all {results.length} returned results.</span></div>}
         <ResultRows results={results} />
       </article>
+        </>
+      )}
 
       <LanguageEvaluationPanel />
     </section>

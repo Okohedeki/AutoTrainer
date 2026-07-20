@@ -249,6 +249,8 @@ test("Evaluate freezes weights, runs once, and renders real trial and verifier e
   const api = await source("src/api.ts");
   assert.match(panel, /Weights are frozen\. Nothing learns here\./);
   assert.match(panel, /Run held-out evaluation/);
+  assert.match(panel, /const hasEvaluationEvidence/);
+  assert.match(panel, /Nothing is missing or broken/);
   assert.match(panel, /await startEvaluation\(\)/);
   assert.match(api, /body: "\{\}"/);
   assert.match(api, /\/api\/v1\/evaluation\/events\?after=/);

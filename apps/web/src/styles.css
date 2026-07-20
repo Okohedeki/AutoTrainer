@@ -1064,6 +1064,15 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 
 .evaluation-workspace { display: grid; gap: 14px; }
 .evaluation-error { margin: 0; }
+.evaluation-before-run { padding: 22px; display: grid; grid-template-columns: minmax(260px, .7fr) minmax(0, 1.3fr); gap: 24px; align-items: center; }
+.evaluation-before-run h2 { margin: 6px 0 0; font-size: 17px; }
+.evaluation-before-run > div > p:last-child { max-width: 460px; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.evaluation-before-run ol { margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; list-style: none; }
+.evaluation-before-run li { min-width: 0; padding: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-subtle); }
+.evaluation-before-run li > span { width: 23px; height: 23px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: #303842; font: 750 8px/1 "SFMono-Regular", Consolas, monospace; }
+.evaluation-before-run li > div { display: grid; gap: 4px; }
+.evaluation-before-run li strong { font-size: 9px; }
+.evaluation-before-run li small { color: var(--muted); font-size: 8px; line-height: 1.45; }
 .evaluation-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .evaluation-summary article { min-height: 96px; padding: 15px 16px; display: grid; align-content: space-between; }
 .evaluation-summary article > span { color: #66717d; font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
@@ -1128,6 +1137,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .evaluation-grid { grid-template-columns: 1fr; }
   .workspace-grid > .prepare-panel { position: static; }
   .external-suite-panel { position: static; }
+  .evaluation-before-run { grid-template-columns: 1fr; }
   .evaluation-summary { grid-template-columns: 1fr 1fr; }
 }
 
@@ -1159,6 +1169,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
   .stage-row { grid-template-columns: 27px minmax(0, 1fr); }
   .stage-row > .status-chip { grid-column: 2; justify-self: start; }
   .evaluation-summary { grid-template-columns: 1fr; }
+  .evaluation-before-run ol { grid-template-columns: 1fr; }
   .current-trial { grid-template-columns: auto minmax(0, 1fr); }
   .current-trial dl { grid-column: 2; flex-wrap: wrap; }
   .evaluation-run-actions { align-items: stretch; flex-direction: column; }

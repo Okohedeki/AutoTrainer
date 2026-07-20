@@ -166,7 +166,7 @@ export default function App() {
     projects: { eyebrow: "Local workspaces", title: "Projects", description: "Create one specialist at a time. Its model, data, training evidence, evaluations, and endpoint stay together." },
     data: { eyebrow: "Choose what it learns", title: "Data", description: "Connect high-quality repositories, turn merged pull requests into reviewable examples or tasks, and lock the local dataset you approve." },
     train: { eyebrow: "Change the adapter", title: "Train", description: "Run the complete local training path and watch its real loss, reward, rubric, and durable events." },
-    evaluate: { eyebrow: "Freeze and measure", title: "Evaluate", description: "Generate held-out work, verify it locally, and watch trusted scores arrive. No weights change here." },
+    evaluate: { eyebrow: "Prove the result", title: "Evaluate", description: "Compare the trained adapter with the reference model on held-out tasks using checks matched to the project’s programming language." },
     serve: { eyebrow: "Use the result", title: "Serve", description: "Make the completed adapter callable through a local OpenAI-compatible endpoint." },
   };
   const nav: Array<{ id: ViewId; label: string }> = [

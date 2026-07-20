@@ -140,7 +140,7 @@ export default function DatasetWorkspacePanel({
           <p>AutoTrainer imports licensed PRs merged into main or master, asks your chosen LLM to structure each one, and waits for your approval before locking anything for training.</p>
         </div>
         <span className={`status-chip ${frozen ? "ready" : "muted"}`}>
-          {frozen ? "Frozen" : workspace?.freeze.status === "stale" ? "Changed" : "Draft"}
+          {frozen ? "Locked" : workspace?.freeze.status === "stale" ? "Changed" : "Draft"}
         </span>
       </header>
 
