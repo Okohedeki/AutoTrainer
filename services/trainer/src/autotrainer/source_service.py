@@ -626,6 +626,19 @@ def _add_source_owned(
             license_attribution=license_attribution,
         )
 
+        declared_roles = set(str(value) for value in declared.get("roles", []))
+        if inferred_origin == "github" and "history" in declared_roles:
+            license_value = declared.get("license")
+            spdx = (
+                str(license_value.get("spdx", "")).strip()
+                if isinstance(license_value, Mapping)
+                else ""
+            )
+            if spdx.casefold() in {"", "undeclared", "noassertion", "other"}:
+                raise ConfigError(
+                    "GitHub accepted-change sources require a declared SPDX license"
+                )
+
         locator = _canonical_locator(config, declared)
         if locator and any(_canonical_locator(config, source) == locator for source in config.sources):
             raise ConfigError("source is already added")

@@ -247,7 +247,11 @@ class SourceServiceTests(unittest.TestCase):
             }
 
         with patch("autotrainer.source_service.materialize_repository", side_effect=fake_materialize):
-            result = add_source(self.config_path, "github.com/Owner/Repo")
+            result = add_source(
+                self.config_path,
+                "github.com/Owner/Repo",
+                license_spdx="MIT",
+            )
 
         source = result["source"]
         self.assertEqual(source["origin"], "github")
@@ -269,7 +273,11 @@ class SourceServiceTests(unittest.TestCase):
             side_effect=RuntimeError("clone failed"),
         ):
             with self.assertRaisesRegex(ConfigError, "could not clone and pin"):
-                add_source(self.config_path, "owner/repository")
+                add_source(
+                    self.config_path,
+                    "owner/repository",
+                    license_spdx="MIT",
+                )
 
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(list_sources(self.config_path), [])
@@ -290,8 +298,22 @@ class SourceServiceTests(unittest.TestCase):
                 side_effect=error,
             ):
                 with self.assertRaisesRegex(ConfigError, expected):
-                    add_source(self.config_path, "owner/repository")
+                    add_source(
+                        self.config_path,
+                        "owner/repository",
+                        license_spdx="MIT",
+                    )
 
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(list_sources(self.config_path), [])
+
+    def test_github_accepted_changes_require_a_declared_license(self) -> None:
+        before = self.config_path.read_bytes()
+        with patch("autotrainer.source_service.materialize_repository") as materialize:
+            with self.assertRaisesRegex(ConfigError, "declared SPDX license"):
+                add_source(self.config_path, "owner/repository")
+
+        materialize.assert_not_called()
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(list_sources(self.config_path), [])
 
