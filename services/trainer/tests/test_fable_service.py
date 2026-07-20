@@ -93,10 +93,10 @@ class FableServiceTests(unittest.TestCase):
                 runtime_path=self.root / "missing",
             )
 
-    def test_default_project_reports_pin_as_the_first_required_step(self) -> None:
+    def test_default_project_reports_fable_as_optional(self) -> None:
         result = inspect_fable_workflow(self.config_path)
 
-        self.assertEqual(result["status"], "needs_pin")
+        self.assertEqual(result["status"], "optional")
         self.assertFalse(result["runner"]["pinned"])
         self.assertIsNone(result["next_action"])
         self.assertEqual(result["actions"][0]["id"], "export")

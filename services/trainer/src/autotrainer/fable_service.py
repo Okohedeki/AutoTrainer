@@ -49,8 +49,12 @@ class FableServiceError(ConfigError):
     """Raised for invalid pins or unavailable Fable workflow actions."""
 
 
-def _runner(config: Any) -> Mapping[str, Any]:
-    return config.data["evaluation"]["suites"]["fable_ab"]["runner"]
+def _runner(config: Any) -> Mapping[str, Any] | None:
+    evaluation = config.data.get("evaluation", {})
+    suites = evaluation.get("suites", {}) if isinstance(evaluation, Mapping) else {}
+    suite = suites.get("fable_ab") if isinstance(suites, Mapping) else None
+    runner = suite.get("runner") if isinstance(suite, Mapping) else None
+    return runner if isinstance(runner, Mapping) else None
 
 
 def _is_pinned(runner: Mapping[str, Any]) -> bool:
@@ -117,7 +121,49 @@ def _runtime_identity(path: Path) -> dict[str, Any]:
 
 def _updated_config(config: Any, version: str, digest: str) -> dict[str, Any]:
     updated = deepcopy(config.data)
-    runner = updated["evaluation"]["suites"]["fable_ab"]["runner"]
+    evaluation = updated["evaluation"]
+    suites = evaluation["suites"]
+    if "fable_ab" not in suites:
+        arms = evaluation["arms"]
+        if len(arms) >= 3 or any(
+            isinstance(value, Mapping) and value.get("role") == "control"
+            for value in arms.values()
+        ):
+            raise FableServiceError(
+                "Fable cannot be enabled while another optional evaluation control is configured"
+            )
+        arms["base_fable"] = {
+            "label": "Base 9B + Fable",
+            "role": "control",
+            "parameter_class": "9b",
+            "model": "project",
+        }
+        candidates = evaluation["candidates"]
+        candidates.insert(max(len(candidates) - 1, 0), "base_fable")
+        suites["fable_ab"] = {
+            "kind": "fable_ab",
+            "arms": ["base_fable", "autotrainer"],
+            "runner": {
+                "type": "external",
+                "producer": "fable",
+                "version": _PLACEHOLDER_VERSION,
+                "orchestration_sha256": _PLACEHOLDER_DIGEST,
+                "result_schema": "autotrainer-evaluation-result-v1",
+            },
+            "review": {
+                "type": "manual",
+                "blind": True,
+                "reviewers_per_pair": 3,
+            },
+        }
+        evaluation["decisions"]["fable_ab"] = {
+            "candidate": "autotrainer",
+            "control": "base_fable",
+            "metric": "blind_preference_rate",
+            "minimum_rate": 0.5,
+            "minimum_tasks": 5,
+        }
+    runner = suites["fable_ab"]["runner"]
     runner["producer"] = "fable"
     runner["version"] = version
     runner["orchestration_sha256"] = digest
@@ -189,7 +235,7 @@ def pin_fable_runner(
 
 def _verified_receipt(config: Any) -> dict[str, Any]:
     runner = _runner(config)
-    if not _is_pinned(runner):
+    if runner is None or not _is_pinned(runner):
         raise FableServiceError("Pin a concrete Fable runtime before exporting requests")
     receipt = _read_json(_receipt_path(config))
     if receipt is None:
@@ -236,6 +282,7 @@ def _pointer_state(config: Any) -> dict[str, Any] | None:
     configured = _runner(config)
     if (
         not isinstance(runner, Mapping)
+        or configured is None
         or runner.get("version") != configured.get("version")
         or str(runner.get("orchestration_sha256", "")).casefold()
         != str(configured.get("orchestration_sha256", "")).casefold()
@@ -357,6 +404,22 @@ def inspect_fable_workflow(config_path: str | Path) -> dict[str, Any]:
 
     config = load_config(config_path)
     runner = _runner(config)
+    if runner is None:
+        actions = _workflow_actions(False, None)
+        return {
+            "status": "optional",
+            "runner": {
+                "producer": "fable",
+                "version": None,
+                "orchestration_sha256": None,
+                "pinned": False,
+                "receipt_matches": False,
+                "runtime_path": None,
+            },
+            "exchange": None,
+            "actions": actions,
+            "next_action": None,
+        }
     pinned = _is_pinned(runner)
     receipt = _read_json(_receipt_path(config))
     receipt_matches = bool(
