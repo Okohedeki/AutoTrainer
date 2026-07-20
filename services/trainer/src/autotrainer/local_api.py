@@ -19,6 +19,13 @@ from urllib.parse import parse_qs, urlsplit
 
 from .config import ConfigError
 from .curriculum_service import get_curriculum_workspace
+from .dataset_service import (
+    DatasetDesignError,
+    design_dataset_candidate,
+    freeze_dataset,
+    get_dataset_workspace,
+    sync_dataset_sources,
+)
 from .evaluation_service import EvaluationJobManager
 from .example_authoring_service import (
     create_authored_example,
@@ -27,6 +34,7 @@ from .example_authoring_service import (
 )
 from .fable_service import FableWorkflowManager, pin_fable_runner
 from .github_service import GitHubSearchError, search_repositories
+from .github_pr_service import GitHubPullRequestError
 from .hosting_service import HostingManager
 from .history_service import (
     get_history_workspace,
@@ -446,6 +454,16 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     }
                 },
             )
+        except (GitHubPullRequestError, DatasetDesignError) as error:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "error": {
+                        "code": "dataset_service_unavailable",
+                        "message": _safe_message(error),
+                    }
+                },
+            )
         except (ConfigError, ValueError) as error:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
@@ -635,6 +653,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         get_history_workspace(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/dataset":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        get_dataset_workspace(self.server.config_path),
                     )
                 elif path == f"{API_PREFIX}/training":
                     _query_values(query, allowed=set())
@@ -904,6 +928,34 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         retire_stale_reviews(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/dataset/sync":
+                    _require_keys(payload, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        sync_dataset_sources(self.server.config_path),
+                    )
+                elif path == f"{API_PREFIX}/dataset/design":
+                    _require_keys(
+                        payload,
+                        allowed={"candidate_id", "provider", "model", "endpoint"},
+                        required={"candidate_id", "provider", "model"},
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        design_dataset_candidate(
+                            self.server.config_path,
+                            candidate_id=_required_text(payload, "candidate_id"),
+                            provider=_required_text(payload, "provider"),
+                            model=_required_text(payload, "model"),
+                            endpoint=_optional_text(payload, "endpoint"),
+                        ),
+                    )
+                elif path == f"{API_PREFIX}/dataset/freeze":
+                    _require_keys(payload, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        freeze_dataset(self.server.config_path),
                     )
                 elif path == f"{API_PREFIX}/prepare":
                     _require_keys(payload, allowed=set())

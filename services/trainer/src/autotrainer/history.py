@@ -360,6 +360,57 @@ def _repository_identity(repository: Path, git_root: Path) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _github_remote(repository: Path) -> bool:
+    """Identify a managed GitHub checkout without persisting its remote URL."""
+
+    try:
+        remote = _git_text(repository, "remote", "get-url", "origin")
+    except HistoryError:
+        return False
+    lowered = remote.casefold()
+    return "github.com/" in lowered or "github.com:" in lowered
+
+
+def _pull_request_catalog(
+    config: Mapping[str, Any],
+    root: Path,
+    source: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]] | None:
+    """Return the current local PR allowlist, or ``None`` when not synced."""
+
+    source_id = str(source.get("id", ""))
+    path = (
+        _artifact_dir(config, root)
+        / "dataset"
+        / "github-prs"
+        / f"{_safe_artifact_name(source_id)}.json"
+    )
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HistoryError("merged pull-request catalog is invalid; sync it again") from error
+    pull_requests = payload.get("pull_requests") if isinstance(payload, Mapping) else None
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema_version") != 1
+        or payload.get("source_id") != source_id
+        or payload.get("source_revision") != source.get("revision")
+        or not isinstance(pull_requests, list)
+    ):
+        raise HistoryError("merged pull-request catalog is stale; sync it again")
+    records: dict[str, Mapping[str, Any]] = {}
+    for value in pull_requests:
+        if not isinstance(value, Mapping):
+            raise HistoryError("merged pull-request catalog is invalid; sync it again")
+        commit = str(value.get("merge_commit", "")).strip().lower()
+        if not COMMIT_PATTERN.fullmatch(commit):
+            raise HistoryError("merged pull-request catalog is invalid; sync it again")
+        records.setdefault(commit, value)
+    return records
+
+
 def _match_glob_parts(path_parts: Sequence[str], pattern_parts: Sequence[str]) -> bool:
     if not pattern_parts:
         return not path_parts
@@ -621,6 +672,7 @@ def _candidate_for_commit(
     parents: Sequence[str],
     message: str,
     training_char_limit: int,
+    pull_request: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not parents:
         return None, "root_commit"
@@ -745,6 +797,14 @@ def _candidate_for_commit(
         "source_id": str(source.get("id", "")),
         "training_char_count": training_chars,
     }
+    if pull_request is not None:
+        candidate["pull_request"] = {
+            "base_branch": str(pull_request.get("base_branch", "")),
+            "merge_commit": str(pull_request.get("merge_commit", "")),
+            "merged_at": str(pull_request.get("merged_at", "")),
+            "number": int(pull_request.get("number", 0) or 0),
+            "title": str(pull_request.get("title", "")),
+        }
     digest = hashlib.sha256(_canonical_json(candidate).encode("utf-8")).hexdigest()
     candidate["candidate_id"] = f"sha256:{digest}"
     return candidate, None
@@ -754,6 +814,7 @@ def _discover_source(
     source: Mapping[str, Any],
     root: Path,
     training_char_limit: int,
+    pull_requests: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     source_id = str(source.get("id", "")).strip()
     if not source_id:
@@ -769,39 +830,64 @@ def _discover_source(
     if resolved.casefold() != revision.casefold():
         raise HistoryError("repository revision did not resolve to the declared immutable commit")
     identity = _repository_identity(repository, git_root)
-    lineage_rows = _git_text(
-        repository,
-        "rev-list",
-        "--first-parent",
-        "--parents",
-        f"--max-count={MAX_HISTORY_COMMITS}",
-        revision,
-    ).splitlines()
-    lineages = {
-        values[0]: values[1:]
-        for row in lineage_rows
-        if (values := row.split())
-    }
-    message_fields = _git_bytes(
-        repository,
-        "log",
-        "--first-parent",
-        "-z",
-        f"--max-count={MAX_HISTORY_COMMITS}",
-        "--format=%H%x00%B",
-        revision,
-    ).decode("utf-8", errors="replace").split("\0")
-    if message_fields and not message_fields[-1]:
-        message_fields.pop()
-    if len(message_fields) % 2:
-        raise HistoryError("git returned malformed commit-message data")
-    messages = {
-        message_fields[index].strip(): message_fields[index + 1].strip()
-        for index in range(0, len(message_fields), 2)
-    }
-    commits = [row.split()[0] for row in lineage_rows if row.split()]
-    if set(commits) != set(messages):
-        raise HistoryError("git history changed during candidate discovery")
+    if pull_requests is not None:
+        commits = list(pull_requests)[:MAX_HISTORY_COMMITS]
+        lineages: dict[str, list[str]] = {}
+        messages: dict[str, str] = {}
+        for commit in commits:
+            lineage = _git_text(
+                repository,
+                "rev-list",
+                "--parents",
+                "--max-count=1",
+                commit,
+            ).split()
+            if not lineage or lineage[0].casefold() != commit.casefold():
+                raise HistoryError("merged pull-request commit is missing from the checkout")
+            lineages[commit] = lineage[1:]
+            pull_request = pull_requests[commit]
+            messages[commit] = "\n\n".join(
+                value
+                for value in (
+                    str(pull_request.get("title", "")).strip(),
+                    str(pull_request.get("body", "")).strip(),
+                )
+                if value
+            )
+    else:
+        lineage_rows = _git_text(
+            repository,
+            "rev-list",
+            "--first-parent",
+            "--parents",
+            f"--max-count={MAX_HISTORY_COMMITS}",
+            revision,
+        ).splitlines()
+        lineages = {
+            values[0]: values[1:]
+            for row in lineage_rows
+            if (values := row.split())
+        }
+        message_fields = _git_bytes(
+            repository,
+            "log",
+            "--first-parent",
+            "-z",
+            f"--max-count={MAX_HISTORY_COMMITS}",
+            "--format=%H%x00%B",
+            revision,
+        ).decode("utf-8", errors="replace").split("\0")
+        if message_fields and not message_fields[-1]:
+            message_fields.pop()
+        if len(message_fields) % 2:
+            raise HistoryError("git returned malformed commit-message data")
+        messages = {
+            message_fields[index].strip(): message_fields[index + 1].strip()
+            for index in range(0, len(message_fields), 2)
+        }
+        commits = [row.split()[0] for row in lineage_rows if row.split()]
+        if set(commits) != set(messages):
+            raise HistoryError("git history changed during candidate discovery")
 
     excluded: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []
@@ -815,6 +901,7 @@ def _discover_source(
             lineages[commit],
             messages[commit],
             training_char_limit,
+            pull_requests.get(commit) if pull_requests is not None else None,
         )
         if candidate is None:
             assert reason is not None
@@ -840,6 +927,9 @@ def _discover_source(
         "reviewable": len(candidates),
         "schema_version": SCHEMA_VERSION,
         "source_id": source_id,
+        "source_policy": (
+            "merged_pull_requests" if pull_requests is not None else "reviewed_local_commits"
+        ),
     }
     return candidates, report
 
@@ -994,7 +1084,18 @@ def list_history(
     for source in sorted(sources, key=lambda item: str(item.get("id", ""))):
         source_id = str(source.get("id", "<unknown>"))
         try:
-            discovered, report = _discover_source(source, root, training_char_limit)
+            repository = _resolve_repository(source, root)
+            pull_requests = _pull_request_catalog(config, root, source)
+            if _github_remote(repository) and pull_requests is None:
+                raise HistoryError(
+                    "sync merged pull requests before reviewing GitHub training data"
+                )
+            discovered, report = _discover_source(
+                source,
+                root,
+                training_char_limit,
+                pull_requests,
+            )
         except HistoryError as error:
             errors.append(f"{source_id}: {error}")
             continue
@@ -1108,6 +1209,16 @@ def _validate_approved_instruction(
     if training_chars > training_char_limit:
         raise HistoryError("approved instruction makes the training example too large")
     return value
+
+
+def validate_history_instruction(
+    candidate: Mapping[str, Any],
+    instruction: str,
+    training_char_limit: int = MAX_TRAINING_CHARS,
+) -> str:
+    """Validate an LLM- or human-authored instruction at the review boundary."""
+
+    return _validate_approved_instruction(candidate, instruction, training_char_limit)
 
 
 def review_history(
@@ -1271,4 +1382,5 @@ __all__ = [
     "list_history",
     "retire_stale_history_reviews",
     "review_history",
+    "validate_history_instruction",
 ]

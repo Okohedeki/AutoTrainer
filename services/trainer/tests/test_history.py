@@ -178,10 +178,37 @@ class HistoryServiceTests(unittest.TestCase):
         revision = self.commit(repository, "Update the application state default safely")
         config = self.config(repository, revision)
         config["sources"][0]["uri"] = ".autotrainer/sources/github-work"
+        catalog = self.root / ".autotrainer" / "dataset" / "github-prs" / "work.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(
+            json.dumps(
+                {
+                    "license_spdx": "MIT",
+                    "pull_requests": [
+                        {
+                            "base_branch": "main",
+                            "body": "",
+                            "merge_commit": revision,
+                            "merged_at": "2026-07-18T12:00:00Z",
+                            "number": 7,
+                            "title": "Update the application state default safely",
+                        }
+                    ],
+                    "repository": "Owner/Repo",
+                    "schema_version": 1,
+                    "source_id": "work",
+                    "source_revision": revision,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         result = list_history(config, self.root)
 
         self.assertEqual(result["summary"]["reviewable"], 1)
+        self.assertEqual(result["sources"][0]["source_policy"], "merged_pull_requests")
+        self.assertEqual(result["candidates"][0]["pull_request"]["number"], 7)
         persisted = (
             self.root / ".autotrainer" / "history" / "work" / "history-report.json"
         ).read_text(encoding="utf-8")

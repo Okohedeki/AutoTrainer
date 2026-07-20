@@ -31,6 +31,7 @@ def _workspace(history: Mapping[str, Any]) -> dict[str, Any]:
             "files": item["files"],
             "patch": item["patch"],
             "flags": item.get("flags", []),
+            "pull_request": item.get("pull_request"),
         }
         for item in history.get("candidates", [])
         if isinstance(item, Mapping) and item.get("decision") == "pending"
