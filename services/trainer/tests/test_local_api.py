@@ -60,6 +60,9 @@ class LocalApiTests(unittest.TestCase):
         response = self.connection.getresponse()
         return response.status, json.loads(response.read().decode("utf-8"))
 
+    def test_server_accept_queue_handles_the_local_ui_poll_burst(self) -> None:
+        self.assertGreaterEqual(self.server.request_queue_size, 64)
+
     def test_disconnected_client_does_not_trigger_a_second_error_response(self) -> None:
         handler = object.__new__(LocalApiHandler)
         handler.send_response = Mock()

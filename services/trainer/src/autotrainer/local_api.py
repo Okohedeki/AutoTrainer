@@ -189,6 +189,10 @@ class LocalApiServer(ThreadingHTTPServer):
     """HTTP server carrying one safely switchable local project workspace."""
 
     daemon_threads = True
+    # The GUI mounts several telemetry panels together and React development
+    # checks intentionally replay effects. Keep that bounded local burst in
+    # the kernel accept queue instead of returning intermittent empty 502s.
+    request_queue_size = 64
 
     def __init__(
         self,
