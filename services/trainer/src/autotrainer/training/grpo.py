@@ -611,7 +611,11 @@ def run_grpo(
             bf16=stage["bf16"],
             tf32=stage["tf32"],
             gradient_checkpointing=stage["gradient_checkpointing"],
-            use_cache=False,
+            # Transformers copies this value onto model.config. TRL disables
+            # the cache explicitly for gradient-scored forward passes, while
+            # autoregressive generation needs the KV cache to avoid quadratic
+            # recomputation at every token.
+            use_cache=True,
             seed=stage["seed"],
             data_seed=stage["seed"],
             logging_steps=stage["logging_steps"],

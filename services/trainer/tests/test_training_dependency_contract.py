@@ -36,7 +36,13 @@ class TrainingDependencyContractTests(unittest.TestCase):
             raise unittest.SkipTest(message)
 
     def test_all_reference_versions_are_exact(self) -> None:
-        self.assertEqual(validate_reference_dependencies(), REFERENCE_DEPENDENCIES)
+        installed = validate_reference_dependencies()
+        self.assertEqual(set(installed), set(REFERENCE_DEPENDENCIES))
+        for distribution, expected in REFERENCE_DEPENDENCIES.items():
+            with self.subTest(distribution=distribution):
+                # CUDA wheels carry a PEP 440 local build suffix such as
+                # +cu130; the pinned public version remains exact.
+                self.assertEqual(installed[distribution].split("+", 1)[0], expected)
 
     def test_grpo_environment_factory_api_is_still_available(self) -> None:
         from trl import GRPOConfig, GRPOTrainer
@@ -70,6 +76,21 @@ class TrainingDependencyContractTests(unittest.TestCase):
         autotrainer_source = inspect.getsource(run_grpo)
         before_trainer = autotrainer_source.split("trainer = GRPOTrainer", 1)[0]
         self.assertNotIn("get_training_chat_template", before_trainer)
+
+    def test_grpo_keeps_kv_cache_for_autoregressive_generation(self) -> None:
+        from trl import GRPOTrainer
+
+        from autotrainer.training.grpo import run_grpo
+
+        autotrainer_source = inspect.getsource(run_grpo)
+        before_trainer = autotrainer_source.split("trainer = GRPOTrainer", 1)[0]
+        self.assertIn("use_cache=True", before_trainer)
+
+        # The pinned TRL runtime still disables caching for the differentiable
+        # policy forward pass, so enabling the trainer-level setting affects
+        # generation without retaining inference caches during optimization.
+        scored_forward = inspect.getsource(GRPOTrainer._get_last_hidden_state)
+        self.assertIn('model_inputs["use_cache"] = False', scored_forward)
 
     def test_real_grpo_trainer_initializes_and_renders_every_environment_tool(self) -> None:
         """Exercise TRL's actual environment probe and tool-schema rendering path."""
