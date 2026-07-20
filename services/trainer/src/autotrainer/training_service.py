@@ -18,7 +18,7 @@ from threading import Lock, Thread, current_thread
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
-from .config import ConfigError
+from .config import ConfigError, write_config
 from .device_gate import (
     DeviceLease,
     acquire_device_lease,
@@ -84,6 +84,38 @@ _SECRET_PATTERNS = (
         r"(?i)\b(api[-_ ]?key|token|password|secret)\s*[:=]\s*[^\s,;]+"
     ),
 )
+
+
+def _allocate_retry_outputs(config_path: str | Path, job_id: str) -> None:
+    """Advance a terminal job to fresh immutable checkpoint destinations."""
+
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise TrainingServiceError("training job id is invalid")
+    config = read_project_config(config_path)
+    updated = deepcopy(config.data)
+    sft = updated.get("sft")
+    grpo = updated.get("grpo")
+    if not isinstance(sft, dict) or not isinstance(grpo, dict):
+        raise TrainingServiceError("training stages are missing from the project config")
+
+    checkpoint_root = (
+        config.artifact_dir / "training" / "runs" / job_id / "checkpoints"
+    )
+
+    def project_path(name: str) -> str:
+        destination = (checkpoint_root / name).resolve()
+        try:
+            return destination.relative_to(config.root).as_posix()
+        except ValueError:
+            return str(destination)
+
+    sft_output = project_path("sft")
+    grpo_output = project_path("grpo")
+    sft["output_dir"] = sft_output
+    grpo["output_dir"] = grpo_output
+    if sft.get("enabled", True) and grpo.get("enabled", True):
+        grpo["start_from"] = sft_output
+    write_config(config.path, updated, overwrite=True)
 
 
 class TrainingServiceError(ConfigError):
@@ -764,6 +796,13 @@ class TrainingJobManager:
             previous_event_path = self._event_path
             previous_events = self._events
             previous_next_sequence = self._next_event_sequence
+            if previous_job["status"] in {"completed", "failed", "interrupted"}:
+                try:
+                    _allocate_retry_outputs(self._config_path, job_id)
+                except Exception:
+                    device_lease.release()
+                    lease.release()
+                    raise
             self._job = {
                 "id": job_id,
                 "status": "queued",

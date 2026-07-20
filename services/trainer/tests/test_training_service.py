@@ -491,6 +491,52 @@ class TrainingServiceTests(unittest.TestCase):
             manager.close()
         self.assertEqual(manager.snapshot()["status"], "completed")
 
+    def test_terminal_retry_allocates_fresh_immutable_checkpoint_paths(self) -> None:
+        record_path = self.root / ".autotrainer" / "training" / "current-job.json"
+        record_path.parent.mkdir(parents=True)
+        record_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job": {
+                        "id": "a" * 32,
+                        "status": "failed",
+                        "recipe": "both",
+                        "stage": "grpo",
+                        "message": "old run stopped",
+                        "result": None,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        captured: list[tuple[object, ...]] = []
+
+        class DeferredThread:
+            daemon = False
+
+            def __init__(self, *, args: tuple[object, ...], **_values: object) -> None:
+                captured.append(args)
+
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+        manager = TrainingJobManager(self.config_path)
+        with patch("autotrainer.training_service.Thread", DeferredThread):
+            queued = manager.start()
+        try:
+            updated = load_config(self.config_path).data
+            run_root = f".autotrainer/training/runs/{queued['id']}/checkpoints"
+            self.assertEqual(updated["sft"]["output_dir"], f"{run_root}/sft")
+            self.assertEqual(updated["grpo"]["output_dir"], f"{run_root}/grpo")
+            self.assertEqual(updated["grpo"]["start_from"], f"{run_root}/sft")
+        finally:
+            captured[0][2].release()  # type: ignore[attr-defined]
+            captured[0][1].release()  # type: ignore[attr-defined]
+
     def test_worker_is_non_daemon_and_close_waits_for_it(self) -> None:
         manager = TrainingJobManager(self.config_path)
         entered = Event()
