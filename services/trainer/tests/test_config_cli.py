@@ -64,9 +64,13 @@ class ConfigTests(unittest.TestCase):
         config = load_config(
             REPOSITORY_ROOT / "examples" / "frontend-expert" / "autotrainer.yaml"
         )
-        decisions = config.data["evaluation"]["decisions"]
+        evaluation = config.data["evaluation"]
+        decisions = evaluation["decisions"]
         self.assertGreaterEqual(decisions["model_benchmark"]["minimum_tasks"], 5)
-        self.assertGreaterEqual(decisions["fable_ab"]["minimum_tasks"], 5)
+        self.assertEqual(evaluation["language"], "typescript_react")
+        self.assertEqual(set(evaluation["suites"]), {"model_benchmark"})
+        self.assertEqual(config.data["refinement"]["mode"], "adapter_only")
+        self.assertEqual(config.data["refinement"]["vram"]["enforcement"], "hard")
 
 
 class CliTests(unittest.TestCase):
