@@ -7,9 +7,24 @@ training library, starts a sandbox, or claims that an SFT/GRPO run succeeded.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any
+
+
+def config_fingerprint(config: Mapping[str, Any]) -> str:
+    """Return a stable identity for the inputs represented by a static plan."""
+
+    payload = json.dumps(
+        config,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -841,6 +856,7 @@ def build_plan(
     project = _mapping(config.get("project"))
     return {
         "schema_version": 1,
+        "config_fingerprint": config_fingerprint(config),
         "project_root": str(root),
         "project": {
             "name": _string(project.get("name")) or None,
@@ -866,4 +882,4 @@ def build_plan(
     }
 
 
-__all__ = ["build_plan"]
+__all__ = ["build_plan", "config_fingerprint"]

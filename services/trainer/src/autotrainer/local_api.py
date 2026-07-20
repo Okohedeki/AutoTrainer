@@ -543,6 +543,18 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if path == f"{API_PREFIX}/runtime/setup":
+                # Doctor probes can take several seconds. Capture the active
+                # manager atomically, then run the read-only probe without
+                # starving training, evaluation, or health polling.
+                _query_values(query, allowed=set())
+                with self.server.context_lock:
+                    runtime_setup = self.server.runtime_setup
+                self._send_json(
+                    HTTPStatus.OK,
+                    runtime_setup.workspace(),
+                )
+                return
             with self.server.context_lock:
                 if path == f"{API_PREFIX}/health":
                     _query_values(query, allowed=set())
@@ -631,12 +643,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.OK,
                         list_authored_examples(self.server.config_path),
-                    )
-                elif path == f"{API_PREFIX}/runtime/setup":
-                    _query_values(query, allowed=set())
-                    self._send_json(
-                        HTTPStatus.OK,
-                        self.server.runtime_setup.workspace(),
                     )
                 elif path == f"{API_PREFIX}/fable":
                     _query_values(query, allowed=set())

@@ -800,6 +800,66 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(result, job)
         start.assert_called_once_with("install_training_packages")
 
+    def test_runtime_probe_does_not_block_live_status_polling(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        training_done = threading.Event()
+        results: dict[str, tuple[int, dict[str, object]]] = {}
+        errors: list[BaseException] = []
+
+        def request_in_thread(name: str, path: str, done: threading.Event) -> None:
+            connection = HTTPConnection(
+                "127.0.0.1", self.server.server_port, timeout=3
+            )
+            try:
+                connection.request("GET", path)
+                response = connection.getresponse()
+                results[name] = (
+                    response.status,
+                    json.loads(response.read().decode("utf-8")),
+                )
+            except BaseException as error:  # pragma: no cover - assertion aid
+                errors.append(error)
+            finally:
+                connection.close()
+                done.set()
+
+        def slow_workspace() -> dict[str, object]:
+            entered.set()
+            release.wait(timeout=3)
+            return {"status": "ready", "job": {"status": "idle"}}
+
+        runtime_done = threading.Event()
+        with patch.object(
+            self.server.runtime_setup,
+            "workspace",
+            side_effect=slow_workspace,
+        ):
+            runtime_thread = threading.Thread(
+                target=request_in_thread,
+                args=("runtime", "/api/v1/runtime/setup", runtime_done),
+                daemon=True,
+            )
+            runtime_thread.start()
+            self.assertTrue(entered.wait(timeout=1))
+
+            training_thread = threading.Thread(
+                target=request_in_thread,
+                args=("training", "/api/v1/training", training_done),
+                daemon=True,
+            )
+            training_thread.start()
+            status_was_live = training_done.wait(timeout=1)
+            release.set()
+            runtime_thread.join(timeout=3)
+            training_thread.join(timeout=3)
+
+        self.assertTrue(status_was_live, "training status waited on the runtime probe")
+        self.assertEqual(errors, [])
+        self.assertEqual(results["runtime"][0], 200)
+        self.assertEqual(results["training"][0], 200)
+        self.assertEqual(results["training"][1]["status"], "idle")
+
     def test_fable_endpoints_share_managed_external_workflow(self) -> None:
         workspace = {
             "status": "needs_pin",

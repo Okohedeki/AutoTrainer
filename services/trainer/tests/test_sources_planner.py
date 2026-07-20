@@ -13,7 +13,7 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.history import list_history, review_history  # noqa: E402
-from autotrainer.planner import build_plan  # noqa: E402
+from autotrainer.planner import build_plan, config_fingerprint  # noqa: E402
 from autotrainer.sources import (  # noqa: E402
     _clone_repository,
     _write_text_atomic,
@@ -553,6 +553,20 @@ class RepositoryMaterializationTests(unittest.TestCase):
 
 
 class PlannerTests(unittest.TestCase):
+    def test_config_fingerprint_is_stable_and_tracks_input_changes(self) -> None:
+        config = {
+            "project": {"name": "specialist", "artifact_dir": ".autotrainer"},
+            "model": {"id": "example/coder", "revision": "a" * 40},
+        }
+        reordered = {"model": dict(config["model"]), "project": dict(config["project"])}
+
+        fingerprint = config_fingerprint(config)
+
+        self.assertRegex(fingerprint, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(fingerprint, config_fingerprint(reordered))
+        reordered["model"]["revision"] = "b" * 40
+        self.assertNotEqual(fingerprint, config_fingerprint(reordered))
+
     def test_repository_evidence_does_not_count_as_sft_or_rl_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

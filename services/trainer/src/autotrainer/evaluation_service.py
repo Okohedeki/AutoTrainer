@@ -36,6 +36,7 @@ from .evaluation import (
     write_evaluation_plan,
 )
 from .language_evaluation import require_language_matched_evaluation
+from .planner import config_fingerprint
 from .project_gate import (
     ProjectLease,
     acquire_project_lease,
@@ -510,7 +511,6 @@ def _readiness(config: ProjectConfig) -> dict[str, Any]:
         }
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        stage = value.get("stages", {}).get("evaluation", {})
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
         return {
             "status": "invalid",
@@ -518,6 +518,24 @@ def _readiness(config: ProjectConfig) -> dict[str, Any]:
             "blockers": ["The prepared evaluation snapshot is unreadable."],
             "warnings": [],
         }
+    if not isinstance(value, Mapping):
+        return {
+            "status": "invalid",
+            "ready_task_count": 0,
+            "blockers": ["The prepared evaluation snapshot is invalid."],
+            "warnings": [],
+        }
+    if value.get("config_fingerprint") != config_fingerprint(config.data):
+        return {
+            "status": "stale",
+            "ready_task_count": 0,
+            "blockers": [
+                "Project inputs changed since the last Prepare; check readiness again."
+            ],
+            "warnings": [],
+        }
+    stages = value.get("stages")
+    stage = stages.get("evaluation", {}) if isinstance(stages, Mapping) else None
     if not isinstance(stage, Mapping):
         return {
             "status": "invalid",

@@ -23,6 +23,7 @@ from autotrainer.evaluation import (  # noqa: E402
 from autotrainer.evaluation_service import (  # noqa: E402
     EvaluationJobManager,
     EvaluationServiceError,
+    _readiness,
     run_project_evaluation,
 )
 
@@ -231,6 +232,38 @@ def _write_scored_results(
 
 
 class EvaluationServiceTests(unittest.TestCase):
+    def test_readiness_rejects_a_plan_for_an_old_project_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(Path(temporary_directory))
+            config = load_config(config_path, check_paths=True)
+            plan_path = config.artifact_dir / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "config_fingerprint": "sha256:" + "0" * 64,
+                        "stages": {
+                            "evaluation": {
+                                "status": "blocked",
+                                "blockers": ["obsolete runner blocker"],
+                                "warnings": ["obsolete Fable warning"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            readiness = _readiness(config)
+
+            self.assertEqual(readiness["status"], "stale")
+            self.assertEqual(readiness["ready_task_count"], 0)
+            self.assertEqual(
+                readiness["blockers"],
+                ["Project inputs changed since the last Prepare; check readiness again."],
+            )
+            self.assertEqual(readiness["warnings"], [])
+
     def test_external_suite_is_waiting_and_cannot_be_started_locally(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             config_path = _project(Path(temporary_directory))
