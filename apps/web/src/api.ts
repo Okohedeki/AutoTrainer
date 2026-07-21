@@ -431,6 +431,15 @@ export type TrainingJob = {
       output_dir?: string;
       metrics?: Record<string, number | boolean>;
       trainable_adapter_parameters?: number;
+      performance?: {
+        profile?: {
+          clock: "monotonic_wall_time";
+          phase_seconds?: Record<string, number>;
+          total_seconds?: number;
+        };
+        telemetry?: Record<string, number>;
+        receipt_path?: string;
+      };
     }>;
   } | null;
 };

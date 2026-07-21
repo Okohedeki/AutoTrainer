@@ -1407,6 +1407,8 @@ textarea { font: inherit; }
 .grpo-run-summary > .status-chip { justify-self: end; }
 .grpo-overview-grid { display: grid; grid-template-columns: minmax(250px, .72fr) minmax(0, 1.28fr); gap: 18px; align-items: start; }
 .grpo-overview-facts { margin-top: 0; }
+.training-observation-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.training-observation-charts .telemetry-chart { min-width: 0; }
 .grpo-outcome-distribution h3,
 .grpo-detail-grid h3 { margin: 0 0 8px; font-size: 10px; }
 .grpo-outcome-distribution ul { margin: 0; padding: 0; display: grid; gap: 10px; list-style: none; }
@@ -1545,6 +1547,8 @@ textarea { font: inherit; }
 .training-output-grid strong { font-size: 10px; }
 .training-output-grid code { margin-top: 9px; display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .training-output-grid p { margin: 7px 0 0; color: var(--muted); font-size: 9px; }
+.training-output-grid details { margin-top: 8px; }
+.training-output-grid summary { color: var(--muted); cursor: pointer; font-size: 9px; font-weight: 700; }
 .next-step-note { margin-top: 12px; padding: 11px 12px; border-left: 3px solid var(--good); background: var(--good-soft); }
 .next-step-note strong { font-size: 10px; }
 .next-step-note p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
@@ -1707,6 +1711,7 @@ textarea { font: inherit; }
   .task-runtime-optional,
   .task-verifier-fields,
   .grpo-overview-grid,
+  .training-observation-charts,
   .grpo-detail-grid,
   .training-output-grid,
   .decision-stat-grid,

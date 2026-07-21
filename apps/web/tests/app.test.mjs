@@ -192,7 +192,7 @@ test("Data and Train share one truthful three-level GRPO evidence surface", asyn
   assert.doesNotMatch(panel, /Math\.random|type="range"|token counter|\bETA\b|estimated time/i);
 });
 
-test("Train owns one-click start, observed SFT loss, and the shared GRPO evidence surface", async () => {
+test("Train owns one-click start and plots only observed training systems evidence", async () => {
   const panel = await source("src/TrainingMonitorPanel.tsx");
   const runtime = await source("src/RuntimeSetupPanel.tsx");
   const app = await source("src/App.tsx");
@@ -214,7 +214,11 @@ test("Train owns one-click start, observed SFT loss, and the shared GRPO evidenc
   assert.match(panel, /getTrainingEvents\(0, controller\.signal\)/);
   assert.match(panel, /const sftLoss = useMemo/);
   assert.match(panel, /teachingLoss={sftLoss}/);
-  assert.match(evidence, /Teaching loss/);
+  assert.match(panel, /systemTelemetry={systemTelemetry}/);
+  for (const chart of ["Teaching loss", "GPU memory", "Optimization throughput", "Verified GRPO reward and rubric"]) assert.match(evidence, new RegExp(chart));
+  for (const metric of ["observed_steps_per_second", "vram_allocated_gib", "vram_reserved_gib", "vram_limit_gib"]) assert.match(panel, new RegExp(metric));
+  assert.match(evidence, /no completion time is inferred/);
+  assert.match(panel, /Training receipt/);
   assert.match(app, /<RuntimeSetupPanel disabled={trainingActive}/);
   assert.match(app, /<RefinementResourcePanel disabled={trainingActive}/);
   assert.match(api, /request\("\/api\/v1\/runtime\/setup", \{ signal \}\)/);

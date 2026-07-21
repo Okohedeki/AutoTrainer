@@ -10,6 +10,13 @@ import TelemetryChart, { type ChartPoint } from "./TelemetryChart";
 type Granularity = "overview" | "tasks" | "rollouts";
 type PanelContext = "data" | "training";
 
+export type TrainingSystemTelemetry = {
+  throughput: ChartPoint[];
+  vramAllocated: ChartPoint[];
+  vramReserved: ChartPoint[];
+  vramLimit: ChartPoint[];
+};
+
 const granularities: Array<{ id: Granularity; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "tasks", label: "Tasks" },
@@ -126,9 +133,27 @@ function ActiveEpisodes({ workspace }: { workspace: CurriculumWorkspace }) {
   );
 }
 
-function Overview({ workspace, tasks, teachingLoss }: { workspace: CurriculumWorkspace; tasks: CurriculumTask[]; teachingLoss: ChartPoint[] }) {
+function Overview({ workspace, tasks, teachingLoss, systemTelemetry, training }: {
+  workspace: CurriculumWorkspace;
+  tasks: CurriculumTask[];
+  teachingLoss: ChartPoint[];
+  systemTelemetry: TrainingSystemTelemetry;
+  training: boolean;
+}) {
   const outcomes = Object.entries(workspace.summary.outcome_states).filter(([, count]) => count > 0);
   const outcomeDenominator = Math.max(tasks.length, 1);
+  const taskIds = new Set(tasks.map((task) => task.id));
+  const matchedRollouts = workspace.rollouts.filter((rollout) => taskIds.has(rollout.task_id));
+  const rewardPoints = matchedRollouts.map((rollout) => ({ x: rollout.sequence, y: rollout.reward }));
+  const rubricSeries = Object.entries(rubricLabels).map(([name, label], index) => ({
+    id: name,
+    label,
+    color: ["#169b66", "#e09232", "#4c81d9", "#9b63d8", "#d04d73"][index],
+    points: matchedRollouts.flatMap((rollout) => {
+      const value = rollout.rubric[name];
+      return typeof value === "number" && Number.isFinite(value) ? [{ x: rollout.sequence, y: value }] : [];
+    }),
+  }));
   return (
     <div className="grpo-view" data-granularity="overview">
       <div className="run-message grpo-run-summary">
@@ -167,7 +192,21 @@ function Overview({ workspace, tasks, teachingLoss }: { workspace: CurriculumWor
         </div>
       )}
 
-      {teachingLoss.length > 0 && <TelemetryChart title="Teaching loss" description="Observed supervised trainer loss before or alongside GRPO practice." series={[{ id: "loss", label: "Loss", color: "#7c82ff", points: teachingLoss }]} emptyMessage="Loss appears when supervised training emits its first trainer log." />}
+      {training && (
+        <div className="training-observation-charts">
+          <TelemetryChart title="Teaching loss" description="Observed supervised loss from the SFT trainer." series={[{ id: "loss", label: "Loss", color: "#7c82ff", points: teachingLoss }]} emptyMessage="This remains empty for practice-only runs or until SFT emits its first trainer log." />
+          <TelemetryChart title="GPU memory" description="Allocator observations in GiB, shown against the configured process limit." series={[
+            { id: "allocated", label: "Allocated", color: "#4c81d9", points: systemTelemetry.vramAllocated },
+            { id: "reserved", label: "Reserved", color: "#9b63d8", points: systemTelemetry.vramReserved },
+            { id: "limit", label: "Configured limit", color: "#d04d73", points: systemTelemetry.vramLimit },
+          ]} emptyMessage="Memory appears only after a trainer log reads CUDA allocator counters." />
+          <TelemetryChart title="Optimization throughput" description="Observed optimizer-step rate between real trainer log windows." series={[{ id: "throughput", label: "Steps / second", color: "#169b66", points: systemTelemetry.throughput }]} emptyMessage="Throughput needs two observed optimizer boundaries; no completion time is inferred from it." />
+          <TelemetryChart title="Verified GRPO reward and rubric" description="Trusted task reward and rubric components for scored practice rollouts." series={[
+            { id: "reward", label: "Reward", color: "#171e25", points: rewardPoints },
+            ...rubricSeries,
+          ]} fixedY={{ min: 0, max: 1 }} emptyMessage="This remains empty for teaching-only runs or until a trusted GRPO verifier scores a rollout." />
+        </div>
+      )}
 
       {workspace.summary.rollout_count > 0 && (
         <details className="advanced-options grpo-rubric-means">
@@ -344,11 +383,12 @@ function Rollouts({ tasks, rollouts, selectedTaskId, selectedSequence, onSelect 
   );
 }
 
-export default function GrpoEvidencePanel({ context, refreshKey = 0, live = false, teachingLoss = [] }: {
+export default function GrpoEvidencePanel({ context, refreshKey = 0, live = false, teachingLoss = [], systemTelemetry = { throughput: [], vramAllocated: [], vramReserved: [], vramLimit: [] } }: {
   context: PanelContext;
   refreshKey?: string | number;
   live?: boolean;
   teachingLoss?: ChartPoint[];
+  systemTelemetry?: TrainingSystemTelemetry;
 }) {
   const [granularity, setGranularity] = useState<Granularity>("overview");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -423,7 +463,7 @@ export default function GrpoEvidencePanel({ context, refreshKey = 0, live = fals
         <div className="evidence-empty"><strong>{loading ? "Loading observed evidence" : "Curriculum evidence unavailable"}</strong><p>{loading ? "Reading the compiled catalog and its retained rollout window from the local backend." : "Reconnect the local backend to inspect real GRPO tasks and outcomes."}</p></div>
       ) : (
         <>
-          {granularity === "overview" && <Overview workspace={workspace} tasks={tasks} teachingLoss={isTraining ? teachingLoss : []} />}
+          {granularity === "overview" && <Overview workspace={workspace} tasks={tasks} teachingLoss={isTraining ? teachingLoss : []} systemTelemetry={systemTelemetry} training={isTraining} />}
           {granularity === "tasks" && <Tasks tasks={tasks} onViewRollouts={viewRollouts} />}
           {granularity === "rollouts" && <Rollouts tasks={tasks} rollouts={workspace.rollouts} selectedTaskId={selectedTaskId} selectedSequence={selectedSequence} onSelect={selectRollout} />}
           {workspace.next_action && <div className="training-next-action grpo-next-action" role="note"><span>Suggested next step</span><strong>{workspace.next_action.title}</strong><p>{workspace.next_action.detail}</p></div>}

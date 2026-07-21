@@ -9,7 +9,7 @@ import {
   type TrainingEvent,
   type TrainingJob,
 } from "./api";
-import GrpoEvidencePanel from "./GrpoEvidencePanel";
+import GrpoEvidencePanel, { type TrainingSystemTelemetry } from "./GrpoEvidencePanel";
 import type { ChartPoint } from "./TelemetryChart";
 
 const liveStatuses = new Set<TrainingJob["status"]>(["queued", "running"]);
@@ -61,6 +61,12 @@ function pointsFor(events: TrainingEvent[], read: (event: TrainingEvent) => numb
     points.push({ x: event.step ?? points.length + 1, y: value });
   }
   return points;
+}
+
+function elapsed(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  if (value < 60) return `${value.toFixed(1)} seconds observed`;
+  return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s observed`;
 }
 
 // Train owns the one-click start action. The backend repeats the complete
@@ -174,6 +180,18 @@ export default function TrainingMonitorPanel({
     events.filter((event) => event.stage === "sft"),
     (event) => metric(event, ["loss", "train_loss", "observed_loss"]),
   ), [events]);
+  const systemTelemetry = useMemo<TrainingSystemTelemetry>(() => {
+    const trainerEvents = events.filter((event) => event.type === "trainer_log");
+    return {
+      throughput: pointsFor(
+        trainerEvents,
+        (event) => metric(event, ["observed_steps_per_second", "train_steps_per_second"]),
+      ),
+      vramAllocated: pointsFor(trainerEvents, (event) => metric(event, ["vram_allocated_gib"])),
+      vramReserved: pointsFor(trainerEvents, (event) => metric(event, ["vram_reserved_gib"])),
+      vramLimit: pointsFor(trainerEvents, (event) => metric(event, ["vram_limit_gib"])),
+    };
+  }, [events]);
 
   const completedStages = new Set(job?.result?.stages.map((stage) => stage.stage) ?? []);
   const calibrationProgress = [...events].reverse().find((event) =>
@@ -233,14 +251,22 @@ export default function TrainingMonitorPanel({
         {job && job.status !== "idle" && <div className="run-message training-run-message" role={job.status === "failed" || job.status === "interrupted" ? "alert" : "status"}><span className={`health-dot ${statusTone}`} aria-hidden="true" /><div><strong>{stageNames[job.stage || ""] || "Training run"}</strong><p>{calibrationDetail ?? job.message}</p></div></div>}
       </article>
 
-      <GrpoEvidencePanel context="training" refreshKey={`${revision}-${job?.id ?? "idle"}`} live={trainingActive} teachingLoss={sftLoss} />
+      <GrpoEvidencePanel context="training" refreshKey={`${revision}-${job?.id ?? "idle"}`} live={trainingActive} teachingLoss={sftLoss} systemTelemetry={systemTelemetry} />
 
       <article className="panel training-output-panel">
         <header className="panel-header"><div><p className="panel-kicker">Post-training artifact</p><h2>Adapter output</h2></div>{job?.status === "completed" && <span className="status-chip good">ready to evaluate</span>}</header>
         {!job?.result ? <div className="evidence-empty"><strong>No adapter output yet</strong><p>Completed stage paths and metrics appear here only after the trainer writes them.</p></div> : (
           <div className="training-output-grid">
             {job.result.stages.map((stage) => (
-              <section key={stage.stage}><div><strong>{stageNames[stage.stage]}</strong><span className={`status-chip ${completedStages.has(stage.stage) ? "good" : "muted"}`}>complete</span></div>{stage.output_dir && <code>{stage.output_dir}</code>}{stage.trainable_adapter_parameters !== undefined && <p>{stage.trainable_adapter_parameters.toLocaleString()} trainable adapter parameters</p>}</section>
+              <section key={stage.stage}>
+                <div><strong>{stageNames[stage.stage]}</strong><span className={`status-chip ${completedStages.has(stage.stage) ? "good" : "muted"}`}>complete</span></div>
+                {stage.output_dir && <code>{stage.output_dir}</code>}
+                {stage.trainable_adapter_parameters !== undefined && <p>{stage.trainable_adapter_parameters.toLocaleString()} trainable adapter parameters</p>}
+                {elapsed(stage.performance?.profile?.total_seconds) && <p>{elapsed(stage.performance?.profile?.total_seconds)}</p>}
+                {stage.performance?.telemetry?.vram_peak_allocated_gib !== undefined && <p>{stage.performance.telemetry.vram_peak_allocated_gib.toFixed(2)} GiB peak allocated VRAM</p>}
+                {stage.metrics?.train_steps_per_second !== undefined && typeof stage.metrics.train_steps_per_second === "number" && <p>{stage.metrics.train_steps_per_second.toFixed(3)} trainer steps / second</p>}
+                {stage.performance?.receipt_path && <details><summary>Training receipt</summary><code>{stage.performance.receipt_path}</code></details>}
+              </section>
             ))}
           </div>
         )}
