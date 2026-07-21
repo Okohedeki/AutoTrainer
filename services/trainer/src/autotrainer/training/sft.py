@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from .experiment import (
+    PhaseProfiler,
+    build_training_receipt,
+    write_training_receipt,
+)
 from .telemetry import TrainingEventCallback, make_trainer_log_callback
 from .common import (
     SUPPORTED_MODEL_CLASS,
@@ -161,8 +166,10 @@ def run_sft(
     if dry_run:
         return {"status": "dry_run", "dry_run": True, "recipe": recipe}
 
+    profiler = PhaseProfiler()
     require_materialized_model(recipe["model"])
     installed_versions = validate_reference_dependencies()
+    profiler.checkpoint("preflight")
 
     # Heavy imports stay behind validation and dry-run handling by design.
     try:
@@ -186,6 +193,7 @@ def run_sft(
 
     runtime = configure_vram_budget(torch, recipe["refinement"])
     destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
+    profiler.checkpoint("runtime_setup")
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["sft"]
@@ -212,6 +220,7 @@ def run_sft(
             Path(stage["dataset"]["path"]),
             stage["max_length"],
         )
+        profiler.checkpoint("tokenizer_validation")
 
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -261,6 +270,7 @@ def run_sft(
             ),
         )
         trainable_parameters = assert_adapter_only(model, stage="SFT")
+        profiler.checkpoint("model_adapter_setup")
 
         train_dataset = _load_json_dataset(load_dataset, stage["dataset"])
         eval_dataset = (
@@ -299,6 +309,13 @@ def run_sft(
             eval_steps=stage["save_steps"] if eval_dataset is not None else None,
             report_to="none",
         )
+        telemetry_callback = make_trainer_log_callback(
+            TrainerCallback,
+            stage="sft",
+            on_event=on_event,
+            torch_module=torch,
+            vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
+        )
         trainer = SFTTrainer(
             model=model,
             args=training_args,
@@ -307,17 +324,11 @@ def run_sft(
             processing_class=tokenizer,
             # This callback publishes only numeric values that the trainer
             # actually logged; it never reads batches, prompts, or tokens.
-            callbacks=[
-                make_trainer_log_callback(
-                    TrainerCallback,
-                    stage="sft",
-                    on_event=on_event,
-                    torch_module=torch,
-                    vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
-                )
-            ],
+            callbacks=[telemetry_callback],
         )
+        profiler.checkpoint("trainer_setup")
         train_output = trainer.train()
+        profiler.checkpoint("training")
         trainer.save_model(str(destination))
         tokenizer.save_pretrained(str(destination))
         # PEFT's adapter_config.json is the handoff contract for GRPO.  Refuse
@@ -331,6 +342,21 @@ def run_sft(
             json.dumps(recipe, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        profiler.checkpoint("artifact_save")
+        metrics = as_serializable(getattr(train_output, "metrics", {}))
+        telemetry = telemetry_callback.observed_summary()
+        profile = profiler.summary()
+        receipt = build_training_receipt(
+            stage="sft",
+            recipe=recipe,
+            dependencies=installed_versions,
+            runtime=runtime,
+            trainable_adapter_parameters=trainable_parameters,
+            metrics=metrics,
+            telemetry=telemetry,
+            profile=profile,
+        )
+        receipt_path = write_training_receipt(destination, receipt)
         mark_output_directory_complete(destination)
     except TrainingRuntimeError:
         raise
@@ -342,7 +368,6 @@ def run_sft(
     except Exception as error:
         raise TrainingRuntimeError(f"SFT failed after recipe validation: {error}") from error
 
-    metrics = as_serializable(getattr(train_output, "metrics", {}))
     return {
         "status": "completed",
         "dry_run": False,
@@ -353,4 +378,9 @@ def run_sft(
         "runtime": runtime,
         "trainable_adapter_parameters": trainable_parameters,
         "metrics": metrics,
+        "performance": {
+            "profile": profile,
+            "telemetry": telemetry,
+            "receipt_path": str(receipt_path),
+        },
     }

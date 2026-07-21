@@ -155,6 +155,14 @@ refinement:
 
 `hard` sets the CUDA per-process memory fraction before weights load and also passes a GPU `max_memory` map to the model loader. It is the default when sharing the computer matters most. `soft` records and displays the same ceiling as an operating target but does not ask CUDA to reject allocations beyond it. Both modes report allocated, reserved, and configured GiB in observed telemetry. The limit applies to the AutoTrainer process; GPU memory already consumed by unrelated applications remains outside its control.
 
+Every completed SFT or GRPO adapter directory also contains
+`training_receipt.json`. It binds the resolved recipe and exact dependency
+versions to observed coarse phase wall times, trainer metrics, current and peak
+VRAM, device policy, and trainable adapter parameter count. The receipt contains
+no prompts, completions, tool arguments, or model reasoning. These measurements
+make later same-machine comparisons possible; they are observations, not a
+performance claim.
+
 For out-of-memory failures, reduce the VRAM ceiling only if headroom exists; otherwise reduce sequence/completion length, generation count, or the generation batch first. Record every change in the resolved recipe.
 
 ## Evaluation after training
@@ -202,6 +210,11 @@ Retain:
 - seeds and generation settings;
 - trainer events, checkpoints, rollouts, patches, and raw verifier reports;
 - final adapter and evidence hashes.
+
+The Train screen plots only retained observations. Step throughput is a
+wall-time window between actual trainer logs, and peak memory comes from CUDA's
+allocator counters. A missing series stays visibly empty instead of being
+interpolated or reconstructed.
 
 Changing model/source revisions, compiler code, adapter architecture, reward policy, tasks, or limits creates a new experiment identity.
 

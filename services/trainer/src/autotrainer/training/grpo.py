@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from .experiment import (
+    PhaseProfiler,
+    build_training_receipt,
+    write_training_receipt,
+)
 from .telemetry import TrainingEventCallback, make_trainer_log_callback
 from .preflight import run_grpo_environment_canary
 from .common import (
@@ -516,8 +521,10 @@ def run_grpo(
     if dry_run:
         return {"status": "dry_run", "dry_run": True, "recipe": recipe}
 
+    profiler = PhaseProfiler()
     require_materialized_model(recipe["model"])
     installed_versions = validate_reference_dependencies()
+    profiler.checkpoint("preflight")
 
     # Exercise the actual repository snapshot, container gates, and hidden
     # verifier before allocating several gigabytes of model memory. Direct CLI
@@ -533,6 +540,7 @@ def run_grpo(
         )
     runtime_image = str(container_image["runtime_reference"]).strip()
     recipe["environment"]["image_identity"] = dict(container_image)
+    profiler.checkpoint("environment_canary")
 
     # Heavy imports stay behind static validation and dry-run handling.
     try:
@@ -587,6 +595,7 @@ def run_grpo(
         return environment
 
     destination = claim_fresh_output_directory(Path(recipe["output_dir"]))
+    profiler.checkpoint("runtime_setup")
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["grpo"]
@@ -604,6 +613,7 @@ def run_grpo(
         # GRPO batches variable-length prompts for generation; TRL requires
         # left padding so prompt endings line up with the generation boundary.
         tokenizer.padding_side = "left"
+        profiler.checkpoint("tokenizer_setup")
 
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -665,6 +675,7 @@ def run_grpo(
                 is_trainable=True,
             )
         trainable_parameters = assert_adapter_only(policy, stage="GRPO")
+        profiler.checkpoint("model_adapter_setup")
 
         train_dataset = _bind_environment_image_identity(
             _load_json_dataset(load_dataset, stage["dataset"]),
@@ -722,6 +733,13 @@ def run_grpo(
             remove_unused_columns=False,
             report_to="none",
         )
+        telemetry_callback = make_trainer_log_callback(
+            TrainerCallback,
+            stage="grpo",
+            on_event=on_event,
+            torch_module=torch,
+            vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
+        )
         trainer = GRPOTrainer(
             model=policy,
             args=training_args,
@@ -729,16 +747,9 @@ def run_grpo(
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
             environment_factory=environment_factory,
-            callbacks=[
-                make_trainer_log_callback(
-                    TrainerCallback,
-                    stage="grpo",
-                    on_event=on_event,
-                    torch_module=torch,
-                    vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
-                )
-            ],
+            callbacks=[telemetry_callback],
         )
+        profiler.checkpoint("trainer_setup")
         calibration_metrics: list[dict[str, Any]] = []
         calibration_repetitions = (
             stage["calibration_generations"] // stage["num_generations"]
@@ -808,7 +819,9 @@ def run_grpo(
                 "GRPO starting-policy calibration rejected the curriculum: "
                 + str(starting_policy_calibration["blockers"][0])
             )
+        profiler.checkpoint("starting_policy_calibration")
         train_output = trainer.train()
+        profiler.checkpoint("training")
         trainer.save_model(str(destination))
         _save_grpo_processing_class(trainer, tokenizer, destination)
         verify_saved_adapter_provenance(
@@ -820,6 +833,21 @@ def run_grpo(
             json.dumps(recipe, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        profiler.checkpoint("artifact_save")
+        metrics = as_serializable(getattr(train_output, "metrics", {}))
+        telemetry = telemetry_callback.observed_summary()
+        profile = profiler.summary()
+        receipt = build_training_receipt(
+            stage="grpo",
+            recipe=recipe,
+            dependencies=installed_versions,
+            runtime=runtime,
+            trainable_adapter_parameters=trainable_parameters,
+            metrics=metrics,
+            telemetry=telemetry,
+            profile=profile,
+        )
+        receipt_path = write_training_receipt(destination, receipt)
         mark_output_directory_complete(destination)
     except TrainingRuntimeError:
         raise
@@ -833,7 +861,6 @@ def run_grpo(
             f"GRPO failed after recipe validation: {error}"
         ) from error
 
-    metrics = as_serializable(getattr(train_output, "metrics", {}))
     return {
         "status": "completed",
         "dry_run": False,
@@ -846,4 +873,9 @@ def run_grpo(
         "starting_policy_calibration": starting_policy_calibration,
         "trainable_adapter_parameters": trainable_parameters,
         "metrics": metrics,
+        "performance": {
+            "profile": profile,
+            "telemetry": telemetry,
+            "receipt_path": str(receipt_path),
+        },
     }

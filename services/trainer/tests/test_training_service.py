@@ -217,6 +217,18 @@ class TrainingServiceTests(unittest.TestCase):
             "metrics": {"train_loss": 0.25, "note": secret},
             "dependencies": {"HF_TOKEN": secret},
             "recipe": {"token": secret},
+            "performance": {
+                "profile": {
+                    "clock": "monotonic_wall_time",
+                    "phase_seconds": {"training": 10.0, "bad phase": 99.0},
+                    "total_seconds": 12.0,
+                },
+                "telemetry": {
+                    "vram_peak_allocated_gib": 8.0,
+                    "private_note": secret,
+                },
+                "receipt_path": str(self.root / "training_receipt.json"),
+            },
         }
 
         def run(
@@ -256,6 +268,15 @@ class TrainingServiceTests(unittest.TestCase):
                             self.root / ".autotrainer" / "adapters" / "sft"
                         ),
                         "metrics": {"train_loss": 0.25},
+                        "performance": {
+                            "profile": {
+                                "clock": "monotonic_wall_time",
+                                "phase_seconds": {"training": 10.0},
+                                "total_seconds": 12.0,
+                            },
+                            "telemetry": {"vram_peak_allocated_gib": 8.0},
+                            "receipt_path": str(self.root / "training_receipt.json"),
+                        },
                     }
                 ],
             },

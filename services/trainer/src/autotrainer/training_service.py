@@ -287,6 +287,43 @@ def _sanitize_metrics(value: object) -> dict[str, int | float | bool]:
     return metrics
 
 
+def _sanitize_performance(value: object) -> dict[str, Any] | None:
+    """Retain only bounded phase timing, VRAM, throughput, and receipt location."""
+
+    if not isinstance(value, Mapping):
+        return None
+    performance: dict[str, Any] = {}
+    profile_value = value.get("profile")
+    if isinstance(profile_value, Mapping):
+        profile: dict[str, Any] = {"clock": "monotonic_wall_time"}
+        total = _finite_number(profile_value.get("total_seconds"))
+        if total is not None and total <= 30 * 24 * 60 * 60:
+            profile["total_seconds"] = total
+        phases_value = profile_value.get("phase_seconds")
+        phases: dict[str, float] = {}
+        if isinstance(phases_value, Mapping):
+            for raw_name, raw_duration in sorted(phases_value.items()):
+                name = str(raw_name)
+                duration = _finite_number(raw_duration)
+                if (
+                    re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name)
+                    and duration is not None
+                    and duration <= 30 * 24 * 60 * 60
+                ):
+                    phases[name] = duration
+        if phases:
+            profile["phase_seconds"] = phases
+        if len(profile) > 1:
+            performance["profile"] = profile
+    telemetry = _telemetry_metrics(value.get("telemetry"))
+    if telemetry:
+        performance["telemetry"] = telemetry
+    receipt_path = value.get("receipt_path")
+    if receipt_path:
+        performance["receipt_path"] = _redact_secrets(receipt_path, limit=4096)
+    return performance or None
+
+
 def _telemetry_metrics(value: object) -> dict[str, int | float]:
     """Bound live numeric logs more tightly than terminal result metrics."""
 
@@ -575,6 +612,9 @@ def _sanitize_result(value: object) -> dict[str, Any] | None:
                 trainable_parameters, bool
             ):
                 stage["trainable_adapter_parameters"] = trainable_parameters
+            performance = _sanitize_performance(raw_stage.get("performance"))
+            if performance is not None:
+                stage["performance"] = performance
             stages.append(stage)
 
     return {
