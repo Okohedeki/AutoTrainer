@@ -24,6 +24,7 @@ from autotrainer.evaluation_service import (  # noqa: E402
     EvaluationJobManager,
     EvaluationServiceError,
     _readiness,
+    _refresh_frozen_compiler_provenance,
     run_project_evaluation,
 )
 
@@ -232,6 +233,50 @@ def _write_scored_results(
 
 
 class EvaluationServiceTests(unittest.TestCase):
+    def test_frozen_evaluation_restores_only_matching_full_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(Path(temporary_directory))
+            config = load_config(config_path, check_paths=True)
+            freeze_path = config.artifact_dir / "dataset" / "freeze.json"
+            freeze_path.parent.mkdir(parents=True)
+            freeze_path.write_text("{}\n", encoding="utf-8")
+            receipt = {
+                "artifact_sha256": {"rl_evaluation": "held-out-sha"},
+                "compiler_fingerprint": "full-fingerprint",
+                "counts": {"rl_evaluation": 5, "rl_train": 0, "sft_train": 0},
+            }
+            compiled = {
+                "artifact_sha256": dict(receipt["artifact_sha256"]),
+                "counts": dict(receipt["counts"]),
+                "errors": [],
+                "fingerprint": receipt["compiler_fingerprint"],
+            }
+            scan = {"errors": [], "sources": []}
+
+            with patch(
+                "autotrainer.evaluation_service.require_frozen_dataset",
+                return_value=receipt,
+            ), patch(
+                "autotrainer.evaluation_service.scan_sources", return_value=scan
+            ) as source_scan, patch(
+                "autotrainer.evaluation_service.compile_data", return_value=compiled
+            ) as compiler:
+                _refresh_frozen_compiler_provenance(config)
+
+            source_scan.assert_called_once_with(config.data, config.root, write=True)
+            compiler.assert_called_once_with(config.data, config.root, scan)
+
+            mismatched = {**compiled, "artifact_sha256": {"rl_evaluation": "changed"}}
+            with patch(
+                "autotrainer.evaluation_service.require_frozen_dataset",
+                return_value=receipt,
+            ), patch(
+                "autotrainer.evaluation_service.scan_sources", return_value=scan
+            ), patch(
+                "autotrainer.evaluation_service.compile_data", return_value=mismatched
+            ), self.assertRaisesRegex(EvaluationServiceError, "does not match"):
+                _refresh_frozen_compiler_provenance(config)
+
     def test_readiness_rejects_a_plan_for_an_old_project_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             config_path = _project(Path(temporary_directory))

@@ -404,6 +404,19 @@ class CompilerTests(unittest.TestCase):
                 rl_row["source_repository_identity"],
                 scan["sources"][0]["repository_identity"],
             )
+            self.assertEqual(
+                compiled["repository_exposures"],
+                [
+                    {
+                        "source_id": "site",
+                        "partition": "train",
+                        "repository_identity": scan["sources"][0][
+                            "repository_identity"
+                        ],
+                        "commit": scan["sources"][0]["commit"],
+                    }
+                ],
+            )
             verifier_identity = rl_row["verifier_identity"]
             self.assertEqual(verifier_identity["path"], str(verifier.resolve()))
             self.assertRegex(verifier_identity["sha256"], r"^sha256:[0-9a-f]{64}$")
@@ -416,10 +429,12 @@ class CompilerTests(unittest.TestCase):
                 verifier_identity["files"][0]["sha256"], r"^[0-9a-f]{64}$"
             )
 
-    def test_approved_history_compiles_alone_and_combines_with_explicit_jsonl(self) -> None:
+    def test_approved_history_compiles_alone_and_combines_with_explicit_jsonl(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config, _repository, _parent = _reviewable_history_fixture(root)
+            config, repository, _parent = _reviewable_history_fixture(root)
             candidate = list_history(config, root, write=False)["candidates"][0]
             review_history(
                 config,
@@ -429,6 +444,34 @@ class CompilerTests(unittest.TestCase):
                 instruction="Make the application label clearer for people using the interface.",
                 rights_confirmed=True,
             )
+            accepted_revision = candidate["commit"]
+            (repository / "src" / "extra.ts").write_text(
+                "export const extra = true;\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "-c",
+                    "user.name=AutoTrainer Test",
+                    "-c",
+                    "user.email=test@autotrainer.local",
+                    "commit",
+                    "-qm",
+                    "Add a separate later change",
+                ],
+                check=True,
+            )
+            locked_revision = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout.strip()
+            config["sources"][0]["revision"] = locked_revision
 
             history_only = compile_data(config, root, scan_sources(config, root))
 
@@ -441,6 +484,30 @@ class CompilerTests(unittest.TestCase):
                 .splitlines()
             ]
             self.assertEqual(history_rows[0]["source_type"], "approved_git_change")
+            repository_identity = history_rows[0]["source_repository_identity"]
+            self.assertNotEqual(accepted_revision, locked_revision)
+            self.assertEqual(
+                history_only["repository_exposures"],
+                sorted(
+                    [
+                        {
+                            "source_id": "history-site",
+                            "partition": "train",
+                            "repository_identity": repository_identity,
+                            "commit": accepted_revision,
+                        },
+                        {
+                            "source_id": "history-site",
+                            "partition": "train",
+                            "repository_identity": repository_identity,
+                            "commit": locked_revision,
+                        },
+                    ],
+                    key=lambda item: json.dumps(
+                        item, sort_keys=True, separators=(",", ":")
+                    ),
+                ),
+            )
 
             explicit = root / "accepted.jsonl"
             explicit.write_text(

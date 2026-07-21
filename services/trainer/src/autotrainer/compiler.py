@@ -231,7 +231,7 @@ def _source_input_paths(config: Mapping[str, Any], root: Path) -> set[Path]:
 def _fingerprint(
     sft_records: Mapping[str, list[Mapping[str, Any]]],
     rl_records: Mapping[str, list[Mapping[str, Any]]],
-    repository_locks: Mapping[str, Mapping[str, Any]],
+    repository_exposures: list[dict[str, Any]],
     destinations: Mapping[tuple[str, str], Path],
     root: Path,
 ) -> str:
@@ -246,7 +246,7 @@ def _fingerprint(
     payload = {
         "sft": sft_records,
         "rl": rl_records,
-        "repository_exposures": _repository_exposures(repository_locks),
+        "repository_exposures": repository_exposures,
         "destinations": destination_values,
     }
     return hashlib.sha256(
@@ -298,10 +298,15 @@ def _report(
     artifacts: Mapping[str, str] | None = None,
     artifact_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    repository_exposures = _repository_exposures(
+        repository_locks,
+        sft_records=sft_records,
+        rl_records=rl_records,
+    )
     return {
         "schema_version": 1,
         "fingerprint": _fingerprint(
-            sft_records, rl_records, repository_locks, destinations, root
+            sft_records, rl_records, repository_exposures, destinations, root
         ),
         "counts": {
             "sft_train": len(sft_records["train"]),
@@ -313,7 +318,7 @@ def _report(
         "artifact_sha256": dict(artifact_sha256 or {}),
         # This is the compiler-frozen exposure ledger used by direct evaluation.
         # IDs aid diagnostics; identity and commit enforce the holdout boundary.
-        "repository_exposures": _repository_exposures(repository_locks),
+        "repository_exposures": repository_exposures,
         "dataset_repository_provenance": _dataset_repository_provenance(
             sft_records, rl_records
         ),
@@ -332,8 +337,11 @@ def _repository_lock(scan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
 
 def _repository_exposures(
     repository_locks: Mapping[str, Mapping[str, Any]],
+    *,
+    sft_records: Mapping[str, list[Mapping[str, Any]]] | None = None,
+    rl_records: Mapping[str, list[Mapping[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    return [
+    exposures = [
         {
             "source_id": source_id,
             "partition": source.get("partition"),
@@ -341,6 +349,46 @@ def _repository_exposures(
             "commit": source.get("commit"),
         }
         for source_id, source in sorted(repository_locks.items())
+    ]
+
+    for partitions in (sft_records or {}, rl_records or {}):
+        for partition, records in sorted(partitions.items()):
+            for row in records:
+                repository_identity = row.get("source_repository_identity")
+                revision = row.get("source_revision")
+                if (
+                    not isinstance(repository_identity, str)
+                    or not repository_identity.strip()
+                ):
+                    continue
+                if not isinstance(revision, str) or not revision.strip():
+                    continue
+                manifest = row.get("manifest", {})
+                task = manifest.get("task", {}) if isinstance(manifest, Mapping) else {}
+                source_id = row.get("source_id")
+                if not source_id and isinstance(task, Mapping):
+                    source_id = task.get("sourceId")
+                exposures.append(
+                    {
+                        "source_id": str(source_id or "record"),
+                        "partition": partition,
+                        "repository_identity": repository_identity.strip(),
+                        "commit": revision.strip().lower(),
+                    }
+                )
+
+    # A task at the declared lock and its repository source describe the same
+    # exposure. Historical accepted changes, however, retain their own commit.
+    # Canonical JSON keys preserve distinct source labels while making the
+    # result independent of source/record discovery order.
+    return [
+        json.loads(value)
+        for value in sorted(
+            {
+                json.dumps(item, sort_keys=True, separators=(",", ":"))
+                for item in exposures
+            }
+        )
     ]
 
 

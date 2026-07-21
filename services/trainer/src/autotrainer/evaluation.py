@@ -535,11 +535,12 @@ def _compiler_repository_provenance(
     hashes = report.get("artifact_sha256")
     if not isinstance(artifacts, Mapping) or not isinstance(hashes, Mapping):
         raise EvaluationError("compiler provenance report lacks artifact paths or SHA-256 digests")
-    required_artifacts: list[tuple[str, Path]] = [
-        ("rl_train", training_dataset),
-        ("rl_evaluation", evaluation_dataset),
-    ]
-    if sft_training_dataset is not None:
+    required_artifacts: list[tuple[str, Path]] = [("rl_evaluation", evaluation_dataset)]
+    if _compiler_partition_has_records(report, "rl_train"):
+        required_artifacts.insert(0, ("rl_train", training_dataset))
+    if sft_training_dataset is not None and _compiler_partition_has_records(
+        report, "sft_train"
+    ):
         required_artifacts.append(("sft_train", sft_training_dataset))
     for key, expected_path in required_artifacts:
         reported_value = artifacts.get(key)
@@ -625,9 +626,40 @@ def _compiler_repository_provenance(
         "path": _relative_or_text(report_path, root),
         "sha256": _sha256_file(report_path),
         "fingerprint": report.get("fingerprint"),
+        "counts": dict(report.get("counts", {}))
+        if isinstance(report.get("counts"), Mapping)
+        else {},
+        "compiled_partitions": sorted(
+            key
+            for key in ("rl_train", "rl_evaluation", "sft_train")
+            if _compiler_partition_has_records(report, key)
+        ),
         "repository_exposures": exposures,
         "dataset_repository_provenance": report.get("dataset_repository_provenance"),
     }
+
+
+def _compiler_partition_has_records(report: Mapping[str, Any], key: str) -> bool:
+    """Use compiler counts to ignore stale bytes from an empty partition.
+
+    Older reports did not publish counts, so artifact presence remains the
+    compatibility signal for those immutable receipts.
+    """
+
+    counts = report.get("counts")
+    if isinstance(counts, Mapping):
+        value = counts.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise EvaluationError(
+                f"compiler provenance report has invalid {key} count"
+            )
+        return value > 0
+    artifacts = report.get("artifacts")
+    return isinstance(artifacts, Mapping) and key in artifacts
 
 
 def _task_identity(row: Mapping[str, Any], index: int) -> tuple[str, dict[str, Any]]:
@@ -1005,13 +1037,42 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
                 "grpo.eval_dataset must be separate from evaluation.dataset; "
                 "training validation cannot reuse the final benchmark"
             )
-    training_rows = _read_jsonl(training_dataset_path, "compiled GRPO training dataset")
+    compiler_provenance = _compiler_repository_provenance(
+        config,
+        root,
+        training_dataset_path,
+        dataset_path,
+        sft_training_dataset_path,
+    )
+    compiled_partitions = set(compiler_provenance.get("compiled_partitions", []))
+    compiled_counts = compiler_provenance.get("counts", {})
+    training_rows = (
+        _read_jsonl(training_dataset_path, "compiled GRPO training dataset")
+        if "rl_train" in compiled_partitions
+        else []
+    )
     sft_training_rows = (
         _read_jsonl(sft_training_dataset_path, "compiled SFT training dataset")
         if sft_training_dataset_path is not None
+        and "sft_train" in compiled_partitions
         else []
     )
     task_rows = _read_jsonl(dataset_path, "compiled evaluation dataset")
+    if isinstance(compiled_counts, Mapping):
+        for key, rows in (
+            ("rl_train", training_rows),
+            ("rl_evaluation", task_rows),
+            ("sft_train", sft_training_rows),
+        ):
+            expected_count = compiled_counts.get(key)
+            if (
+                isinstance(expected_count, int)
+                and not isinstance(expected_count, bool)
+                and expected_count != len(rows)
+            ):
+                raise EvaluationError(
+                    f"compiler {key} count does not match compiled dataset records"
+                )
     training_identities, training_revisions = _repository_keys(
         training_rows, "compiled GRPO training dataset"
     )
@@ -1024,13 +1085,6 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
         sft_training_identities, sft_training_revisions = _repository_keys(
             sft_training_rows, "compiled SFT training dataset"
         )
-    compiler_provenance = _compiler_repository_provenance(
-        config,
-        root,
-        training_dataset_path,
-        dataset_path,
-        sft_training_dataset_path,
-    )
     reported_dataset_provenance = compiler_provenance.get(
         "dataset_repository_provenance"
     )
@@ -1220,7 +1274,9 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             "training_source": {
                 "path": _relative_or_text(training_dataset_path, root),
                 "sha256": _sha256_file(training_dataset_path),
-            },
+            }
+            if "rl_train" in compiled_partitions
+            else None,
             "training_repository_identities": sorted(training_identities),
             "training_revisions": sorted(training_revisions),
             "sft_training_source": (
@@ -1229,6 +1285,7 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
                     "sha256": _sha256_file(sft_training_dataset_path),
                 }
                 if sft_training_dataset_path is not None
+                and "sft_train" in compiled_partitions
                 else None
             ),
             "sft_training_repository_identities": sorted(sft_training_identities),

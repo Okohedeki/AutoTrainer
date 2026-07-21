@@ -164,6 +164,12 @@ def _write_compile_provenance(
         "schema_version": 1,
         "fingerprint": "fixture-compile-fingerprint",
         "errors": [],
+        "counts": {
+            "rl_train": len(dataset_repository_provenance["rl_train"]),
+            "rl_evaluation": len(dataset_repository_provenance["rl_evaluation"]),
+            "sft_train": len(dataset_repository_provenance.get("sft_train", [])),
+            "sft_evaluation": 0,
+        },
         "artifacts": artifacts,
         "artifact_sha256": artifact_sha256,
         "repository_exposures": exposures
@@ -693,6 +699,29 @@ class EvaluationPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(EvaluationError, "repository identity"):
                 build_evaluation_plan(config, root)
 
+    def test_plan_ignores_stale_grpo_bytes_when_compiler_count_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            report_path = root / ".artifacts" / "compiled" / "compile-report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["counts"]["rl_train"] = 0
+            report["artifacts"].pop("rl_train")
+            report["artifact_sha256"].pop("rl_train")
+            report["dataset_repository_provenance"]["rl_train"] = []
+            report_path.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+
+            plan = build_evaluation_plan(config, root)
+            stale_training = root / ".artifacts" / "compiled" / "rl" / "train.jsonl"
+            stale_training.write_text('{"stale": "different bytes"}\n', encoding="utf-8")
+            rebuilt = build_evaluation_plan(config, root)
+
+            provenance = plan["holdout"]["compiler_provenance"]
+            self.assertNotIn("rl_train", provenance["compiled_partitions"])
+            self.assertIsNone(plan["holdout"]["training_source"])
+            self.assertEqual(len(plan["tasks"]), len(EVALUATION_TASK_IDS))
+            self.assertEqual(rebuilt["plan_id"], plan["plan_id"])
+
     def test_plan_rejects_same_commit_from_differently_named_clones(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -719,6 +748,7 @@ class EvaluationPlanTests(unittest.TestCase):
             dataset.write_text(
                 "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
             )
+            _write_compile_provenance(root)
 
             with self.assertRaisesRegex(EvaluationError, "lacks source_repository_identity"):
                 build_evaluation_plan(config, root)

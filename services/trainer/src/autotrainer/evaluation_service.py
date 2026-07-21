@@ -18,7 +18,9 @@ from threading import Lock, Thread, current_thread
 from typing import Any, Mapping
 from uuid import uuid4
 
+from .compiler import compile_data
 from .config import ConfigError, ProjectConfig, load_config
+from .dataset_service import require_frozen_dataset
 from .device_gate import (
     DeviceLease,
     acquire_device_lease,
@@ -43,6 +45,7 @@ from .project_gate import (
     project_is_busy,
     project_run_gate,
 )
+from .sources import scan_sources
 
 
 _JOB_SCHEMA_VERSION = 1
@@ -462,11 +465,52 @@ def _load_project(config_path: str | Path) -> ProjectConfig:
     return load_config(config_path, check_paths=True)
 
 
+def _refresh_frozen_compiler_provenance(config: ProjectConfig) -> None:
+    """Restore full train/evaluation provenance after train-only Prepare.
+
+    Prepare deliberately compiles only training sources. Evaluation rebuilds
+    the full compiler ledger, then proves that it is byte-for-byte equivalent
+    to the operator-inspected dataset freeze before freezing any trials.
+    """
+
+    freeze_path = config.artifact_dir / "dataset" / "freeze.json"
+    if not freeze_path.is_file():
+        # Compatibility for direct library/CLI projects that predate the local
+        # first-class dataset workflow; their existing compiler report remains
+        # subject to the evaluator's strict provenance checks.
+        return
+    receipt = require_frozen_dataset(config.path)
+    scan = scan_sources(config.data, config.root, write=True)
+    scan_errors = scan.get("errors")
+    if isinstance(scan_errors, list) and scan_errors:
+        raise EvaluationServiceError(
+            "held-out source inspection failed: " + str(scan_errors[0])
+        )
+    compiled = compile_data(config.data, config.root, scan)
+    compile_errors = compiled.get("errors")
+    if isinstance(compile_errors, list) and compile_errors:
+        raise EvaluationServiceError(
+            "held-out dataset compilation failed: " + str(compile_errors[0])
+        )
+    comparisons = (
+        ("compiler fingerprint", receipt.get("compiler_fingerprint"), compiled.get("fingerprint")),
+        ("record counts", receipt.get("counts"), compiled.get("counts")),
+        ("artifact hashes", receipt.get("artifact_sha256"), compiled.get("artifact_sha256")),
+    )
+    mismatched = [label for label, expected, observed in comparisons if expected != observed]
+    if mismatched:
+        raise EvaluationServiceError(
+            "the rebuilt held-out provenance does not match the frozen dataset "
+            f"({', '.join(mismatched)}); review and lock Data again"
+        )
+
+
 def plan_project_evaluation(config_path: str | Path) -> dict[str, Any]:
     """Freeze a plan under the same project lease used by local training."""
 
     with project_run_gate(config_path), device_run_gate():
         config = _load_project(config_path)
+        _refresh_frozen_compiler_provenance(config)
         evaluation = config.data.get("evaluation", {})
         if isinstance(evaluation, Mapping) and "language" in evaluation:
             require_language_matched_evaluation(config.path)
