@@ -287,6 +287,15 @@ class TrainingServiceTests(unittest.TestCase):
         self.assertEqual(record, {"schema_version": 1, "job": completed})
         self.assertNotIn(secret, record_text)
         self.assertEqual(list(manager.record_path.parent.glob("*.tmp")), [])
+        run_record = (
+            self.root
+            / ".autotrainer"
+            / "training"
+            / "runs"
+            / completed["id"]
+            / "run.json"
+        )
+        self.assertEqual(json.loads(run_record.read_text(encoding="utf-8")), record)
 
         # A new backend process restores the terminal result instead of hiding
         # the output as the old in-memory-only manager did.
@@ -488,6 +497,11 @@ class TrainingServiceTests(unittest.TestCase):
             queued = manager.start()
         try:
             self.assertEqual(queued["status"], "queued")
+            updated = load_config(self.config_path).data
+            run_root = f".autotrainer/training/runs/{queued['id']}/checkpoints"
+            self.assertEqual(updated["sft"]["output_dir"], f"{run_root}/sft")
+            self.assertEqual(updated["grpo"]["output_dir"], f"{run_root}/grpo")
+            self.assertEqual(updated["grpo"]["start_from"], f"{run_root}/sft")
             with self.assertRaisesRegex(ProjectBusyError, "project is busy"):
                 select_model(self.config_path, "qwen3.5-9b-text")
         finally:
@@ -556,6 +570,18 @@ class TrainingServiceTests(unittest.TestCase):
                     json.loads(record_path.read_text(encoding="utf-8"))["job"],
                     interrupted,
                 )
+                run_record = (
+                    self.root
+                    / ".autotrainer"
+                    / "training"
+                    / "runs"
+                    / interrupted["id"]
+                    / "run.json"
+                )
+                self.assertEqual(
+                    json.loads(run_record.read_text(encoding="utf-8"))["job"],
+                    interrupted,
+                )
 
         with patch(
             "autotrainer.training_service.run_project_training",
@@ -611,6 +637,79 @@ class TrainingServiceTests(unittest.TestCase):
         finally:
             captured[0][2].release()  # type: ignore[attr-defined]
             captured[0][1].release()  # type: ignore[attr-defined]
+
+    def test_completed_runs_bind_the_candidate_and_preserve_run_history(self) -> None:
+        config = default_config()
+        evaluation = config["evaluation"]
+        candidate = evaluation["arms"].pop("autotrainer")
+        candidate["adapter"]["sha256"] = "a" * 64
+        evaluation["arms"]["trained_candidate"] = candidate
+        evaluation["candidates"] = [
+            "trained_candidate" if arm == "autotrainer" else arm
+            for arm in evaluation["candidates"]
+        ]
+        evaluation["suites"]["model_benchmark"]["arms"] = [
+            "trained_candidate" if arm == "autotrainer" else arm
+            for arm in evaluation["suites"]["model_benchmark"]["arms"]
+        ]
+        evaluation["decisions"]["model_benchmark"]["candidate"] = (
+            "trained_candidate"
+        )
+        write_config(self.config_path, config, overwrite=True)
+
+        plan_pointer = (
+            self.root / ".autotrainer" / "evaluation" / "current-plan.json"
+        )
+        plan_pointer.parent.mkdir(parents=True, exist_ok=True)
+        plan_pointer.write_text('{}\n', encoding="utf-8")
+        manager = TrainingJobManager(self.config_path)
+
+        with patch(
+            "autotrainer.training_service.run_project_training",
+            return_value={"status": "completed", "recipe": "teach", "stages": []},
+        ):
+            first = manager.start()
+            manager.close()
+        self.assertEqual(manager.snapshot()["status"], "completed")
+        first_root = f".autotrainer/training/runs/{first['id']}"
+        updated = load_config(self.config_path).data
+        self.assertEqual(
+            updated["evaluation"]["arms"]["trained_candidate"]["adapter"],
+            {
+                "path": f"{first_root}/checkpoints/sft",
+                "stage": "sft",
+            },
+        )
+        self.assertFalse(plan_pointer.exists())
+        first_record = self.root / first_root / "run.json"
+        self.assertEqual(
+            json.loads(first_record.read_text(encoding="utf-8"))["job"]["status"],
+            "completed",
+        )
+
+        plan_pointer.write_text('{}\n', encoding="utf-8")
+        with patch(
+            "autotrainer.training_service.run_project_training",
+            return_value={
+                "status": "completed",
+                "recipe": "practice",
+                "stages": [],
+            },
+        ):
+            second = manager.start()
+            manager.close()
+        second_root = f".autotrainer/training/runs/{second['id']}"
+        updated = load_config(self.config_path).data
+        self.assertEqual(
+            updated["evaluation"]["arms"]["trained_candidate"]["adapter"],
+            {
+                "path": f"{second_root}/checkpoints/grpo",
+                "stage": "grpo",
+            },
+        )
+        self.assertFalse(plan_pointer.exists())
+        self.assertTrue(first_record.exists())
+        self.assertTrue((self.root / second_root / "run.json").is_file())
 
     def test_worker_is_non_daemon_and_close_waits_for_it(self) -> None:
         manager = TrainingJobManager(self.config_path)

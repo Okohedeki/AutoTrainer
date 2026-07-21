@@ -52,6 +52,7 @@ _JOB_STATUSES = frozenset(
     {"idle", "queued", "running", "completed", "failed", "interrupted"}
 )
 _LIVE_JOB_STATUSES = frozenset({"queued", "running"})
+_TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "interrupted"})
 _RECIPES = frozenset(TRAINING_RECIPES)
 _STAGES = frozenset({"prepare", "sft", "grpo"})
 _METRIC_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
@@ -89,8 +90,8 @@ _SECRET_PATTERNS = (
 )
 
 
-def _allocate_retry_outputs(config_path: str | Path, job_id: str) -> None:
-    """Advance a terminal job to fresh immutable checkpoint destinations."""
+def _allocate_run_outputs(config_path: str | Path, job_id: str) -> None:
+    """Give one managed job fresh immutable checkpoint destinations."""
 
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise TrainingServiceError("training job id is invalid")
@@ -119,6 +120,50 @@ def _allocate_retry_outputs(config_path: str | Path, job_id: str) -> None:
     if sft.get("enabled", True) and grpo.get("enabled", True):
         grpo["start_from"] = sft_output
     write_config(config.path, updated, overwrite=True)
+
+
+def _bind_completed_adapter(config_path: str | Path, stage: str) -> None:
+    """Point the candidate evaluation arm at the managed run that just finished."""
+
+    if stage not in {"sft", "grpo"}:
+        raise TrainingServiceError("completed training stage is invalid")
+    config = read_project_config(config_path)
+    updated = deepcopy(config.data)
+    stage_config = updated.get(stage)
+    evaluation = updated.get("evaluation")
+    if not isinstance(stage_config, dict) or not isinstance(evaluation, dict):
+        raise TrainingServiceError("training or evaluation configuration is missing")
+    output_value = stage_config.get("output_dir")
+    if not isinstance(output_value, str) or not output_value.strip():
+        raise TrainingServiceError(f"{stage}.output_dir is missing after training")
+
+    arms = evaluation.get("arms")
+    if not isinstance(arms, dict):
+        raise TrainingServiceError("evaluation arms are missing from the project config")
+    candidate_ids = [
+        arm_id
+        for arm_id, arm in arms.items()
+        if isinstance(arm, Mapping) and arm.get("role") == "candidate"
+    ]
+    if len(candidate_ids) != 1:
+        raise TrainingServiceError("evaluation must contain exactly one candidate arm")
+    candidate = arms.get(candidate_ids[0])
+    if not isinstance(candidate, dict):
+        raise TrainingServiceError("the candidate evaluation arm is invalid")
+
+    output_dir = config.resolve_path(output_value).resolve()
+    try:
+        adapter_path = output_dir.relative_to(config.root).as_posix()
+    except ValueError:
+        adapter_path = str(output_dir)
+    # Replace the declaration so a digest for an older adapter cannot survive.
+    candidate["adapter"] = {"path": adapter_path, "stage": stage}
+    write_config(config.path, updated, overwrite=True)
+    # Historical plans remain immutable; only the pointer to the now-stale plan
+    # is removed so Evaluate must freeze the newly bound adapter bytes.
+    (config.artifact_dir / "evaluation" / "current-plan.json").unlink(
+        missing_ok=True
+    )
 
 
 class TrainingServiceError(ConfigError):
@@ -684,6 +729,22 @@ def _write_job_record(destination: Path, job: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _write_job_records(
+    current_destination: Path,
+    run_root: Path,
+    job: Mapping[str, Any],
+) -> None:
+    """Persist current state and retain a terminal snapshot for this run."""
+
+    status = job.get("status")
+    job_id = job.get("id")
+    if status in _TERMINAL_JOB_STATUSES:
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise TrainingServiceError("terminal training job id is invalid")
+        _write_job_record(run_root / job_id / "run.json", job)
+    _write_job_record(current_destination, job)
+
+
 def _read_job_record(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -745,6 +806,7 @@ class TrainingJobManager:
         config = read_project_config(self._config_path)
         self._record_path = config.artifact_dir / "training" / "current-job.json"
         self._event_root = config.artifact_dir / "training" / "jobs"
+        self._run_root = config.artifact_dir / "training" / "runs"
         self._worker: Thread | None = None
         self._job = _read_job_record(self._record_path) or _idle_job()
         job_id = self._job.get("id")
@@ -768,7 +830,7 @@ class TrainingJobManager:
                 message="Training was interrupted when the local backend stopped.",
                 result=None,
             )
-            _write_job_record(self._record_path, self._job)
+            _write_job_records(self._record_path, self._run_root, self._job)
             self._append_event(
                 str(job_id),
                 {
@@ -852,7 +914,7 @@ class TrainingJobManager:
             if self._job.get("id") != job_id:
                 return
             self._job.update(values)
-            _write_job_record(self._record_path, self._job)
+            _write_job_records(self._record_path, self._run_root, self._job)
 
     def start(self) -> dict[str, Any]:
         """Queue the project unless this backend already owns a live GPU job."""
@@ -874,13 +936,12 @@ class TrainingJobManager:
             previous_event_path = self._event_path
             previous_events = self._events
             previous_next_sequence = self._next_event_sequence
-            if previous_job["status"] in {"completed", "failed", "interrupted"}:
-                try:
-                    _allocate_retry_outputs(self._config_path, job_id)
-                except Exception:
-                    device_lease.release()
-                    lease.release()
-                    raise
+            try:
+                _allocate_run_outputs(self._config_path, job_id)
+            except Exception:
+                device_lease.release()
+                lease.release()
+                raise
             self._job = {
                 "id": job_id,
                 "status": "queued",
@@ -899,7 +960,7 @@ class TrainingJobManager:
                     next_sequence=1,
                     events=[],
                 )
-                _write_job_record(self._record_path, self._job)
+                _write_job_records(self._record_path, self._run_root, self._job)
             except Exception:
                 # An orphan event directory is harmless; restoring the prior
                 # in-memory job prevents a failed telemetry write from leaving
@@ -929,7 +990,7 @@ class TrainingJobManager:
                     status="failed",
                     message="Training could not start its local worker.",
                 )
-                _write_job_record(self._record_path, self._job)
+                _write_job_records(self._record_path, self._run_root, self._job)
                 self._append_event_locked(
                     job_id,
                     {
@@ -975,6 +1036,7 @@ class TrainingJobManager:
                     last_stage = (
                         "grpo" if recipe in {"practice", "both"} else "sft"
                     )
+                    _bind_completed_adapter(self._config_path, last_stage)
                     self._update(
                         job_id,
                         status="completed",

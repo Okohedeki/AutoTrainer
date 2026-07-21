@@ -93,7 +93,9 @@ Acceptance:
 
 ### 4. Run the built-in model benchmark
 
-Point `evaluation.arms.autotrainer.adapter` at the actual completed stage, then:
+Managed runs bind the candidate evaluation arm to the actual completed stage
+and invalidate only the stale current-plan pointer. Confirm the adapter shown in
+Evaluate, then:
 
 ```bash
 autotrainer evaluate plan --write --config autotrainer.yaml
