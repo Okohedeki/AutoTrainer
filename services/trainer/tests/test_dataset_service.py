@@ -185,6 +185,44 @@ class DatasetServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "approve or reject every"):
             freeze_dataset(self.config_path)
 
+    def test_freeze_detects_compiled_artifact_tampering(self) -> None:
+        examples = self.root / "accepted.jsonl"
+        examples.write_text(
+            json.dumps(
+                {
+                    "prompt": [{"content": "Write a greeting.", "role": "user"}],
+                    "completion": [{"content": "Hello", "role": "assistant"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = default_config()
+        config["sources"] = [
+            {
+                "id": "accepted",
+                "kind": "sft_jsonl",
+                "license": {"spdx": "LicenseRef-Internal"},
+                "partition": "train",
+                "roles": ["demonstrations"],
+                "uri": "accepted.jsonl",
+            }
+        ]
+        write_config(self.config_path, config, overwrite=True)
+        freeze_dataset(self.config_path)
+
+        compiled = self.root / config["sft"]["dataset"]
+        compiled.write_text(
+            compiled.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+
+        status = get_dataset_workspace(self.config_path)["freeze"]
+        self.assertEqual(status["status"], "stale")
+        self.assertEqual(status["reason"], "compiled_artifacts_changed")
+        with self.assertRaisesRegex(ConfigError, "compiled dataset bytes changed"):
+            require_frozen_dataset(self.config_path)
+
 
 if __name__ == "__main__":
     unittest.main()

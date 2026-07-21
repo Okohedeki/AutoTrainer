@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import tempfile
 import time
 from typing import Any
@@ -207,6 +208,61 @@ def _input_fingerprint(config: Any) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _compiled_artifact_paths(config: Any) -> dict[str, Path]:
+    """Resolve the compiler-owned dataset paths represented by freeze hashes."""
+
+    declarations = {
+        "sft_train": ("sft", "dataset"),
+        "sft_evaluation": ("sft", "eval_dataset"),
+        "rl_train": ("grpo", "dataset"),
+        "rl_evaluation": ("evaluation", "dataset"),
+    }
+    paths: dict[str, Path] = {}
+    for artifact, (section_name, field_name) in declarations.items():
+        section = config.data.get(section_name, {})
+        value = section.get(field_name) if isinstance(section, Mapping) else None
+        if isinstance(value, (str, Path)) and str(value).strip():
+            paths[artifact] = config.resolve_path(value)
+    return paths
+
+
+def _compiled_artifacts_match(config: Any, receipt: Mapping[str, Any]) -> bool:
+    """Re-hash every non-empty compiled artifact named by a freeze receipt."""
+
+    counts = receipt.get("counts")
+    hashes = receipt.get("artifact_sha256")
+    if not isinstance(counts, Mapping) or not isinstance(hashes, Mapping):
+        return False
+    expected_artifacts = {
+        str(name)
+        for name, count in counts.items()
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0
+    }
+    if set(str(name) for name in hashes) != expected_artifacts:
+        return False
+    paths = _compiled_artifact_paths(config)
+    for name in sorted(expected_artifacts):
+        expected = hashes.get(name)
+        path = paths.get(name)
+        if (
+            not isinstance(expected, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            or path is None
+            or not path.is_file()
+        ):
+            return False
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return False
+        if not secrets.compare_digest(digest.hexdigest(), expected):
+            return False
+    return True
+
+
 def _extract_json(text: str) -> Mapping[str, Any]:
     candidate = text.strip()
     if candidate.startswith("```"):
@@ -398,7 +454,13 @@ def _freeze_status(config: Any) -> dict[str, Any]:
         return {"status": "not_frozen"}
     current = _input_fingerprint(config)
     if receipt.get("input_fingerprint") != current:
-        return {"status": "stale", "receipt": receipt}
+        return {"status": "stale", "reason": "source_inputs_changed", "receipt": receipt}
+    if not _compiled_artifacts_match(config, receipt):
+        return {
+            "status": "stale",
+            "reason": "compiled_artifacts_changed",
+            "receipt": receipt,
+        }
     return {"status": "ready", "receipt": receipt}
 
 
@@ -568,6 +630,10 @@ def require_frozen_dataset(config_path: str | Path) -> Mapping[str, Any]:
     if status["status"] == "not_frozen":
         raise ConfigError("freeze and inspect the local dataset before training")
     if status["status"] == "stale":
+        if status.get("reason") == "compiled_artifacts_changed":
+            raise ConfigError(
+                "the compiled dataset bytes changed after they were frozen; freeze it again"
+            )
         raise ConfigError("the local dataset changed after it was frozen; freeze it again")
     receipt = status.get("receipt")
     if not isinstance(receipt, Mapping):
