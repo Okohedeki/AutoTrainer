@@ -28,12 +28,14 @@ from autotrainer.training.common import (  # noqa: E402
 )
 from autotrainer.training.grpo import (  # noqa: E402
     _bind_environment_image_identity,
+    _grpo_oom_guidance,
     _load_json_dataset as load_grpo_json_dataset,
     _save_grpo_processing_class,
     _summarize_starting_policy_calibration,
 )
 from autotrainer.training.sft import (  # noqa: E402
     _load_json_dataset as load_sft_json_dataset,
+    _sft_oom_guidance,
 )
 
 
@@ -156,6 +158,74 @@ class TrainingRecipeTests(unittest.TestCase):
             str((self.project_root / ".autotrainer" / "model-cache").resolve()),
         )
 
+    def test_recipe_rejects_hard_and_soft_budgets_below_the_model_floor(self) -> None:
+        for enforcement in ("hard", "soft"):
+            with self.subTest(enforcement=enforcement):
+                config = self.config()
+                config["refinement"] = {
+                    "mode": "adapter_only",
+                    "vram": {"max_gib": 5, "enforcement": enforcement},
+                }
+                with self.assertRaisesRegex(
+                    TrainingConfigurationError,
+                    "requires at least 20 GiB",
+                ):
+                    run_sft(
+                        config,
+                        project_root=self.project_root,
+                        output_dir=Path("artifacts/sft-output"),
+                        dry_run=True,
+                    )
+
+    def test_pretrainer_oom_guidance_does_not_prescribe_shorter_examples(self) -> None:
+        guidance = _sft_oom_guidance(
+            model_id="Qwen/Qwen3.5-9B",
+            vram_limit_gib=5,
+            trainer_execution_started=False,
+        )
+
+        self.assertIn("before trainer execution", guidance)
+        self.assertIn("at least 20 GiB", guidance)
+        self.assertIn("Reducing sft.max_length cannot", guidance)
+
+    def test_trainer_oom_guidance_only_mentions_length_when_examples_near_cap(
+        self,
+    ) -> None:
+        guidance = _sft_oom_guidance(
+            model_id="Qwen/Qwen3.5-9B",
+            vram_limit_gib=20,
+            trainer_execution_started=True,
+        )
+
+        self.assertIn("during trainer execution", guidance)
+        self.assertIn("if the longest tokenized examples are near sft.max_length", guidance)
+        self.assertNotIn("resident model fit", guidance)
+
+    def test_grpo_oom_guidance_distinguishes_setup_from_trainer_execution(
+        self,
+    ) -> None:
+        setup_guidance = _grpo_oom_guidance(
+            model_id="Qwen/Qwen3.5-9B",
+            vram_limit_gib=5,
+            trainer_execution_started=False,
+        )
+        trainer_guidance = _grpo_oom_guidance(
+            model_id="Qwen/Qwen3.5-9B",
+            vram_limit_gib=20,
+            trainer_execution_started=True,
+        )
+
+        self.assertIn("before trainer execution", setup_guidance)
+        self.assertIn("at least 20 GiB", setup_guidance)
+        self.assertIn(
+            "Reducing grpo.max_completion_length cannot make the resident model fit",
+            setup_guidance,
+        )
+        self.assertNotIn("if generated completions approach", setup_guidance)
+        self.assertIn("during trainer execution", trainer_guidance)
+        self.assertIn("if generated completions approach", trainer_guidance)
+        self.assertNotIn("resident model fit", trainer_guidance)
+
     def test_hard_vram_budget_installs_allocator_cap_and_model_ceiling(self) -> None:
         cuda = MagicMock()
         cuda.is_available.return_value = True
@@ -197,6 +267,14 @@ class TrainingRecipeTests(unittest.TestCase):
 
         cuda.set_per_process_memory_fraction.assert_not_called()
         self.assertEqual(runtime["vram_enforcement"], "soft")
+        self.assertIsNone(
+            model_max_memory(
+                {
+                    "mode": "adapter_only",
+                    "vram": {"max_gib": 10.0, "enforcement": "soft"},
+                }
+            )
+        )
 
     def test_attention_backend_must_be_honored_without_fallback(self) -> None:
         model = type(

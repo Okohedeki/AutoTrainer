@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from ..models import minimum_vram_gib
 from .experiment import (
     PhaseProfiler,
     build_training_receipt,
@@ -148,6 +149,31 @@ def _load_json_dataset(load_dataset: Any, description: Mapping[str, Any]) -> Any
     return load_dataset("json", data_files=description["path"], split="train")
 
 
+def _sft_oom_guidance(
+    *, model_id: str, vram_limit_gib: float, trainer_execution_started: bool
+) -> str:
+    """Keep setup OOM guidance distinct from activation-memory guidance."""
+
+    if not trainer_execution_started:
+        validated_minimum = minimum_vram_gib(model_id)
+        minimum_guidance = (
+            f" Increase refinement.vram.max_gib to at least {validated_minimum:g} GiB."
+            if validated_minimum is not None
+            else " Increase refinement.vram.max_gib or select a smaller supported model."
+        )
+        return (
+            "SFT exhausted GPU memory before trainer execution while loading the "
+            f"quantized base model and adapter state under the {vram_limit_gib:g} GiB "
+            f"budget.{minimum_guidance} Reducing sft.max_length cannot make the "
+            "resident model fit."
+        )
+    return (
+        "SFT exhausted GPU memory during trainer execution. Keep batch size at 1; "
+        "if the longest tokenized examples are near sft.max_length, shorten or split "
+        "those examples, or increase refinement.vram.max_gib."
+    )
+
+
 def run_sft(
     config: Mapping[str, Any],
     *,
@@ -197,6 +223,7 @@ def run_sft(
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["sft"]
+    trainer_execution_started = False
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -327,6 +354,7 @@ def run_sft(
             callbacks=[telemetry_callback],
         )
         profiler.checkpoint("trainer_setup")
+        trainer_execution_started = True
         train_output = trainer.train()
         profiler.checkpoint("training")
         trainer.save_model(str(destination))
@@ -362,8 +390,11 @@ def run_sft(
         raise
     except torch.cuda.OutOfMemoryError as error:
         raise TrainingRuntimeError(
-            "SFT exhausted GPU memory. Keep batch size at 1 and reduce sft.max_length "
-            "before changing the validated QLoRA settings."
+            _sft_oom_guidance(
+                model_id=model_recipe["id"],
+                vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
+                trainer_execution_started=trainer_execution_started,
+            )
         ) from error
     except Exception as error:
         raise TrainingRuntimeError(f"SFT failed after recipe validation: {error}") from error

@@ -446,6 +446,8 @@ export type TrainingJob = {
 
 export type RefinementSettings = {
   mode: "adapter_only";
+  model_id: string;
+  minimum_vram_gib: number | null;
   vram: {
     max_gib: number;
     enforcement: "hard" | "soft";

@@ -195,6 +195,24 @@ class ProjectServiceTests(unittest.TestCase):
             "materialized",
         )
 
+    def test_prepare_blocks_a_budget_below_the_models_validated_minimum(self) -> None:
+        payload = default_config()
+        payload["refinement"]["vram"] = {
+            "max_gib": 5,
+            "enforcement": "soft",
+        }
+        write_config(self.config_path, payload, overwrite=True)
+
+        result = self.prepare_with(1, 0)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["steps"][0]["status"], "blocked")
+        self.assertEqual(result["next_action"]["title"], "Increase the VRAM setting")
+        detail = result["next_action"]["detail"]
+        self.assertIn("requires at least 20 GiB", detail)
+        self.assertIn("both hard limits and soft monitoring targets", detail)
+        self.assertEqual(result["details"]["preflight"]["status"], "skipped")
+
     def test_missing_model_snapshot_blocks_before_doctor_claims_ready(self) -> None:
         result = self.prepare_with(
             1,

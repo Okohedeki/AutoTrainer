@@ -55,3 +55,34 @@ def resolve_model(value: str) -> dict[str, Any]:
         "v1_mode": "text-only causal LM",
         "notes": "Custom model: verify architecture, license, chat template, and memory use.",
     }
+
+
+def minimum_vram_gib(value: str) -> float | None:
+    """Return the validated local-refinement floor for one model, if known."""
+
+    minimum = resolve_model(value).get("minimum_vram_gib")
+    if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
+        return None
+    return float(minimum)
+
+
+def vram_budget_error(model_id: str, max_vram_gib: float) -> str | None:
+    """Explain when a requested budget is below the model's validated floor."""
+
+    minimum = minimum_vram_gib(model_id)
+    if minimum is None or float(max_vram_gib) >= minimum:
+        return None
+    return (
+        f"{model_id} requires at least {minimum:g} GiB for AutoTrainer's validated "
+        f"local refinement profile; configured {float(max_vram_gib):g} GiB. "
+        "This minimum applies to both hard limits and soft monitoring targets. "
+        f"Choose at least {minimum:g} GiB or select a smaller supported model."
+    )
+
+
+__all__ = [
+    "MODEL_CATALOG",
+    "minimum_vram_gib",
+    "resolve_model",
+    "vram_budget_error",
+]

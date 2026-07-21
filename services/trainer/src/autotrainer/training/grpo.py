@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..model_cache import require_materialized_model
+from ..models import minimum_vram_gib
 from .experiment import (
     PhaseProfiler,
     build_training_receipt,
@@ -505,6 +506,32 @@ def _save_grpo_processing_class(trainer: Any, fallback: Any, destination: Path) 
     save_pretrained(str(destination))
 
 
+def _grpo_oom_guidance(
+    *, model_id: str, vram_limit_gib: float, trainer_execution_started: bool
+) -> str:
+    """Keep resident-model OOM advice separate from rollout-memory advice."""
+
+    if not trainer_execution_started:
+        validated_minimum = minimum_vram_gib(model_id)
+        minimum_guidance = (
+            f" Increase refinement.vram.max_gib to at least {validated_minimum:g} GiB."
+            if validated_minimum is not None
+            else " Increase refinement.vram.max_gib or select a smaller supported model."
+        )
+        return (
+            "GRPO exhausted GPU memory before trainer execution while loading the "
+            f"quantized base model and adapter state under the {vram_limit_gib:g} GiB "
+            f"budget.{minimum_guidance} Reducing grpo.max_completion_length cannot "
+            "make the resident model fit."
+        )
+    return (
+        "GRPO exhausted GPU memory during trainer execution. Keep generation and "
+        "training batch sizes at their validated minimum; if generated completions "
+        "approach grpo.max_completion_length, reduce that length, or increase "
+        "refinement.vram.max_gib."
+    )
+
+
 def run_grpo(
     config: Mapping[str, Any],
     *,
@@ -599,6 +626,7 @@ def run_grpo(
     model_recipe = recipe["model"]
     qlora = recipe["qlora"]
     stage = recipe["grpo"]
+    trainer_execution_started = False
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -754,6 +782,7 @@ def run_grpo(
         calibration_repetitions = (
             stage["calibration_generations"] // stage["num_generations"]
         )
+        trainer_execution_started = True
         for round_index in range(calibration_repetitions):
             calibration_round = round_index + 1
             if on_event is not None:
@@ -853,8 +882,11 @@ def run_grpo(
         raise
     except torch.cuda.OutOfMemoryError as error:
         raise TrainingRuntimeError(
-            "GRPO exhausted GPU memory. Keep generation and training batch sizes at 2 "
-            "and reduce grpo.max_completion_length before changing QLoRA settings."
+            _grpo_oom_guidance(
+                model_id=model_recipe["id"],
+                vram_limit_gib=recipe["refinement"]["vram"]["max_gib"],
+                trainer_execution_started=trainer_execution_started,
+            )
         ) from error
     except Exception as error:
         raise TrainingRuntimeError(

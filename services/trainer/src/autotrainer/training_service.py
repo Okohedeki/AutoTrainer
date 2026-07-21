@@ -35,6 +35,7 @@ from .project_gate import (
     project_is_busy,
     project_run_gate,
 )
+from .refinement_service import refinement_vram_error
 from .training import run_grpo, run_sft
 from .training.common import (
     TrainingConfigurationError,
@@ -933,6 +934,11 @@ class TrainingJobManager:
             # changed YAML before the worker thread reached Prepare.
             lease = acquire_project_lease(self._config_path)
             try:
+                budget_error = refinement_vram_error(
+                    read_project_config(self._config_path).data
+                )
+                if budget_error is not None:
+                    raise TrainingServiceError(budget_error)
                 device_lease = acquire_device_lease()
             except Exception:
                 lease.release()

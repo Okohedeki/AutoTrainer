@@ -18,6 +18,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..models import vram_budget_error
 from ..sources import normalize_sft_record
 
 
@@ -479,6 +480,10 @@ def resolve_refinement_policy(config: Mapping[str, Any]) -> dict[str, Any]:
         {"hard", "soft"},
         "refinement.vram",
     )
+    model = get_section(config, "model")
+    budget_error = vram_budget_error(str(model.get("id", "")).strip(), max_gib)
+    if budget_error is not None:
+        raise TrainingConfigurationError(budget_error)
     return {
         "mode": "adapter_only",
         "vram": {"max_gib": max_gib, "enforcement": enforcement},
@@ -959,10 +964,12 @@ def configure_vram_budget(
     return runtime
 
 
-def model_max_memory(refinement: Mapping[str, Any]) -> dict[int, str]:
+def model_max_memory(refinement: Mapping[str, Any]) -> dict[int, str] | None:
     vram = refinement.get("vram", {})
     if not isinstance(vram, Mapping):
         raise TrainingConfigurationError("refinement.vram must be a mapping")
+    if str(vram.get("enforcement", "hard")) == "soft":
+        return None
     limit_gib = float(vram.get("max_gib", 20.0))
     return {0: f"{limit_gib:g}GiB"}
 

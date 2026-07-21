@@ -240,12 +240,20 @@ test("Train exposes adapter-only hard or soft VRAM governance", async () => {
   const api = await source("src/api.ts");
   assert.match(panel, /Adapter-only refinement/);
   assert.match(panel, /Base weights frozen/);
-  assert.match(panel, /Maximum VRAM/);
+  assert.match(panel, /VRAM limit or target/);
+  assert.match(panel, /validated minimum/);
+  assert.match(panel, /min={minimumVram}/);
+  assert.match(panel, /settings === null \? "Loading the model's VRAM requirements/);
+  assert.match(panel, /minimum_vram_gib == null/);
+  assert.doesNotMatch(panel, /minimum_vram_gib === null/);
   assert.match(panel, /Hard limit/);
   assert.match(panel, /CUDA allocator cap/);
   assert.match(panel, /Soft target/);
-  assert.match(panel, /Save GPU limit/);
+  assert.match(panel, /Training may use more/);
+  assert.match(panel, /Save GPU setting/);
+  assert.match(panel, /both hard limits and soft monitoring targets/);
   assert.match(api, /request\("\/api\/v1\/refinement", \{ signal \}\)/);
+  assert.match(api, /minimum_vram_gib/);
   assert.match(api, /max_vram_gib/);
 });
 

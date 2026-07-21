@@ -195,6 +195,59 @@ class TrainingServiceTests(unittest.TestCase):
         run_sft.assert_not_called()
         run_grpo.assert_not_called()
 
+    def test_start_rejects_an_unvalidated_budget_before_claiming_the_gpu_or_outputs(
+        self,
+    ) -> None:
+        payload = default_config()
+        payload["refinement"]["vram"] = {
+            "max_gib": 5,
+            "enforcement": "hard",
+        }
+        original_outputs = {
+            "sft": payload["sft"]["output_dir"],
+            "grpo": payload["grpo"]["output_dir"],
+            "start_from": payload["grpo"]["start_from"],
+        }
+        write_config(self.config_path, payload, overwrite=True)
+        manager = TrainingJobManager(self.config_path)
+
+        with (
+            patch("autotrainer.training_service.acquire_device_lease") as device_lease,
+            patch("autotrainer.training_service._allocate_run_outputs") as allocate,
+            self.assertRaisesRegex(TrainingServiceError, "requires at least 20 GiB"),
+        ):
+            manager.start()
+
+        device_lease.assert_not_called()
+        allocate.assert_not_called()
+        self.assertEqual(manager.snapshot()["status"], "idle")
+        unchanged = load_config(self.config_path).data
+        self.assertEqual(unchanged["sft"]["output_dir"], original_outputs["sft"])
+        self.assertEqual(unchanged["grpo"]["output_dir"], original_outputs["grpo"])
+        self.assertEqual(unchanged["grpo"]["start_from"], original_outputs["start_from"])
+
+    def test_start_rejects_out_of_range_or_nonfinite_legacy_budgets_early(self) -> None:
+        for limit in (193, float("inf")):
+            with self.subTest(limit=limit):
+                payload = default_config()
+                payload["refinement"]["vram"]["max_gib"] = limit
+                write_config(self.config_path, payload, overwrite=True)
+                manager = TrainingJobManager(self.config_path)
+
+                with (
+                    patch("autotrainer.training_service.acquire_device_lease") as device_lease,
+                    patch("autotrainer.training_service._allocate_run_outputs") as allocate,
+                    self.assertRaisesRegex(
+                        TrainingServiceError,
+                        "finite number between 4 and 192",
+                    ),
+                ):
+                    manager.start()
+
+                device_lease.assert_not_called()
+                allocate.assert_not_called()
+                self.assertEqual(manager.snapshot()["status"], "idle")
+
     def test_stage_rereads_the_configuration_after_prepare(self) -> None:
         """Stage selection uses the snapshot Prepare just finished producing."""
 

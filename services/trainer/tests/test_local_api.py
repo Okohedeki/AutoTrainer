@@ -1052,7 +1052,9 @@ class LocalApiTests(unittest.TestCase):
     def test_refinement_endpoint_reads_and_updates_the_user_vram_limit(self) -> None:
         settings = {
             "mode": "adapter_only",
-            "vram": {"max_gib": 12.0, "enforcement": "hard"},
+            "model_id": "Qwen/Qwen3.5-9B",
+            "minimum_vram_gib": 20.0,
+            "vram": {"max_gib": 22.0, "enforcement": "hard"},
         }
         with patch(
             "autotrainer.local_api.get_refinement_settings",
@@ -1070,13 +1072,13 @@ class LocalApiTests(unittest.TestCase):
             status, result = self.request(
                 "POST",
                 "/api/v1/refinement",
-                {"max_vram_gib": 12, "enforcement": "hard"},
+                {"max_vram_gib": 22, "enforcement": "hard"},
             )
         self.assertEqual(status, 200)
         self.assertEqual(result, settings)
         set_settings.assert_called_once_with(
             self.config_path.resolve(),
-            max_vram_gib=12.0,
+            max_vram_gib=22.0,
             enforcement="hard",
         )
 
@@ -1087,6 +1089,15 @@ class LocalApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(result["error"]["code"], "invalid_request")
+
+        status, result = self.request(
+            "POST",
+            "/api/v1/refinement",
+            {"max_vram_gib": 5, "enforcement": "soft"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+        self.assertIn("requires at least 20 GiB", result["error"]["message"])
 
     def test_language_evaluation_endpoint_reads_and_updates_the_suite(self) -> None:
         workspace = {

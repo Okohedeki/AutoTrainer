@@ -23,6 +23,7 @@ from .doctor import run_doctor
 from .model_cache import ModelCacheError, require_materialized_model
 from .planner import build_plan
 from .project_gate import project_prepare_gate
+from .refinement_service import refinement_vram_error
 from .sources import scan_sources
 from .training import (
     resolve_grpo_recipe,
@@ -325,6 +326,9 @@ def _prepare_project_owned(
     )
     validation_report = validate_mapping(config.data, root=config.root)
     validation_errors = list(validation_report.errors)
+    resource_error = refinement_vram_error(config.data)
+    if resource_error is not None and resource_error not in validation_errors:
+        validation_errors.append(resource_error)
     later_validation = [
         error for error in validation_errors if _proof_validation_error(error, config.data)
     ]
@@ -467,7 +471,14 @@ def _prepare_project_owned(
     next_action: dict[str, str] | None = None
     if blocking_validation:
         steps = [_step("validate", "blocked"), _step("sources", "waiting"), _step("compile", "waiting"), _step("runtime", "waiting")]
-        next_action = {"title": "Fix project configuration", "detail": blocking_validation[0]}
+        next_action = {
+            "title": (
+                "Increase the VRAM setting"
+                if blocking_validation[0] == resource_error
+                else "Fix project configuration"
+            ),
+            "detail": blocking_validation[0],
+        }
     elif blocking_scan or training_scan.get("errors"):
         source_error = blocking_scan or [str(value) for value in training_scan.get("errors", [])]
         steps = [_step("validate", "complete"), _step("sources", "blocked"), _step("compile", "waiting"), _step("runtime", "waiting")]
