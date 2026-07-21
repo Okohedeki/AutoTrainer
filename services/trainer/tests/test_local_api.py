@@ -1128,6 +1128,69 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(result, workspace)
         set_language.assert_called_once_with(self.config_path.resolve(), "python")
 
+    def test_evaluation_pack_endpoint_lists_and_installs_a_pack(self) -> None:
+        workspace = {
+            "packs": [
+                {
+                    "id": "python-core-v1",
+                    "label": "Python core",
+                    "language": "python",
+                    "license": "Apache-2.0",
+                    "task_count": 5,
+                    "independent_group_count": 5,
+                    "description": "Five held-out Python repository tasks.",
+                    "status": "available",
+                    "selected": False,
+                    "installed": False,
+                    "runtime_image": "autotrainer/python-eval@sha256:1234",
+                    "checks": ["pytest", "hidden verifier"],
+                }
+            ],
+            "selected_pack": None,
+        }
+        with patch(
+            "autotrainer.local_api.list_evaluation_packs",
+            return_value=workspace,
+        ) as list_packs:
+            status, result = self.request("GET", "/api/v1/evaluation/packs")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, workspace)
+        list_packs.assert_called_once_with(self.config_path.resolve())
+
+        installed = {
+            **workspace,
+            "packs": [
+                {
+                    **workspace["packs"][0],
+                    "status": "installed",
+                    "selected": True,
+                    "installed": True,
+                }
+            ],
+            "selected_pack": "python-core-v1",
+        }
+        with patch(
+            "autotrainer.local_api.install_evaluation_pack",
+            return_value=installed,
+        ) as install_pack:
+            status, result = self.request(
+                "POST",
+                "/api/v1/evaluation/packs",
+                {"pack_id": "python-core-v1"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(result, installed)
+        install_pack.assert_called_once_with(
+            self.config_path.resolve(),
+            "python-core-v1",
+        )
+
+    def test_evaluation_pack_install_requires_pack_id(self) -> None:
+        status, result = self.request("POST", "/api/v1/evaluation/packs", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"]["code"], "invalid_request")
+        self.assertEqual(result["error"]["message"], "request is missing required fields")
+
     def test_active_training_returns_a_project_busy_conflict(self) -> None:
         with project_run_gate(self.config_path):
             status, result = self.request("POST", "/api/v1/prepare", {})

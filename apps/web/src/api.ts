@@ -711,6 +711,26 @@ export type LanguageEvaluationWorkspace = {
   training_language_counts: Record<string, number>;
 };
 
+export type EvaluationPack = {
+  id: string;
+  label: string;
+  language: string;
+  license: string;
+  task_count: number;
+  independent_group_count: number;
+  description: string;
+  status: "available" | "installed" | string;
+  selected: boolean;
+  installed: boolean;
+  runtime_image: string;
+  checks: string[];
+};
+
+export type EvaluationPackWorkspace = {
+  packs: EvaluationPack[];
+  selected_pack: string | null;
+};
+
 export type EvaluationEvent = {
   sequence: number;
   type?: string;
@@ -1038,6 +1058,17 @@ export async function setEvaluationLanguage(language: LanguageEvaluationWorkspac
   return request("/api/v1/evaluation/language", {
     method: "POST",
     body: JSON.stringify({ language }),
+  });
+}
+
+export async function getEvaluationPacks(signal?: AbortSignal): Promise<EvaluationPackWorkspace> {
+  return request("/api/v1/evaluation/packs", { signal });
+}
+
+export async function installEvaluationPack(packId: string): Promise<EvaluationPackWorkspace> {
+  return request("/api/v1/evaluation/packs", {
+    method: "POST",
+    body: JSON.stringify({ pack_id: packId }),
   });
 }
 

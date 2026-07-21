@@ -299,6 +299,31 @@ test("Evaluate freezes weights, runs once, and renders real trial and verifier e
   assert.doesNotMatch(panel, /planEvaluation|Math\.random|type="range"|token counter|\bETA\b/i);
 });
 
+test("Evaluate offers truthful shipped Python benchmark packs without promoting manual setup", async () => {
+  const language = await source("src/LanguageEvaluationPanel.tsx");
+  const api = await source("src/api.ts");
+  const packSurface = language.slice(language.indexOf("packWorkspace &&"), language.indexOf("{error &&"));
+  assert.match(api, /export type EvaluationPackWorkspace/);
+  for (const field of ["language", "license", "task_count", "independent_group_count", "installed", "runtime_image", "checks"]) {
+    assert.match(api, new RegExp(field));
+  }
+  assert.match(api, /request\("\/api\/v1\/evaluation\/packs", \{ signal \}\)/);
+  assert.match(api, /body: JSON\.stringify\(\{ pack_id: packId \}\)/);
+  assert.match(language, /getEvaluationPacks/);
+  assert.match(language, /installEvaluationPack/);
+  assert.match(language, /Local benchmark packs/);
+  assert.match(packSurface, /packWorkspace\.packs\.map/);
+  for (const copy of ["Python", "independent groups", "License", "Checks", "Pinned runtime", "Install and use"]) {
+    assert.match(packSurface, new RegExp(copy));
+  }
+  assert.match(packSurface, /pack\.installed/);
+  assert.match(packSurface, /pack\.selected/);
+  assert.match(language, /getLanguageEvaluation\(\),\s+getEvaluationPacks\(\)/);
+  assert.match(language, /Data and choose Lock new version/);
+  assert.match(language, /Manual task authoring stays in the advanced section of Data/);
+  assert.doesNotMatch(packSurface, /TypeScript|React|C#|C\+\+/);
+});
+
 test("Serve manages a real local OpenAI-compatible host and test request", async () => {
   const panel = await source("src/ServePanel.tsx");
   const api = await source("src/api.ts");

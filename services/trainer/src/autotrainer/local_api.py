@@ -27,6 +27,10 @@ from .dataset_service import (
     sync_dataset_sources,
 )
 from .evaluation_service import EvaluationJobManager
+from .evaluation_pack_service import (
+    install_evaluation_pack,
+    list_evaluation_packs,
+)
 from .example_authoring_service import (
     create_authored_example,
     list_authored_examples,
@@ -703,6 +707,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         get_language_evaluation_workspace(self.server.config_path),
                     )
+                elif path == f"{API_PREFIX}/evaluation/packs":
+                    _query_values(query, allowed=set())
+                    self._send_json(
+                        HTTPStatus.OK,
+                        list_evaluation_packs(self.server.config_path),
+                    )
                 elif path == f"{API_PREFIX}/evaluation/events":
                     self._send_json(
                         HTTPStatus.OK,
@@ -1014,6 +1024,19 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         set_evaluation_language(
                             self.server.config_path,
                             _required_text(payload, "language"),
+                        ),
+                    )
+                elif path == f"{API_PREFIX}/evaluation/packs":
+                    _require_keys(
+                        payload,
+                        allowed={"pack_id"},
+                        required={"pack_id"},
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        install_evaluation_pack(
+                            self.server.config_path,
+                            _required_text(payload, "pack_id"),
                         ),
                     )
                 elif path == f"{API_PREFIX}/prepare":
