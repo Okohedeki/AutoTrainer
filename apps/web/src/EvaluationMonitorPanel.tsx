@@ -14,6 +14,7 @@ import LanguageEvaluationPanel from "./LanguageEvaluationPanel";
 import TelemetryChart, { type ChartPoint, type ChartSeries } from "./TelemetryChart";
 
 const liveStatuses = new Set(["queued", "running"]);
+const runnableReadinessStatuses = new Set(["ready", "inputs_ready"]);
 const rubricKeys = ["design_rules", "patch_quality", "regression_safety", "responsive_rules", "task_tests"] as const;
 const rubricLabels: Record<(typeof rubricKeys)[number], string> = {
   design_rules: "Design rules",
@@ -198,7 +199,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   const resultsTruncated = Boolean(benchmark?.results_truncated || workspace?.job.results_truncated);
   const trialsTruncated = Boolean(benchmark?.trials_truncated);
   const jobLive = liveStatuses.has(workspace?.job.status ?? "idle");
-  const canRun = workspace?.readiness.status === "ready" && !jobLive;
+  const canRun = runnableReadinessStatuses.has(workspace?.readiness.status ?? "") && !jobLive;
   const benchmarkProgress = benchmark?.total ? benchmark.completed / benchmark.total : 0;
 
   // Each line advances on that arm's own scored trials. Pooling reference and
