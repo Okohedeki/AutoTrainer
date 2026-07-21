@@ -228,6 +228,10 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
   const proofDescription = resultsTruncated
     ? `Separate per-arm means over the latest ${results.length} returned trials, not all ${benchmark?.completed ?? workspace?.job.completed ?? results.length} scored trials.`
     : `Separate per-arm means from ${results.length} scored trial${results.length === 1 ? "" : "s"}; no values are pooled across models.`;
+  const armObservationSummary = arms.map((arm) => {
+    const count = results.filter((result) => result.arm_id === arm.id).length;
+    return `${arm.label}: ${count > 0 ? `${count} scored` : "no scored trials"}`;
+  }).join(" · ");
   const report = benchmark?.report ?? null;
   const decision = report?.decision;
   const interval = decision?.confidence_interval;
@@ -303,6 +307,7 @@ export default function EvaluationMonitorPanel({ onOpenData }: { onOpenData: () 
           <header className="panel-header"><div><p className="panel-kicker">Observed proof</p><h2>Live evaluation rubric</h2></div><span className={`status-chip ${suiteTone(benchmark)}`}>{phaseLabel(benchmark?.phase || "idle")}</span></header>
           {jobLive && workspace?.job.current_trial && <div className="current-trial" role="status"><span className="pulse-marker" aria-hidden="true" /><div><strong>{phaseLabel(workspace.job.phase)}</strong><p>{workspace.job.message}</p></div><dl><div><dt>Task</dt><dd>{workspace.job.current_trial.task_id}</dd></div><div><dt>Arm</dt><dd>{workspace.job.current_trial.arm_id}</dd></div><div><dt>Seed</dt><dd>{workspace.job.current_trial.seed}</dd></div></dl></div>}
           {resultsTruncated && <div className="evidence-disclosure" role="status"><strong>Graph window is truncated.</strong><span>The backend returned only its latest result window, so these lines are visible-window means rather than whole-run means.</span></div>}
+          {arms.length > 0 && <div className="evidence-disclosure" role="status"><strong>Observed model coverage</strong><span>{armObservationSummary}</span><span>An arm with no scored trials is waiting for evidence; AutoTrainer does not treat it as zero.</span></div>}
           <TelemetryChart title="Reward and verified success by model arm" description={proofDescription} series={proofSeries} fixedY={{ min: 0, max: 1 }} emptyMessage="Separate model lines begin after the trusted verifier scores the first generated result." />
           <div className="rubric-arm-switch" aria-label="Rubric model arm">
             <span>Rubric detail</span>

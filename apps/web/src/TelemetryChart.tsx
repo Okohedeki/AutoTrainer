@@ -71,7 +71,7 @@ export default function TelemetryChart({
               >
                 <i style={{ background: item.color }} aria-hidden="true" />
                 <span>{item.label}</span>
-                {latest && <code>{latest.y.toFixed(3)}</code>}
+                <code>{latest ? latest.y.toFixed(3) : "No data"}</code>
               </button>
             );
           })}

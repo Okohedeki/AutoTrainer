@@ -275,6 +275,8 @@ test("Evaluate freezes weights, runs once, and renders real trial and verifier e
   assert.match(panel, /Reward and verified success by model arm/);
   assert.match(panel, /Separate per-arm means/);
   assert.match(panel, /no values are pooled across models/);
+  assert.match(panel, /Observed model coverage/);
+  assert.match(panel, /does not treat it as zero/);
   assert.match(panel, /Rubric components for one model/);
   assert.match(panel, /Did training improve the model\?/);
   assert.match(panel, /Candidate minus reference/);
@@ -333,6 +335,7 @@ test("charts render observed values and truthful empty states", async () => {
   ]).then((files) => files.join("\n"));
   assert.match(chart, /plots only observed backend values/);
   assert.match(chart, /Waiting for observed values/);
+  assert.match(chart, /No data/);
   assert.match(chart, /item\.points\.map/);
   assert.doesNotMatch(visibleUi, /Math\.random|fake data|demo values|token counter|estimated time/i);
 });
