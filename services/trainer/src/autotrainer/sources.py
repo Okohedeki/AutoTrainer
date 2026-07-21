@@ -950,8 +950,9 @@ def _clone_repository(
     destination: Path,
     *,
     shallow_remote: bool = False,
+    include_history: bool = False,
 ) -> tuple[bool, str]:
-    """Clone a repository without downloading irrelevant remote history."""
+    """Clone a repository with the commit graph required by its declared use."""
 
     environment = os.environ.copy()
     environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"})
@@ -964,9 +965,13 @@ def _clone_repository(
         "--no-recurse-submodules",
     ]
     if shallow_remote:
-        # A training source needs one immutable tree, not years of Git history.
-        # Missing explicit revisions are fetched narrowly after this first clone.
-        arguments.extend(["--filter=blob:none", "--depth=1"])
+        # Blob filtering keeps large source trees lazy in both modes. Accepted-
+        # change sources additionally need the complete commit graph so merged
+        # PR ancestry can be proven against the pinned revision. Other source
+        # roles need only one immutable tree and retain the depth-one clone.
+        arguments.append("--filter=blob:none")
+        if not include_history:
+            arguments.append("--depth=1")
     arguments.extend([uri, str(destination)])
     try:
         completed = subprocess.run(
@@ -1121,10 +1126,13 @@ def materialize_repository(
     try:
         clone_started = True
         remote_source = _is_remote(uri)
+        roles = set(_as_string_list(source.get("roles")))
+        include_history = remote_source and "history" in roles
         ok, detail = _clone_repository(
             clone_uri,
             local_path,
             shallow_remote=remote_source,
+            include_history=include_history,
         )
         if not ok:
             raise RuntimeError(f"cannot clone repository source {requested_id!r}: {detail}")
@@ -1138,11 +1146,11 @@ def materialize_repository(
         if not ok and remote_source:
             # A requested branch, tag, or SHA may not be the default branch tip
             # included by the depth-one clone. Fetch only that requested object.
+            fetch_arguments = ["fetch", "--quiet"]
+            fetch_arguments.append("--filter=blob:none" if include_history else "--depth=1")
             fetched, fetch_detail = _git(
                 local_path,
-                "fetch",
-                "--quiet",
-                "--depth=1",
+                *fetch_arguments,
                 "origin",
                 revision,
                 timeout=300,

@@ -483,6 +483,55 @@ class RepositoryMaterializationTests(unittest.TestCase):
         self.assertIn("--no-recurse-submodules", arguments)
         self.assertEqual(run.call_args.kwargs["timeout"], 300)
 
+    def test_remote_history_clone_uses_filtered_complete_graph(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch("autotrainer.sources.subprocess.run", return_value=completed) as run:
+            ok, detail = _clone_repository(
+                "https://github.com/apache/airflow.git",
+                Path("managed-airflow"),
+                shallow_remote=True,
+                include_history=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "")
+        arguments = run.call_args.args[0]
+        self.assertIn("--filter=blob:none", arguments)
+        self.assertNotIn("--depth=1", arguments)
+
+    def test_history_source_materialization_requests_complete_remote_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, commit = create_bare_remote(root)
+            config = self.config(remote, commit)
+            config["sources"][0]["uri"] = "https://github.com/owner/repo.git"
+            config["sources"][0]["roles"] = ["history"]
+
+            def clone_local(_uri: str, destination: Path, **_options: object) -> tuple[bool, str]:
+                subprocess.run(
+                    ["git", "clone", "--quiet", "--no-checkout", str(remote), str(destination)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                return True, ""
+
+            with patch(
+                "autotrainer.sources._clone_repository",
+                side_effect=clone_local,
+            ) as clone:
+                result = materialize_repository(config, root, "remote")
+
+            self.assertEqual(result["commit"], commit)
+            self.assertTrue(clone.call_args.kwargs["shallow_remote"])
+            self.assertTrue(clone.call_args.kwargs["include_history"])
+
     def test_rejects_undeclared_non_repository_and_unpinned_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

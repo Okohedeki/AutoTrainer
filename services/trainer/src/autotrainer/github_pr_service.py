@@ -122,14 +122,156 @@ def _github_request(owner: str, repository: str) -> Sequence[object]:
     return payload
 
 
-def _git_is_ancestor(repository: Path, commit: str, revision: str) -> bool:
-    environment = {
-        **os.environ,
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-    }
+def _git_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return environment
+
+
+def _is_shallow_repository(repository: Path) -> bool:
     try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.as_posix()}",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "--is-shallow-repository",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            env=_git_environment(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        raise GitHubPullRequestError(
+            "The pinned repository could not inspect its Git history."
+        ) from error
+    value = completed.stdout.strip().casefold()
+    if completed.returncode or value not in {"true", "false"}:
+        raise GitHubPullRequestError(
+            "The pinned repository could not inspect its Git history."
+        )
+    return value == "true"
+
+
+def _head_commit(repository: Path) -> str:
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.as_posix()}",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            env=_git_environment(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        raise GitHubPullRequestError(
+            "The pinned repository could not verify its checked-out revision."
+        ) from error
+    commit = completed.stdout.strip().casefold()
+    if completed.returncode or not _COMMIT.fullmatch(commit):
+        raise GitHubPullRequestError(
+            "The pinned repository could not verify its checked-out revision."
+        )
+    return commit
+
+
+def _ensure_complete_history(repository: Path, revision: str) -> None:
+    """Upgrade legacy depth-one clones before proving merged-PR ancestry."""
+
+    if _head_commit(repository) != revision.casefold():
+        raise GitHubPullRequestError(
+            "The pinned repository checkout no longer matches its configured revision."
+        )
+    if not _is_shallow_repository(repository):
+        return
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.as_posix()}",
+                "-C",
+                str(repository),
+                "fetch",
+                "--quiet",
+                "--filter=blob:none",
+                "--unshallow",
+                "--no-tags",
+                "origin",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=300,
+            env=_git_environment(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        raise GitHubPullRequestError(
+            "The pinned repository has incomplete shallow history and AutoTrainer "
+            "could not load the commit graph required to verify merged pull requests."
+        ) from error
+    if completed.returncode or _is_shallow_repository(repository):
+        raise GitHubPullRequestError(
+            "The pinned repository has incomplete shallow history and AutoTrainer "
+            "could not load the commit graph required to verify merged pull requests."
+        )
+    if _head_commit(repository) != revision.casefold():
+        raise GitHubPullRequestError(
+            "The pinned repository checkout changed while its history was refreshed."
+        )
+
+
+def _git_is_ancestor(repository: Path, commit: str, revision: str) -> bool:
+    if _is_shallow_repository(repository):
+        raise GitHubPullRequestError(
+            "The pinned repository has incomplete shallow history; refresh the source "
+            "before importing merged pull requests."
+        )
+    try:
+        object_check = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.as_posix()}",
+                "-C",
+                str(repository),
+                "cat-file",
+                "-e",
+                f"{commit}^{{commit}}",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=60,
+            env=_git_environment(),
+        )
+        if object_check.returncode:
+            raise GitHubPullRequestError(
+                "The pinned repository does not contain the commit graph required "
+                "to verify a merged pull request."
+            )
         completed = subprocess.run(
             [
                 "git",
@@ -145,13 +287,21 @@ def _git_is_ancestor(repository: Path, commit: str, revision: str) -> bool:
             check=False,
             capture_output=True,
             timeout=20,
-            env=environment,
+            env=_git_environment(),
         )
+    except GitHubPullRequestError:
+        raise
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
         raise GitHubPullRequestError(
             "The pinned repository could not verify merged PR commits."
         ) from error
-    return completed.returncode == 0
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise GitHubPullRequestError(
+        "The pinned repository could not verify merged PR ancestry from its commit graph."
+    )
 
 
 def _pull_request_record(value: object) -> dict[str, Any] | None:
@@ -237,6 +387,7 @@ def sync_merged_pull_requests(config_path: str | Path) -> dict[str, Any]:
             raise GitHubPullRequestError(
                 "GitHub PR discovery requires a pinned local repository checkout."
             )
+        _ensure_complete_history(repository, revision)
 
         records: list[dict[str, Any]] = []
         skipped = 0
