@@ -305,6 +305,13 @@ def resolve_model_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], lis
     trust_remote_code = bool_value(section, "trust_remote_code", False, "model")
     thinking = bool_value(section, "thinking", False, "model")
     dtype = choice_value(section, "dtype", "bfloat16", {"bfloat16"}, "model")
+    attn_implementation = choice_value(
+        section,
+        "attn_implementation",
+        "sdpa",
+        {"eager", "sdpa"},
+        "model",
+    )
     if not text_only:
         raise TrainingConfigurationError("model.text_only must remain true in V1")
     if trust_remote_code:
@@ -328,9 +335,60 @@ def resolve_model_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], lis
             "trust_remote_code": False,
             "thinking": False,
             "dtype": dtype,
+            "attn_implementation": attn_implementation,
         },
         warnings,
     )
+
+
+def resolve_stage_optimization(
+    section: Mapping[str, Any], prefix: str
+) -> dict[str, Any]:
+    """Resolve the explicit, behavior-preserving Transformers optimizer baseline."""
+
+    use_liger_kernel = bool_value(section, "use_liger_kernel", False, prefix)
+    if use_liger_kernel:
+        raise TrainingConfigurationError(
+            f"{prefix}.use_liger_kernel must remain false until AutoTrainer ships a "
+            "pinned Qwen3.5 QLoRA numerical contract for Liger"
+        )
+    return {
+        "optim": choice_value(
+            section,
+            "optim",
+            "adamw_torch_fused",
+            {"adamw_torch", "adamw_torch_fused"},
+            prefix,
+        ),
+        "lr_scheduler_type": choice_value(
+            section,
+            "lr_scheduler_type",
+            "linear",
+            {"cosine", "linear"},
+            prefix,
+        ),
+        "warmup_steps": int_value(section, "warmup_steps", 0, prefix, minimum=0),
+        "weight_decay": float_value(
+            section, "weight_decay", 0.0, prefix, minimum=0.0, maximum=1.0
+        ),
+        "max_grad_norm": float_value(
+            section, "max_grad_norm", 1.0, prefix, minimum=0.0, maximum=100.0
+        ),
+        "use_liger_kernel": False,
+    }
+
+
+def verify_effective_attention_backend(model: Any, requested: str) -> str:
+    """Refuse a silent attention fallback that would invalidate comparisons."""
+
+    config = getattr(model, "config", None)
+    effective = getattr(config, "_attn_implementation", None)
+    if effective != requested:
+        raise TrainingRuntimeError(
+            "The loaded model did not honor model.attn_implementation: "
+            f"requested={requested!r}, effective={effective!r}"
+        )
+    return str(effective)
 
 
 def resolve_qlora_recipe(config: Mapping[str, Any]) -> dict[str, Any]:

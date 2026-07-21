@@ -28,7 +28,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(report.errors, ())
         self.assertEqual(payload["model"]["id"], "Qwen/Qwen3.5-9B")
         self.assertEqual(payload["model"]["quantization"]["quant_type"], "nf4")
+        self.assertEqual(payload["model"]["attn_implementation"], "sdpa")
+        self.assertEqual(payload["sft"]["optim"], "adamw_torch_fused")
+        self.assertFalse(payload["grpo"]["use_liger_kernel"])
         self.assertEqual(payload["grpo"]["start_from"], ".autotrainer/checkpoints/sft")
+
+    def test_unvalidated_training_kernels_fail_closed(self) -> None:
+        payload = default_config()
+        payload["sft"]["use_liger_kernel"] = True
+
+        report = validate_mapping(payload)
+
+        self.assertTrue(any("use_liger_kernel must remain false" in error for error in report.errors))
 
     def test_conditional_stage_recipes_validate_honestly(self) -> None:
         teach = default_config()

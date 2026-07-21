@@ -115,6 +115,7 @@ model:
   revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
   loader: qwen3_5_text
   trust_remote_code: false
+  attn_implementation: sdpa
   dtype: bfloat16
   max_sequence_length: 2048
   quantization:

@@ -23,6 +23,7 @@ from autotrainer.training.common import (  # noqa: E402
     configure_vram_budget,
     model_max_memory,
     validate_sft_token_lengths,
+    verify_effective_attention_backend,
     verify_adapter_tree_identity,
 )
 from autotrainer.training.grpo import (  # noqa: E402
@@ -137,6 +138,10 @@ class TrainingRecipeTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(result["recipe"]["stage"], "sft")
         self.assertEqual(result["recipe"]["sft"]["effective_batch_size"], 8)
+        self.assertEqual(result["recipe"]["model"]["attn_implementation"], "sdpa")
+        self.assertEqual(result["recipe"]["sft"]["optim"], "adamw_torch_fused")
+        self.assertEqual(result["recipe"]["sft"]["lr_scheduler_type"], "linear")
+        self.assertFalse(result["recipe"]["sft"]["use_liger_kernel"])
         self.assertEqual(result["recipe"]["sft"]["per_device_eval_batch_size"], 1)
         self.assertEqual(
             result["recipe"]["sft"]["dataset"]["path"], str(self.sft_dataset)
@@ -192,6 +197,27 @@ class TrainingRecipeTests(unittest.TestCase):
 
         cuda.set_per_process_memory_fraction.assert_not_called()
         self.assertEqual(runtime["vram_enforcement"], "soft")
+
+    def test_attention_backend_must_be_honored_without_fallback(self) -> None:
+        model = type(
+            "Model",
+            (),
+            {"config": type("Config", (), {"_attn_implementation": "sdpa"})()},
+        )()
+        self.assertEqual(verify_effective_attention_backend(model, "sdpa"), "sdpa")
+        with self.assertRaisesRegex(TrainingRuntimeError, "did not honor"):
+            verify_effective_attention_backend(model, "eager")
+
+    def test_unvalidated_liger_kernel_is_rejected_before_training_imports(self) -> None:
+        config = self.config()
+        config["sft"]["use_liger_kernel"] = True
+        with self.assertRaisesRegex(TrainingConfigurationError, "numerical contract"):
+            run_sft(
+                config,
+                project_root=self.project_root,
+                output_dir=Path("artifacts/sft-output"),
+                dry_run=True,
+            )
 
     def test_non_adapter_trainable_parameter_is_rejected(self) -> None:
         adapter = MagicMock(requires_grad=True)

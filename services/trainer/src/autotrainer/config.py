@@ -113,6 +113,41 @@ def _positive_int(section: Mapping[str, Any], key: str, errors: list[str]) -> No
         errors.append(f"{key} must be a positive integer")
 
 
+def _validate_stage_optimization(
+    section: Mapping[str, Any], label: str, errors: list[str]
+) -> None:
+    if section.get("optim", "adamw_torch_fused") not in {
+        "adamw_torch",
+        "adamw_torch_fused",
+    }:
+        errors.append(f"{label}.optim must be adamw_torch or adamw_torch_fused")
+    if section.get("lr_scheduler_type", "linear") not in {"linear", "cosine"}:
+        errors.append(f"{label}.lr_scheduler_type must be linear or cosine")
+    warmup_steps = section.get("warmup_steps", 0)
+    if (
+        not isinstance(warmup_steps, int)
+        or isinstance(warmup_steps, bool)
+        or warmup_steps < 0
+    ):
+        errors.append(f"{label}.warmup_steps must be a non-negative integer")
+    for key, default, maximum in (
+        ("weight_decay", 0.0, 1.0),
+        ("max_grad_norm", 1.0, 100.0),
+    ):
+        value = section.get(key, default)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not 0 <= float(value) <= maximum
+        ):
+            errors.append(f"{label}.{key} must be between 0 and {maximum:g}")
+    if section.get("use_liger_kernel", False) is not False:
+        errors.append(
+            f"{label}.use_liger_kernel must remain false until the pinned "
+            "Qwen3.5 QLoRA kernel contract is validated"
+        )
+
+
 def _resolved_config_path(value: Any, root: Path | None) -> Path | None:
     """Return one canonical identity for cross-section path comparisons."""
 
@@ -497,6 +532,8 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         errors.append("model.trust_remote_code must be false in V1")
     if model.get("loader") not in {"auto_text_causal_lm", "qwen3_5_text"}:
         errors.append("model.loader must be auto_text_causal_lm or qwen3_5_text")
+    if model.get("attn_implementation", "sdpa") not in {"sdpa", "eager"}:
+        errors.append("model.attn_implementation must be sdpa or eager")
     _positive_int(model, "max_sequence_length", errors)
 
     quantization = _mapping(model.get("quantization"), "model.quantization", errors)
@@ -579,6 +616,7 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
         _positive_int(sft, "max_length", errors)
         if not isinstance(sft.get("learning_rate"), (int, float)) or sft.get("learning_rate", 0) <= 0:
             errors.append("sft.learning_rate must be positive")
+        _validate_stage_optimization(sft, "sft", errors)
 
     grpo = _mapping(data.get("grpo"), "grpo", errors)
     grpo_enabled = grpo.get("enabled", True)
@@ -597,6 +635,7 @@ def validate_mapping(data: Mapping[str, Any], *, root: Path | None = None) -> Va
             _positive_int(grpo, key, errors)
         if grpo.get("algorithm") != "grpo":
             errors.append("grpo.algorithm must be grpo")
+        _validate_stage_optimization(grpo, "grpo", errors)
         effective_batch = grpo.get("per_device_train_batch_size", 0) * grpo.get(
             "gradient_accumulation_steps", 0
         )
@@ -720,6 +759,7 @@ def default_config(
             "cache_dir": ".autotrainer/model-cache",
             "loader": "qwen3_5_text" if model_id == "Qwen/Qwen3.5-9B" else "auto_text_causal_lm",
             "trust_remote_code": False,
+            "attn_implementation": "sdpa",
             "dtype": "bfloat16",
             "max_sequence_length": 2048,
             "quantization": {
@@ -749,6 +789,12 @@ def default_config(
             "per_device_train_batch_size": 1,
             "gradient_accumulation_steps": 8,
             "learning_rate": 0.0001,
+            "optim": "adamw_torch_fused",
+            "lr_scheduler_type": "linear",
+            "warmup_steps": 0,
+            "weight_decay": 0.0,
+            "max_grad_norm": 1.0,
+            "use_liger_kernel": False,
             "max_length": 2048,
             "gradient_checkpointing": True,
             "assistant_only_loss": True,
@@ -773,6 +819,12 @@ def default_config(
             "calibration_generations": 4,
             "generation_batch_size": 2,
             "learning_rate": 0.00001,
+            "optim": "adamw_torch_fused",
+            "lr_scheduler_type": "linear",
+            "warmup_steps": 0,
+            "weight_decay": 0.0,
+            "max_grad_norm": 1.0,
+            "use_liger_kernel": False,
             "max_steps": 100,
             "max_completion_length": 2048,
             "max_tool_calling_iterations": 8,

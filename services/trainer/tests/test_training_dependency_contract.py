@@ -45,7 +45,7 @@ class TrainingDependencyContractTests(unittest.TestCase):
                 self.assertEqual(installed[distribution].split("+", 1)[0], expected)
 
     def test_grpo_environment_factory_api_is_still_available(self) -> None:
-        from trl import GRPOConfig, GRPOTrainer
+        from trl import GRPOConfig, GRPOTrainer, SFTConfig
 
         trainer_parameters = inspect.signature(GRPOTrainer.__init__).parameters
         self.assertIn("environment_factory", trainer_parameters)
@@ -57,6 +57,17 @@ class TrainingDependencyContractTests(unittest.TestCase):
             "use_vllm",
         ):
             self.assertIn(name, fields)
+        for config_type in (SFTConfig, GRPOConfig):
+            optimization_fields = getattr(config_type, "__dataclass_fields__", {})
+            for name in (
+                "optim",
+                "lr_scheduler_type",
+                "warmup_steps",
+                "weight_decay",
+                "max_grad_norm",
+                "use_liger_kernel",
+            ):
+                self.assertIn(name, optimization_fields)
 
     def test_grpo_adds_the_response_schema_before_deriving_training_template(self) -> None:
         from trl import GRPOTrainer

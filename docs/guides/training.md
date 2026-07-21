@@ -129,6 +129,12 @@ If the backend stops during a job, the durable record is marked interrupted when
 
 The reference recipe uses one 9B model, two GRPO generations, no vLLM, and one environment at a time. It is designed to complete on one GPU, not to keep a trainer, reference model, serving process, and multiple sandboxes resident together.
 
+For comparable refinement experiments, AutoTrainer explicitly requests the
+PyTorch SDPA attention backend and records the optimizer, scheduler, warmup,
+weight decay, gradient clipping, and seed in each resolved recipe. The eager
+attention backend is available as a controlled baseline. Unsupported kernels
+fail closed instead of silently falling back to another implementation.
+
 An exclusive cross-process GPU-0 lease covers:
 
 - SFT/GRPO training;

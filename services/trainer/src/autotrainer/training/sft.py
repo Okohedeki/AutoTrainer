@@ -26,10 +26,12 @@ from .common import (
     mark_output_directory_complete,
     model_max_memory,
     resolve_input_file,
+    resolve_stage_optimization,
     validate_reference_dependencies,
     validate_fresh_output_directory,
     validate_sft_token_lengths,
     verify_dataset_identity,
+    verify_effective_attention_backend,
     verify_saved_adapter_provenance,
 )
 
@@ -128,6 +130,7 @@ def resolve_sft_recipe(
         "logging_steps": int_value(section, "logging_steps", 5, "sft"),
         "save_steps": int_value(section, "save_steps", 50, "sft"),
         "save_total_limit": int_value(section, "save_total_limit", 2, "sft"),
+        **resolve_stage_optimization(section, "sft"),
     }
     validate_fresh_output_directory(Path(recipe["output_dir"]))
     return as_serializable(recipe)
@@ -226,6 +229,12 @@ def run_sft(
             device_map={"": 0},
             max_memory=model_max_memory(recipe["refinement"]),
             trust_remote_code=False,
+            attn_implementation=model_recipe["attn_implementation"],
+        )
+        model_recipe["effective_attn_implementation"] = (
+            verify_effective_attention_backend(
+                base_model, model_recipe["attn_implementation"]
+            )
         )
         if base_model.__class__.__name__ != SUPPORTED_MODEL_CLASS:
             raise TrainingRuntimeError(
@@ -266,6 +275,12 @@ def run_sft(
             per_device_eval_batch_size=stage["per_device_eval_batch_size"],
             gradient_accumulation_steps=stage["gradient_accumulation_steps"],
             learning_rate=stage["learning_rate"],
+            optim=stage["optim"],
+            lr_scheduler_type=stage["lr_scheduler_type"],
+            warmup_steps=stage["warmup_steps"],
+            weight_decay=stage["weight_decay"],
+            max_grad_norm=stage["max_grad_norm"],
+            use_liger_kernel=stage["use_liger_kernel"],
             num_train_epochs=stage["num_train_epochs"],
             bf16=stage["bf16"],
             tf32=stage["tf32"],

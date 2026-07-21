@@ -57,6 +57,7 @@ model:
   cache_dir: .autotrainer/model-cache
   loader: qwen3_5_text
   trust_remote_code: false
+  attn_implementation: sdpa
   dtype: bfloat16
   max_sequence_length: 2048
   quantization:
@@ -65,6 +66,12 @@ model:
     double_quant: true
     compute_dtype: bfloat16
 ```
+
+`attn_implementation` is explicit so two training runs cannot silently use
+different attention code because their optional packages differ. `sdpa` is the
+validated baseline; `eager` is available as a comparison arm. Flash Attention
+is not accepted until its package and Qwen3.5 hybrid-attention contract are
+pinned and tested.
 
 The guarded trainer verifies the supported text-only class and refuses image/processor loading. Hugging Face search may return other models, but an unverified result does not become V1-compatible by appearing in search.
 
@@ -144,6 +151,12 @@ sft:
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 8
   learning_rate: 0.0001
+  optim: adamw_torch_fused
+  lr_scheduler_type: linear
+  warmup_steps: 0
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  use_liger_kernel: false
   max_length: 2048
   gradient_checkpointing: true
   assistant_only_loss: true
@@ -157,7 +170,7 @@ sft:
   save_total_limit: 2
 ```
 
-The compiler writes `dataset`; authored inputs remain declared under `sources`. Targets are text-only assistant/completion messages. The GUI graphs observed trainer events using `logging_steps`; it does not infer loss between callbacks.
+The compiler writes `dataset`; authored inputs remain declared under `sources`. Targets are text-only assistant/completion messages. The optimizer, scheduler, warmup, decay, and clipping baseline are explicit so dependency upgrades cannot change an experiment silently. The GUI graphs observed trainer events using `logging_steps`; it does not infer loss between callbacks.
 
 ## `grpo`
 
@@ -174,6 +187,12 @@ grpo:
   calibration_generations: 4
   generation_batch_size: 2
   learning_rate: 0.00001
+  optim: adamw_torch_fused
+  lr_scheduler_type: linear
+  warmup_steps: 0
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  use_liger_kernel: false
   max_steps: 100
   max_completion_length: 2048
   max_tool_calling_iterations: 8
@@ -198,6 +217,11 @@ of the run. The resulting evidence is written to
 `starting_policy_calibration.json` beside the adapter.
 
 `start_from` is `base` for a practice-only fresh adapter or a completed compatible PEFT adapter path. When SFT and GRPO are both enabled, it must equal `sft.output_dir`; `train auto` passes the completed SFT adapter directly into the GRPO stage.
+
+Liger remains an explicit guarded-off experiment in V1. Setting
+`use_liger_kernel: true` fails before model allocation until AutoTrainer ships
+an exact package pin plus a Qwen3.5 NF4/BF16 LoRA test proving equivalent loss
+masks, adapter-only gradients, and checkpoint behavior.
 
 `beta: 0.0`, two generations, and `use_vllm: false` are memory-conscious V1 choices, not universal claims about the best GRPO recipe. `grpo.eval_dataset`, if used, is training feedback and must not equal final `evaluation.dataset`.
 
