@@ -15,11 +15,13 @@ sys.path.insert(0, str(SERVICE_ROOT / "src"))
 from autotrainer.config import ConfigError, default_config, write_config  # noqa: E402
 from autotrainer.dataset_service import (  # noqa: E402
     DatasetDesignError,
+    _LANGUAGE_SUFFIXES,
     design_dataset_candidate,
     freeze_dataset,
     get_dataset_workspace,
     require_frozen_dataset,
 )
+from autotrainer.history import EXTRACTOR_VERSION, SUPPORTED_SUFFIXES  # noqa: E402
 
 
 def run_git(repository: Path, *arguments: str) -> str:
@@ -74,6 +76,108 @@ class DatasetServiceTests(unittest.TestCase):
             }
         ]
         write_config(self.config_path, config, overwrite=True)
+
+    def test_airflow_python_pull_request_is_reviewable_and_classified(self) -> None:
+        repository = self.root / ".autotrainer" / "sources" / "airflow"
+        repository.mkdir(parents=True)
+        run_git(repository, "init", "-q")
+        run_git(repository, "config", "user.name", "AutoTrainer Tests")
+        run_git(repository, "config", "user.email", "tests@example.invalid")
+        run_git(
+            repository,
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/apache/airflow.git",
+        )
+        dags = repository / "dags"
+        dags.mkdir()
+        dag_path = dags / "etl_pipeline.py"
+        dag_path.write_text(
+            "def extract():\n"
+            "    return 'raw records'\n",
+            encoding="utf-8",
+        )
+        run_git(repository, "add", ".")
+        run_git(repository, "commit", "-q", "-m", "Initial Airflow fixture")
+        dag_path.write_text(
+            "from airflow import DAG\n"
+            "from airflow.operators.python import PythonOperator\n\n"
+            "def extract():\n"
+            "    return 'raw records'\n\n"
+            "def transform():\n"
+            "    return 'clean records'\n\n"
+            "def load():\n"
+            "    return 'loaded records'\n\n"
+            "with DAG(dag_id='etl_pipeline', schedule=None) as dag:\n"
+            "    extract_task = PythonOperator(task_id='extract', python_callable=extract)\n"
+            "    transform_task = PythonOperator(task_id='transform', python_callable=transform)\n"
+            "    load_task = PythonOperator(task_id='load', python_callable=load)\n"
+            "    extract_task >> transform_task >> load_task\n",
+            encoding="utf-8",
+        )
+        run_git(repository, "add", ".")
+        run_git(
+            repository,
+            "commit",
+            "-q",
+            "-m",
+            "Define the ETL pipeline task dependency order",
+        )
+        revision = run_git(repository, "rev-parse", "HEAD")
+
+        config = default_config()
+        config["sources"] = [
+            {
+                "id": "airflow",
+                "kind": "repository",
+                "license": {"spdx": "Apache-2.0"},
+                "partition": "train",
+                "revision": revision,
+                "roles": ["history"],
+                "uri": ".autotrainer/sources/airflow",
+            }
+        ]
+        write_config(self.config_path, config, overwrite=True)
+        catalog = self.root / ".autotrainer" / "dataset" / "github-prs" / "airflow.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(
+            json.dumps(
+                {
+                    "license_spdx": "Apache-2.0",
+                    "pull_requests": [
+                        {
+                            "base_branch": "main",
+                            "body": "",
+                            "merge_commit": revision,
+                            "merged_at": "2026-07-20T12:00:00Z",
+                            "number": 42,
+                            "title": "Define the ETL pipeline task dependency order",
+                        }
+                    ],
+                    "repository": "apache/airflow",
+                    "schema_version": 1,
+                    "source_id": "airflow",
+                    "source_revision": revision,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        workspace = get_dataset_workspace(self.config_path)
+
+        self.assertEqual(workspace["catalog"]["status"], "ready")
+        self.assertEqual(workspace["summary"]["reviewable_count"], 1)
+        candidate = workspace["candidates"][0]
+        self.assertEqual(candidate["languages"], ["python"])
+        self.assertEqual(candidate["pull_request"]["number"], 42)
+        self.assertEqual(candidate["files"][0]["path"], "dags/etl_pipeline.py")
+        self.assertIn("extract_task >> transform_task >> load_task", candidate["patch"])
+
+    def test_history_supports_every_declared_v1_language_extension(self) -> None:
+        self.assertLessEqual(2, EXTRACTOR_VERSION)
+        self.assertTrue(set(_LANGUAGE_SUFFIXES).issubset(SUPPORTED_SUFFIXES))
 
     def test_selected_llm_design_is_local_reviewable_metadata(self) -> None:
         self.write_local_history_project()

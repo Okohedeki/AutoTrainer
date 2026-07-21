@@ -29,7 +29,7 @@ from urllib.parse import unquote, urlsplit
 
 
 SCHEMA_VERSION = 1
-EXTRACTOR_VERSION = 1
+EXTRACTOR_VERSION = 2
 MAX_HISTORY_COMMITS = 200
 MAX_REVIEWABLE_CANDIDATES = 50
 MAX_CHANGED_FILES = 4
@@ -40,7 +40,16 @@ MIN_INSTRUCTION_CHARS = 12
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
 
 SUPPORTED_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
     ".css",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".hxx",
     ".html",
     ".js",
     ".json",
@@ -49,6 +58,8 @@ SUPPORTED_SUFFIXES = {
     ".less",
     ".md",
     ".mdx",
+    ".py",
+    ".pyi",
     ".sass",
     ".scss",
     ".svelte",
