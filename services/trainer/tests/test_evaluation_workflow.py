@@ -443,12 +443,31 @@ class EvaluationPlanTests(unittest.TestCase):
             root = Path(temporary_directory)
             config = _config(root)
             config["grpo"]["max_tool_calling_iterations"] = 3
-            config["grpo"]["max_completion_length"] = 512
+            config["grpo"]["max_completion_length"] = 256
             first = build_evaluation_plan(config, root)
             second = build_evaluation_plan(config, root)
             self.assertEqual(first, second)
             self.assertEqual(first["environment"]["max_tool_calling_iterations"], 3)
-            self.assertEqual(first["environment"]["max_completion_tokens"], 512)
+            self.assertNotIn("max_completion_tokens", first["environment"])
+            self.assertEqual(
+                first["suites"]["model_benchmark"]["max_episode_output_tokens"],
+                2048,
+            )
+            changed_training_budget = json.loads(json.dumps(config))
+            changed_training_budget["grpo"]["max_completion_length"] = 512
+            self.assertEqual(first, build_evaluation_plan(changed_training_budget, root))
+            changed_evaluation_budget = json.loads(json.dumps(config))
+            changed_evaluation_budget["evaluation"]["suites"]["model_benchmark"][
+                "max_episode_output_tokens"
+            ] = 1024
+            changed_evaluation_plan = build_evaluation_plan(changed_evaluation_budget, root)
+            self.assertEqual(
+                changed_evaluation_plan["suites"]["model_benchmark"][
+                    "max_episode_output_tokens"
+                ],
+                1024,
+            )
+            self.assertNotEqual(first["plan_id"], changed_evaluation_plan["plan_id"])
             self.assertEqual(first["holdout"]["unit"], "repository")
             self.assertEqual(
                 first["holdout"]["training_repository_identities"],

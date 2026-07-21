@@ -132,6 +132,7 @@ evaluation:
   suites:
     model_benchmark:
       kind: model_benchmark
+      max_episode_output_tokens: 2048
       arms:
       - reference_9b
       - autotrainer

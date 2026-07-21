@@ -30,7 +30,7 @@ from .training.common import REFERENCE_DEPENDENCIES, import_factory
 
 
 PRODUCER_NAME = "autotrainer-local-patch"
-PRODUCER_VERSION = "1.1.0"
+PRODUCER_VERSION = "1.2.0"
 MAX_SOURCE_FILES = 40
 MAX_SOURCE_PATHS = 400
 MAX_SOURCE_CHARS = 32_000
@@ -231,8 +231,9 @@ _ORCHESTRATION_SPEC = {
     "model_residency": "one-arm-at-a-time-suite-arm-groups",
     "generation": {
         "context_tokens": CONTEXT_TOKENS,
-        "max_input_tokens": "context-minus-frozen-completion-budget",
-        "max_new_tokens": "frozen-from-grpo-recipe",
+        "max_input_tokens": "context-minus-frozen-episode-output-budget",
+        "max_new_tokens_per_turn": "remaining-episode-output-budget",
+        "max_episode_output_tokens": "frozen-from-model-benchmark-suite",
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "seed": "frozen-trial-seed-plus-turn-index",
@@ -1045,24 +1046,30 @@ class BuiltinEvaluationProducer:
                 "the frozen evaluation tool-iteration limit is invalid"
             )
         self._max_tool_calling_iterations = iterations
-        completion_tokens = (
-            environment.get("max_completion_tokens", MAX_NEW_TOKENS)
-            if isinstance(environment, Mapping)
+        suites = plan.get("suites")
+        model_benchmark = (
+            suites.get("model_benchmark", {})
+            if isinstance(suites, Mapping)
+            else {}
+        )
+        episode_output_tokens = (
+            model_benchmark.get("max_episode_output_tokens", MAX_NEW_TOKENS)
+            if isinstance(model_benchmark, Mapping)
             else MAX_NEW_TOKENS
         )
         if (
-            not isinstance(completion_tokens, int)
-            or isinstance(completion_tokens, bool)
-            or not 1 <= completion_tokens <= 4096
+            not isinstance(episode_output_tokens, int)
+            or isinstance(episode_output_tokens, bool)
+            or not 1 <= episode_output_tokens <= 4096
         ):
             raise LocalEvaluationRunnerError(
-                "the frozen evaluation completion-token limit is invalid"
+                "the frozen evaluation episode-output-token limit is invalid"
             )
-        # The completion budget is frozen from the GRPO recipe. Reserving it
-        # before fitting each tool turn keeps training and evaluation on the
-        # same 8K context contract instead of silently using a fixed default.
-        self._max_completion_tokens = completion_tokens
-        self._max_input_tokens = CONTEXT_TOKENS - completion_tokens
+        # Held-out agent work needs a benchmark allowance independent of the
+        # training rollout length. Reserving the frozen suite budget before
+        # fitting each turn keeps every arm on the same 8K context contract.
+        self._max_episode_output_tokens = episode_output_tokens
+        self._max_input_tokens = CONTEXT_TOKENS - episode_output_tokens
         self._runtimes: dict[str, ArmRuntime] = {}
         self._active_arm: str | None = None
         self._generator: TextGenerator | None = None
@@ -1212,7 +1219,7 @@ class BuiltinEvaluationProducer:
                     messages,
                     max_input_tokens=self._max_input_tokens,
                 )
-                remaining = self._max_completion_tokens - total_output_tokens
+                remaining = self._max_episode_output_tokens - total_output_tokens
                 if remaining <= 0:
                     break
                 try:

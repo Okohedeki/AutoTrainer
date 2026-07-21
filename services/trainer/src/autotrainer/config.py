@@ -48,6 +48,7 @@ ALLOWED_PARTITIONS = {"train", "evaluation"}
 EVALUATION_ROLES = {"reference", "control", "candidate"}
 EVALUATION_SUITES = {"model_benchmark", "fable_ab"}
 REQUIRED_EVALUATION_SUITES = {"model_benchmark"}
+DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS = 2048
 IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}")
 FAIRNESS_TRUE_FIELDS = (
     "same_task_snapshot",
@@ -384,6 +385,19 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
     )
     if model_runner.get("type") not in {"builtin", "command"}:
         errors.append("model_benchmark runner must use type: builtin or command")
+    max_episode_output_tokens = model_suite.get(
+        "max_episode_output_tokens",
+        DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS,
+    )
+    if (
+        not isinstance(max_episode_output_tokens, int)
+        or isinstance(max_episode_output_tokens, bool)
+        or not 1 <= max_episode_output_tokens <= 4096
+    ):
+        errors.append(
+            "evaluation.suites.model_benchmark.max_episode_output_tokens "
+            "must be an integer between 1 and 4096"
+        )
 
     fable_members = suite_arms.get("fable_ab", [])
     if "fable_ab" in suites:
@@ -893,6 +907,9 @@ def default_config(
                 "model_benchmark": {
                     "kind": "model_benchmark",
                     "arms": ["reference_9b", "autotrainer"],
+                    "max_episode_output_tokens": (
+                        DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS
+                    ),
                     "runner": {
                         # AutoTrainer owns the exact prompt and local 4-bit
                         # loader. Its immutable identity is frozen into the

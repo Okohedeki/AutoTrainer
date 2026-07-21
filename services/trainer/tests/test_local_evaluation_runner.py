@@ -501,7 +501,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             self.assertEqual(loaded, ["candidate", "reference"])
             producer.close()
 
-    def test_producer_honors_frozen_grpo_turn_and_completion_budgets(self) -> None:
+    def test_producer_honors_frozen_turn_and_evaluation_episode_budgets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runtime = ArmRuntime(
@@ -519,9 +519,11 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 root,
                 {
                     "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "suites": {
+                        "model_benchmark": {"max_episode_output_tokens": 128}
+                    },
                     "environment": {
                         "max_tool_calling_iterations": 1,
-                        "max_completion_tokens": 128,
                     },
                 },
                 model_loader=lambda _spec: generator,
@@ -531,8 +533,8 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
 
             producer.produce(_request("candidate"), root / "result.json")
 
-            # One GRPO tool turn is permitted and the generation call receives
-            # the exact completion budget frozen into the evaluation plan.
+            # One tool turn is permitted and generation receives the exact
+            # episode allowance frozen into the evaluation suite.
             self.assertEqual(generator.calls, 1)
             self.assertEqual(generator.max_token_budgets, [128])
             self.assertEqual(
@@ -614,6 +616,8 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             result = json.loads((root / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "completed")
             self.assertEqual(generator.calls, 3)
+            self.assertEqual(generator.max_token_budgets, [2048, 2028, 1964])
+            self.assertEqual(result["usage"]["output_tokens"], 85)
             rendered = json.dumps(generator.messages)
             self.assertIn("Tool error (RuntimeError)", rendered)
             self.assertNotIn("private host path must not be exposed", rendered)

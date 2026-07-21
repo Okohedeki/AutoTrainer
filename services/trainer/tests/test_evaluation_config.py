@@ -150,6 +150,10 @@ class EvaluationConfigTests(unittest.TestCase):
             evaluation["suites"]["model_benchmark"]["runner"],
             {"type": "builtin"},
         )
+        self.assertEqual(
+            evaluation["suites"]["model_benchmark"]["max_episode_output_tokens"],
+            2048,
+        )
         reference = evaluation["arms"]["reference_9b"]["model"]
         self.assertEqual(
             reference["id"],
@@ -164,6 +168,20 @@ class EvaluationConfigTests(unittest.TestCase):
         report = validate_mapping(payload)
 
         self.assertTrue(any("seeds length" in error for error in report.errors))
+
+    def test_rejects_invalid_model_benchmark_episode_output_budget(self) -> None:
+        for invalid in (True, 0, 4097, 1.5):
+            with self.subTest(invalid=invalid):
+                payload = evaluation_config()
+                payload["evaluation"]["suites"]["model_benchmark"][
+                    "max_episode_output_tokens"
+                ] = invalid
+
+                report = validate_mapping(payload)
+
+                self.assertTrue(
+                    any("max_episode_output_tokens" in error for error in report.errors)
+                )
 
     def test_rejects_candidate_list_that_does_not_match_arms(self) -> None:
         payload = evaluation_config()

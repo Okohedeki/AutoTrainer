@@ -80,6 +80,10 @@ class ConfigTests(unittest.TestCase):
         self.assertGreaterEqual(decisions["model_benchmark"]["minimum_tasks"], 5)
         self.assertEqual(evaluation["language"], "typescript_react")
         self.assertEqual(set(evaluation["suites"]), {"model_benchmark"})
+        self.assertEqual(
+            evaluation["suites"]["model_benchmark"]["max_episode_output_tokens"],
+            2048,
+        )
         self.assertEqual(config.data["refinement"]["mode"], "adapter_only")
         self.assertEqual(config.data["refinement"]["vram"]["enforcement"], "hard")
 
