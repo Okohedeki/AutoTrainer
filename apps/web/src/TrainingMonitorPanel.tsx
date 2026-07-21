@@ -90,7 +90,7 @@ export default function TrainingMonitorPanel({
 
   useEffect(() => {
     setPreparation(null);
-  }, [revision]);
+  }, [revision, job?.id]);
 
   useEffect(() => {
     let stopped = false;

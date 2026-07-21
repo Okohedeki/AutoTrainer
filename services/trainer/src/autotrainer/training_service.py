@@ -170,6 +170,12 @@ class TrainingServiceError(ConfigError):
     """Raised when prepared project state cannot start an honest training run."""
 
 
+def prepare_managed_training(config_path: str | Path) -> dict[str, Any]:
+    """Check stable inputs against a disposable future managed-run output."""
+
+    return prepare_project(config_path, managed_readiness=True)
+
+
 def _notify(callback: ProgressCallback | None, stage: str, message: str) -> None:
     if callback is not None:
         callback(stage, message)
@@ -1088,6 +1094,7 @@ class TrainingJobManager:
 __all__ = [
     "TrainingJobManager",
     "TrainingServiceError",
+    "prepare_managed_training",
     "read_training_activity",
     "run_project_training",
 ]

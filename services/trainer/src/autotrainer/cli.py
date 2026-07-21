@@ -793,9 +793,9 @@ def _scan_and_plan(config: Any, *, write: bool) -> dict[str, Any]:
 
 
 def _run_prepare(arguments: argparse.Namespace) -> int:
-    from .project_service import prepare_project
+    from .training_service import prepare_managed_training
 
-    result = prepare_project(arguments.config)
+    result = prepare_managed_training(arguments.config)
     _emit(result, as_json=arguments.json)
     return 0 if result["status"] == "ready" else 3
 

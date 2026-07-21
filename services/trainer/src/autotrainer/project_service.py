@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
@@ -202,7 +203,12 @@ def _doctor_blocker(doctor: Mapping[str, Any], recipe: str) -> str:
     return "Resolve the first GPU, Python package, or sandbox blocker reported by Doctor."
 
 
-def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str, Any]:
+def _resolve_training_preflight(
+    config: ProjectConfig,
+    recipe: str,
+    *,
+    checkpoint_root: Path | None = None,
+) -> dict[str, Any]:
     """Resolve the exact runnable stages and verify their offline model.
 
     Recipe resolvers inspect datasets, output paths, adapter compatibility, and
@@ -219,18 +225,31 @@ def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str,
     }
     try:
         selected = select_stage_config(config.data, recipe)
+        prospective_root = (
+            Path(checkpoint_root).expanduser().resolve()
+            if checkpoint_root is not None
+            else None
+        )
+        sft_output = (
+            prospective_root / "sft"
+            if prospective_root is not None
+            else config.resolve_path(str(selected["sft"]["output_dir"]))
+        )
+        grpo_output = (
+            prospective_root / "grpo"
+            if prospective_root is not None
+            else config.resolve_path(str(selected["grpo"]["output_dir"]))
+        )
         recipes: dict[str, Any] = {}
         if recipe in {"teach", "both"}:
             recipes["sft"] = resolve_sft_recipe(
                 selected,
                 project_root=config.root,
-                output_dir=config.resolve_path(str(selected["sft"]["output_dir"])),
+                output_dir=sft_output,
             )
         if recipe in {"practice", "both"}:
             grpo_config = selected
             if recipe == "both":
-                sft_output = config.resolve_path(str(selected["sft"]["output_dir"]))
-                grpo_output = config.resolve_path(str(selected["grpo"]["output_dir"]))
                 if sft_output == grpo_output:
                     # The base-policy projection below cannot exercise the real
                     # adapter/output collision guard. Check it explicitly so
@@ -249,7 +268,7 @@ def _resolve_training_preflight(config: ProjectConfig, recipe: str) -> dict[str,
             resolved_grpo = resolve_grpo_recipe(
                 grpo_config,
                 project_root=config.root,
-                output_dir=config.resolve_path(str(selected["grpo"]["output_dir"])),
+                output_dir=grpo_output,
             )
             if recipe == "both":
                 resolved_grpo["preflight_start_from"] = {
@@ -287,10 +306,23 @@ def _step(step_id: str, status: str) -> dict[str, str]:
     return {"id": step_id, "label": STEP_LABELS[step_id], "status": status}
 
 
-def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
+def _prepare_project_owned(
+    config_path: str | Path,
+    *,
+    managed_readiness: bool = False,
+) -> dict[str, Any]:
     """Prepare deterministic training inputs and return one actionable blocker."""
 
     config = _read_project(config_path)
+    checkpoint_root = (
+        config.artifact_dir
+        / "training"
+        / "readiness"
+        / uuid4().hex
+        / "checkpoints"
+        if managed_readiness
+        else None
+    )
     validation_report = validate_mapping(config.data, root=config.root)
     validation_errors = list(validation_report.errors)
     later_validation = [
@@ -376,7 +408,11 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
         and not plan_blockers
     )
     if static_ready:
-        preflight = _resolve_training_preflight(config, recipe)
+        preflight = _resolve_training_preflight(
+            config,
+            recipe,
+            checkpoint_root=checkpoint_root,
+        )
 
     environment = config.data.get("environment", {})
     backend = str(environment.get("backend", "docker")) if isinstance(environment, Mapping) else "docker"
@@ -507,10 +543,16 @@ def _prepare_project_owned(config_path: str | Path) -> dict[str, Any]:
     }
 
 
-def prepare_project(config_path: str | Path) -> dict[str, Any]:
+def prepare_project(
+    config_path: str | Path,
+    *,
+    managed_readiness: bool = False,
+) -> dict[str, Any]:
     """Prepare while excluding a training run or another mutating operation."""
 
     with project_prepare_gate(config_path):
+        if managed_readiness:
+            return _prepare_project_owned(config_path, managed_readiness=True)
         return _prepare_project_owned(config_path)
 
 

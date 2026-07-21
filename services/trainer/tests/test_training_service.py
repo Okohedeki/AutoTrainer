@@ -23,6 +23,7 @@ from autotrainer.project_gate import ProjectBusyError  # noqa: E402
 from autotrainer.training_service import (  # noqa: E402
     TrainingJobManager,
     TrainingServiceError,
+    prepare_managed_training,
     run_project_training,
 )
 
@@ -50,6 +51,17 @@ class TrainingServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
+
+    def test_managed_readiness_selects_disposable_output_preflight(self) -> None:
+        prepared = {"status": "ready", "recipe": "teach"}
+        with patch(
+            "autotrainer.training_service.prepare_project",
+            return_value=prepared,
+        ) as prepare:
+            result = prepare_managed_training(self.config_path)
+
+        self.assertEqual(result, prepared)
+        prepare.assert_called_once_with(self.config_path, managed_readiness=True)
 
     def test_teach_runs_only_sft(self) -> None:
         sft_result = {"status": "completed", "stage": "sft"}

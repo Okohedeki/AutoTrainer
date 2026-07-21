@@ -57,7 +57,6 @@ from .model_service import (
     use_local_model,
 )
 from .model_download_service import ModelDownloadManager
-from .project_service import prepare_project
 from .refinement_service import get_refinement_settings, set_refinement_settings
 from .project_gate import (
     ProjectBusyError,
@@ -71,7 +70,7 @@ from .task_authoring_service import (
     list_authored_tasks,
     remove_authored_task,
 )
-from .training_service import TrainingJobManager
+from .training_service import TrainingJobManager, prepare_managed_training
 from .workspace_service import ProjectWorkspace
 
 
@@ -1023,7 +1022,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     # API never turns browser input into a shell command.
                     self._send_json(
                         HTTPStatus.OK,
-                        prepare_project(self.server.config_path),
+                        prepare_managed_training(self.server.config_path),
                     )
                 elif path == f"{API_PREFIX}/runtime/setup":
                     _require_keys(

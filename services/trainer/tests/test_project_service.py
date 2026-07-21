@@ -13,9 +13,10 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
 from autotrainer.cli import main  # noqa: E402
-from autotrainer.config import default_config, write_config  # noqa: E402
+from autotrainer.config import default_config, load_config, write_config  # noqa: E402
 from autotrainer.model_cache import ModelCacheError  # noqa: E402
 from autotrainer.project_service import prepare_project  # noqa: E402
+from autotrainer.training.common import validate_fresh_output_directory  # noqa: E402
 
 
 def scan_result(
@@ -227,6 +228,111 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["title"], "Fix the training recipe")
         self.assertIn("must differ", result["next_action"]["detail"])
 
+    def test_managed_readiness_uses_disposable_outputs_without_rewriting_config(
+        self,
+    ) -> None:
+        payload = default_config()
+        prior_root = (
+            self.root
+            / ".autotrainer"
+            / "training"
+            / "runs"
+            / ("a" * 32)
+            / "checkpoints"
+        )
+        prior_sft = prior_root / "sft"
+        prior_grpo = prior_root / "grpo"
+        prior_sft.mkdir(parents=True)
+        prior_grpo.mkdir(parents=True)
+        (prior_sft / "adapter_model.safetensors").write_bytes(b"old-sft")
+        (prior_grpo / "adapter_model.safetensors").write_bytes(b"old-grpo")
+        sft_reference = prior_sft.relative_to(self.root).as_posix()
+        grpo_reference = prior_grpo.relative_to(self.root).as_posix()
+        payload["sft"]["output_dir"] = sft_reference
+        payload["grpo"]["output_dir"] = grpo_reference
+        payload["grpo"]["start_from"] = sft_reference
+        write_config(self.config_path, payload, overwrite=True)
+
+        model = {
+            "id": "Qwen/Qwen3.5-9B",
+            "revision": "a" * 40,
+            "cache_dir": str(
+                (self.root / ".autotrainer" / "model-cache").resolve()
+            ),
+        }
+        observed: dict[str, Path] = {}
+
+        def resolve_sft(*_args: object, output_dir: Path, **_values: object) -> dict:
+            destination = Path(output_dir).resolve()
+            validate_fresh_output_directory(destination)
+            observed["sft"] = destination
+            return {"stage": "sft", "model": model}
+
+        def resolve_grpo(*_args: object, output_dir: Path, **_values: object) -> dict:
+            destination = Path(output_dir).resolve()
+            validate_fresh_output_directory(destination)
+            observed["grpo"] = destination
+            return {
+                "stage": "grpo",
+                "model": model,
+                "environment": {
+                    "factory": "autotrainer.environments.frontend:FrontendEnvironment"
+                },
+            }
+
+        full = scan_result(1, 1)
+        training = scan_result(1, 1)
+        with (
+            patch(
+                "autotrainer.project_service.scan_sources",
+                side_effect=[full, training],
+            ),
+            patch(
+                "autotrainer.project_service.compile_data",
+                return_value={
+                    "errors": [],
+                    "warnings": [],
+                    "artifacts": {"sft": "train.jsonl", "grpo": "train.jsonl"},
+                },
+            ),
+            patch(
+                "autotrainer.project_service.build_plan",
+                return_value=plan_result(),
+            ),
+            patch(
+                "autotrainer.project_service.resolve_sft_recipe",
+                side_effect=resolve_sft,
+            ),
+            patch(
+                "autotrainer.project_service.resolve_grpo_recipe",
+                side_effect=resolve_grpo,
+            ),
+            patch("autotrainer.project_service.import_factory"),
+            patch("autotrainer.project_service.require_materialized_model"),
+            patch(
+                "autotrainer.project_service.run_doctor",
+                return_value=READY_DOCTOR,
+            ),
+            patch(
+                "autotrainer.project_service.run_grpo_environment_canary",
+                return_value=READY_CANARY,
+            ),
+        ):
+            result = prepare_project(self.config_path, managed_readiness=True)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertNotEqual(observed["sft"], prior_sft.resolve())
+        self.assertNotEqual(observed["grpo"], prior_grpo.resolve())
+        self.assertEqual(observed["sft"].parent, observed["grpo"].parent)
+        self.assertEqual(observed["sft"].parent.name, "checkpoints")
+        self.assertEqual(observed["sft"].parent.parent.parent.name, "readiness")
+        self.assertFalse(observed["sft"].exists())
+        self.assertFalse(observed["grpo"].exists())
+        unchanged = load_config(self.config_path).data
+        self.assertEqual(unchanged["sft"]["output_dir"], sft_reference)
+        self.assertEqual(unchanged["grpo"]["output_dir"], grpo_reference)
+        self.assertEqual(unchanged["grpo"]["start_from"], sft_reference)
+
     def test_evaluation_only_validation_and_plan_work_are_deferred(self) -> None:
         payload = default_config()
         payload["evaluation"]["task_pack"] = ""
@@ -332,13 +438,17 @@ class ProjectServiceTests(unittest.TestCase):
         }
         output = StringIO()
         with (
-            patch("autotrainer.project_service.prepare_project", return_value=prepared),
+            patch(
+                "autotrainer.training_service.prepare_managed_training",
+                return_value=prepared,
+            ) as prepare,
             redirect_stdout(output),
         ):
             code = main(["prepare", "--config", str(self.config_path), "--json"])
 
         self.assertEqual(code, 0)
         self.assertIn('"recipe": "teach"', output.getvalue())
+        prepare.assert_called_once_with(self.config_path)
 
 
 if __name__ == "__main__":

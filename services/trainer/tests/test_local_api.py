@@ -975,11 +975,15 @@ class LocalApiTests(unittest.TestCase):
             "steps": [],
             "details": {},
         }
-        with patch("autotrainer.local_api.prepare_project", return_value=prepared):
+        with patch(
+            "autotrainer.local_api.prepare_managed_training",
+            return_value=prepared,
+        ) as prepare:
             status, result = self.request("POST", "/api/v1/prepare", {})
 
         self.assertEqual(status, 200)
         self.assertEqual(result, prepared)
+        prepare.assert_called_once_with(self.server.config_path)
 
     def test_dataset_endpoints_share_the_curation_service_contract(self) -> None:
         workspace = {
