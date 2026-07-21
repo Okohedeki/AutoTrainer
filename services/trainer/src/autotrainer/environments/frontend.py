@@ -884,6 +884,10 @@ class FrontendEnvironment:
         except (RuntimeError, ValueError) as error:
             return False, f"rejected patch: {error}"
         workspace = self._require_workspace()
+        try:
+            patch_bytes = normalized.encode("utf-8")
+        except UnicodeEncodeError as error:
+            return False, f"rejected patch: patch is not valid UTF-8: {error}"
         check = self._run_git(
             workspace,
             "apply",
@@ -891,21 +895,23 @@ class FrontendEnvironment:
             "--recount",
             "--whitespace=nowarn",
             "-",
-            input_value=normalized,
+            input_bytes=patch_bytes,
         )
         if check.returncode:
-            return False, self._truncate(f"patch check failed:\n{check.stderr or check.stdout}")
+            return False, self._truncate(
+                f"patch check failed:\n{self._process_diagnostic(check)}"
+            )
         applied = self._run_git(
             workspace,
             "apply",
             "--recount",
             "--whitespace=nowarn",
             "-",
-            input_value=normalized,
+            input_bytes=patch_bytes,
         )
         if applied.returncode:
             return False, self._truncate(
-                f"patch apply failed:\n{applied.stderr or applied.stdout}"
+                f"patch apply failed:\n{self._process_diagnostic(applied)}"
             )
         self._check_deadline()
         return True, "patch applied"
@@ -1220,9 +1226,13 @@ class FrontendEnvironment:
         repository: Path,
         *arguments: str,
         binary: bool = False,
+        input_bytes: bytes | None = None,
         input_value: str | None = None,
         timeout: float = 30,
     ) -> subprocess.CompletedProcess[Any]:
+        if input_bytes is not None and input_value is not None:
+            raise ValueError("git input must be either bytes or text, not both")
+        binary_io = binary or input_bytes is not None
         return subprocess.run(
             [
                 "git",
@@ -1232,13 +1242,20 @@ class FrontendEnvironment:
                 str(repository),
                 *arguments,
             ],
-            input=None if binary else input_value,
+            input=input_bytes if input_bytes is not None else input_value,
             capture_output=True,
-            text=not binary,
+            text=not binary_io,
             env=self._isolated_git_environment(),
             timeout=self._timeout_for(timeout),
             check=False,
         )
+
+    @staticmethod
+    def _process_diagnostic(result: subprocess.CompletedProcess[Any]) -> str:
+        value = result.stderr or result.stdout or b""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
 
     def _export_locked_git_tree(
         self,

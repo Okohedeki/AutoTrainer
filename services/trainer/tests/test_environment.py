@@ -9,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch as mock_patch
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = SERVICE_ROOT.parents[1]
@@ -658,7 +659,7 @@ class PatchNormalizationTests(unittest.TestCase):
         workspace = root / "workspace"
         target = workspace / "project" / "src" / "styles.css"
         target.parent.mkdir(parents=True)
-        target.write_text(".grid {\n  display: grid;\n}\n", encoding="utf-8")
+        target.write_bytes(b".grid {\n  display: grid;\n}\n")
         subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
         subprocess.run(["git", "-C", str(workspace), "add", "--all"], check=True)
         subprocess.run(
@@ -685,6 +686,94 @@ class PatchNormalizationTests(unittest.TestCase):
         environment._started_at = time.monotonic()
         environment._deadline = environment._started_at + 60
         return environment
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows newline translation regression")
+    def test_applies_patch_to_lf_only_file_without_crlf_stdin_translation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            patch = (
+                "diff --git a/src/styles.css b/src/styles.css\n"
+                "--- a/src/styles.css\n"
+                "+++ b/src/styles.css\n"
+                "@@ -1,3 +1,4 @@\n"
+                " .grid {\n"
+                "   display: grid;\n"
+                "+  gap: 1rem;\n"
+                " }\n"
+            )
+            text_mode_check = environment._run_git(
+                environment._require_workspace(),
+                "apply",
+                "--check",
+                "--recount",
+                "--whitespace=nowarn",
+                "-",
+                input_value=patch,
+            )
+            self.assertNotEqual(
+                text_mode_check.returncode,
+                0,
+                "the regression control must expose Windows CRLF pipe translation",
+            )
+
+            applied, message = environment._apply_unified_diff(patch)
+
+            self.assertTrue(applied, message)
+            target = environment._require_workspace() / "project" / "src" / "styles.css"
+            self.assertEqual(
+                target.read_bytes(),
+                b".grid {\n  display: grid;\n  gap: 1rem;\n}\n",
+            )
+
+    def test_git_apply_check_and_apply_receive_exact_utf8_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment = self._environment(Path(temporary_directory))
+            patch = (
+                "diff --git a/src/styles.css b/src/styles.css\n"
+                "--- a/src/styles.css\n"
+                "+++ b/src/styles.css\n"
+                "@@ -1,3 +1,4 @@\n"
+                " .grid {\n"
+                "   display: grid;\n"
+                "+  content: 'café';\n"
+                " }\n"
+            )
+            completed = subprocess.CompletedProcess(
+                args=["git", "apply"],
+                returncode=0,
+                stdout=b"",
+                stderr=b"",
+            )
+
+            with mock_patch.object(
+                environment,
+                "_run_git",
+                side_effect=[completed, completed],
+            ) as run_git:
+                applied, message = environment._apply_unified_diff(patch)
+
+            self.assertTrue(applied, message)
+            calls = run_git.call_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertIn("--check", calls[0].args)
+            self.assertNotIn("--check", calls[1].args)
+            expected = environment._normalize_patch(patch).encode("utf-8")
+            for call in calls:
+                self.assertEqual(call.kwargs["input_bytes"], expected)
+                self.assertNotIn("input_value", call.kwargs)
+
+    def test_decodes_non_utf8_git_apply_diagnostics_safely(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["git", "apply"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"invalid patch byte: \xff\n",
+        )
+
+        self.assertEqual(
+            FrontendEnvironment._process_diagnostic(result),
+            "invalid patch byte: \ufffd\n",
+        )
 
     def test_accepts_fenced_working_directory_relative_diff(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
