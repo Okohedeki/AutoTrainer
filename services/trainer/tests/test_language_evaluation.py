@@ -11,7 +11,12 @@ from pathlib import Path
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
-from autotrainer.config import ConfigError, default_config, write_config  # noqa: E402
+from autotrainer.config import (  # noqa: E402
+    ConfigError,
+    default_config,
+    load_config,
+    write_config,
+)
 from autotrainer.language_evaluation import (  # noqa: E402
     LANGUAGE_SUITES,
     get_language_evaluation_workspace,
@@ -121,6 +126,58 @@ class LanguageEvaluationTests(unittest.TestCase):
 
         self.assertEqual(workspace["status"], "blocked")
         self.assertEqual(workspace["inferred_training_language"], "python")
+
+    def test_module_javascript_holdout_blocks_python_training(self) -> None:
+        self.write_project("build.mjs")
+
+        workspace = get_language_evaluation_workspace(self.config_path)
+
+        self.assertEqual(workspace["status"], "blocked")
+        self.assertEqual(
+            workspace["evaluation_language_counts"], {"typescript_react": 1}
+        )
+        self.assertTrue(
+            any("do not contain Python code" in value for value in workspace["blockers"])
+        )
+
+    def test_undetectable_held_out_language_fails_closed(self) -> None:
+        self.write_project("page.html")
+
+        workspace = get_language_evaluation_workspace(self.config_path)
+
+        self.assertEqual(workspace["status"], "blocked")
+        self.assertEqual(workspace["evaluation_language_counts"], {})
+        self.assertTrue(
+            any("do not contain detectable" in value for value in workspace["blockers"])
+        )
+
+    def test_unknown_training_primary_fails_closed_for_explicit_suite(self) -> None:
+        self.write_project()
+        receipt = self.root / ".autotrainer" / "dataset" / "freeze.json"
+        receipt.write_text(
+            json.dumps({"language_counts": {}, "schema_version": 1}) + "\n",
+            encoding="utf-8",
+        )
+        train = self.root / "train-repo"
+        (train / "feature.py").unlink()
+        (train / "README.md").write_text("# training context\n", encoding="utf-8")
+        run_git(train, "add", "-A")
+        run_git(train, "commit", "-m", "remove supported training language")
+        config = load_config(self.config_path)
+        updated = dict(config.data)
+        updated["sources"] = [dict(source) for source in config.sources]
+        updated["sources"][0]["revision"] = run_git(train, "rev-parse", "HEAD")
+        updated["evaluation"] = dict(updated["evaluation"])
+        updated["evaluation"]["language"] = "python"
+        write_config(self.config_path, updated, overwrite=True)
+
+        workspace = get_language_evaluation_workspace(self.config_path)
+
+        self.assertEqual(workspace["status"], "blocked")
+        self.assertIsNone(workspace["inferred_training_language"])
+        self.assertTrue(
+            any("does not identify" in value for value in workspace["blockers"])
+        )
 
     def test_shipped_profiles_cover_the_initial_four_language_families(self) -> None:
         self.assertEqual(

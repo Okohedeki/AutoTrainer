@@ -511,9 +511,10 @@ def plan_project_evaluation(config_path: str | Path) -> dict[str, Any]:
     with project_run_gate(config_path), device_run_gate():
         config = _load_project(config_path)
         _refresh_frozen_compiler_provenance(config)
-        evaluation = config.data.get("evaluation", {})
-        if isinstance(evaluation, Mapping) and "language" in evaluation:
-            require_language_matched_evaluation(config.path)
+        # Missing ``evaluation.language`` has always meant ``auto`` in config
+        # validation.  Enforce the same language gate for legacy projects so
+        # omitting the key cannot bypass held-out task matching.
+        require_language_matched_evaluation(config.path)
         return write_evaluation_plan(config.data, config.root)
 
 

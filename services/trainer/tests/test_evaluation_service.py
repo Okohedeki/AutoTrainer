@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ from unittest.mock import MagicMock, patch
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_ROOT / "src"))
 
-from autotrainer.config import default_config, load_config, write_config  # noqa: E402
+from autotrainer.config import ConfigError, default_config, load_config, write_config  # noqa: E402
 from autotrainer.cli import main as cli_main  # noqa: E402
 from autotrainer.evaluation import (  # noqa: E402
     _producer_fairness,
@@ -25,6 +26,7 @@ from autotrainer.evaluation_service import (  # noqa: E402
     EvaluationServiceError,
     _readiness,
     _refresh_frozen_compiler_provenance,
+    plan_project_evaluation,
     run_project_evaluation,
 )
 
@@ -39,7 +41,41 @@ from test_evaluation_workflow import (  # noqa: E402
 )
 
 
-def _project(root: Path) -> Path:
+def _language_repository(root: Path, name: str, filename: str) -> tuple[Path, str]:
+    repository = root / name
+    repository.mkdir()
+    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "AutoTrainer Tests"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "tests@example.invalid"],
+        check=True,
+    )
+    (repository / filename).write_text("# language fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-m", "fixture"],
+        check=True,
+        capture_output=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return repository, revision
+
+
+def _project(root: Path, *, evaluation_filename: str = "held_out.py") -> Path:
+    train_repository, train_revision = _language_repository(
+        root, "language-train", "training.py"
+    )
+    evaluation_repository, evaluation_revision = _language_repository(
+        root, "language-evaluation", evaluation_filename
+    )
     config = default_config(revision=REVISION)
     config["project"]["artifact_dir"] = ".artifacts"
     config["grpo"]["dataset"] = ".artifacts/compiled/rl/train.jsonl"
@@ -52,6 +88,26 @@ def _project(root: Path) -> Path:
     reference["id"] = "Qwen/Qwen3.5-9B"
     reference["revision"] = REVISION
     config["evaluation"].pop("language", None)
+    config["sources"] = [
+        {
+            "id": "language-train",
+            "kind": "repository",
+            "license": {"spdx": "MIT"},
+            "partition": "train",
+            "revision": train_revision,
+            "roles": ["style"],
+            "uri": str(train_repository),
+        },
+        {
+            "id": "language-evaluation",
+            "kind": "repository",
+            "license": {"spdx": "MIT"},
+            "partition": "evaluation",
+            "revision": evaluation_revision,
+            "roles": ["evaluation"],
+            "uri": str(evaluation_repository),
+        },
+    ]
     config["evaluation"]["candidates"].insert(1, "base_fable")
     config["evaluation"]["arms"]["base_fable"] = {
         "label": "Base 9B + Fable",
@@ -233,6 +289,17 @@ def _write_scored_results(
 
 
 class EvaluationServiceTests(unittest.TestCase):
+    def test_missing_language_key_cannot_bypass_frontend_holdout_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = _project(
+                Path(temporary_directory), evaluation_filename="build.mjs"
+            )
+            config = load_config(config_path, check_paths=True)
+            self.assertNotIn("language", config.data["evaluation"])
+
+            with self.assertRaisesRegex(ConfigError, "do not contain Python code"):
+                plan_project_evaluation(config_path)
+
     def test_frozen_evaluation_restores_only_matching_full_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             config_path = _project(Path(temporary_directory))

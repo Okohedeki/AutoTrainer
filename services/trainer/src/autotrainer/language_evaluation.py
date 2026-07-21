@@ -24,6 +24,8 @@ _SUFFIX_LANGUAGE = {
     ".pyi": "python",
     ".js": "typescript_react",
     ".jsx": "typescript_react",
+    ".cjs": "typescript_react",
+    ".mjs": "typescript_react",
     ".ts": "typescript_react",
     ".tsx": "typescript_react",
     ".cs": "csharp",
@@ -196,17 +198,26 @@ def get_language_evaluation_workspace(config_path: str | Path) -> dict[str, Any]
     inferred = _primary_language(training_counts)
     selected = inferred if configured == "auto" else configured
     blockers: list[str] = []
+    if inferred is None:
+        blockers.append(
+            "The frozen training dataset does not identify a supported primary language."
+        )
     if selected not in LANGUAGE_SUITES:
         blockers.append(
             "Select the language used by the frozen training dataset before evaluation."
         )
     else:
-        if inferred and selected != inferred:
+        if inferred is not None and selected != inferred:
             blockers.append(
                 f"The selected {LANGUAGE_SUITES[selected]['label']} suite does not match "
                 f"the primary {LANGUAGE_SUITES[inferred]['label']} training language."
             )
-        if evaluation_counts and selected not in evaluation_counts:
+        if not evaluation_counts:
+            blockers.append(
+                "Held-out repositories do not contain detectable Python, TypeScript / "
+                "React, C#, or C++ code."
+            )
+        elif selected not in evaluation_counts:
             blockers.append(
                 f"Held-out repositories do not contain {LANGUAGE_SUITES[selected]['label']} code."
             )
