@@ -16,6 +16,7 @@ from autotrainer.config import default_config, write_config  # noqa: E402
 from autotrainer.model_host import (  # noqa: E402
     HostSpec,
     ModelHostError,
+    _chat_template_options,
     _require_context_fit,
     _tokenizer_source,
     create_model_host_server,
@@ -140,6 +141,16 @@ class ModelHostTests(unittest.TestCase):
         self.assertEqual(_require_context_fit(1_000, 500, 2_048), 2_048)
         with self.assertRaisesRegex(ModelHostError, "8192-token context limit"):
             _require_context_fit(7_000, 2_000, 32_768)
+
+    def test_chat_templates_disable_thinking_with_or_without_tools(self) -> None:
+        plain = _chat_template_options()
+        tools = [{"type": "function", "function": {"name": "read_file"}}]
+        tooled = _chat_template_options(tools)
+
+        self.assertIs(plain["enable_thinking"], False)
+        self.assertNotIn("tools", plain)
+        self.assertIs(tooled["enable_thinking"], False)
+        self.assertEqual(tooled["tools"], tools)
 
     def test_chat_endpoint_runs_the_injected_generator_and_reports_usage(self) -> None:
         generator = FakeGenerator()

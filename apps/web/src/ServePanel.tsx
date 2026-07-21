@@ -32,7 +32,7 @@ export default function ServePanel() {
   const [hosting, setHosting] = useState<HostingStatus | null>(null);
   const [adapter, setAdapter] = useState("auto");
   const [prompt, setPrompt] = useState("Explain the smallest safe change you would make to this project.");
-  const [response, setResponse] = useState<string | null>(null);
+  const [response, setResponse] = useState<{ text: string; finishReason: string | null } | null>(null);
   const [action, setAction] = useState<"start" | "stop" | "test" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -110,7 +110,10 @@ export default function ServePanel() {
     try {
       const result = await testHosting(prompt.trim());
       const text = result.response ?? result.content ?? result.text;
-      setResponse(typeof text === "string" ? text : JSON.stringify(result, null, 2));
+      setResponse({
+        text: typeof text === "string" ? text : JSON.stringify(result, null, 2),
+        finishReason: typeof result.finish_reason === "string" ? result.finish_reason : null,
+      });
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "The local test request failed.");
     } finally {
@@ -159,7 +162,7 @@ export default function ServePanel() {
           <header className="panel-header"><div><p className="panel-kicker">Live request</p><h2>Test the endpoint</h2></div></header>
           <label htmlFor="host-test-prompt"><span>Prompt</span><textarea id="host-test-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} disabled={!live || action !== null} /></label>
           <button className="primary-button" type="button" onClick={() => void test()} disabled={!live || !prompt.trim() || action !== null}>{action === "test" ? "Calling local model..." : "Send test request"}</button>
-          {response ? <div className="host-response" aria-live="polite"><strong>Local response</strong><pre>{response}</pre></div> : <div className="evidence-empty compact"><strong>No response yet</strong><p>A real response appears here after the local endpoint answers.</p></div>}
+          {response ? <div className="host-response" aria-live="polite"><strong>Local response</strong><pre>{response.text}</pre>{response.finishReason === "length" && <p className="field-note">This response reached the 512-token GUI test limit. The local API accepts a larger max_tokens value when your application needs it.</p>}</div> : <div className="evidence-empty compact"><strong>No response yet</strong><p>A real response appears here after the local endpoint answers.</p></div>}
         </article>
       </div>
     </section>

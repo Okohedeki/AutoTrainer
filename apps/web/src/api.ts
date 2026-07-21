@@ -758,6 +758,7 @@ export type HostingTestResult = {
   content?: string;
   text?: string;
   model?: string;
+  finish_reason?: string | null;
   [key: string]: unknown;
 };
 

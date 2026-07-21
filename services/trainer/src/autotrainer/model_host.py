@@ -235,6 +235,26 @@ def resolve_host_spec(config_path: str | Path, adapter: str = "auto") -> HostSpe
     )
 
 
+def _chat_template_options(
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Render final answers without exposing or spending tokens on reasoning.
+
+    Qwen's response-aware template defaults to thinking mode unless the caller
+    opts out.  Ordinary serving and tool episodes share the same no-thinking
+    contract used by training; tools are added only for the latter.
+    """
+
+    options: dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+    if tools is not None:
+        options["tools"] = tools
+    return options
+
+
 def _load_generator(spec: HostSpec) -> TextGenerator:
     """Import and load the optional training stack only inside the host process."""
 
@@ -284,16 +304,12 @@ def _load_generator(spec: HostSpec) -> TextGenerator:
             messages: list[dict[str, Any]],
             tools: list[dict[str, Any]] | None = None,
         ) -> str:
-            options: dict[str, Any] = {
-                "tokenize": False,
-                "add_generation_prompt": True,
-            }
-            if tools is not None:
-                # Candidate adapters use the response-aware tokenizer/template
-                # persisted by GRPOTrainer; reference arms use their own pinned
-                # snapshot tokenizer. The evaluator supplies its frozen tools.
-                options.update(tools=tools, enable_thinking=False)
-            return tokenizer.apply_chat_template(messages, **options)
+            # Candidate adapters use their saved response-aware template;
+            # reference/base models use the pinned snapshot template. Both
+            # produce final answers directly, and evaluation may add tools.
+            return tokenizer.apply_chat_template(
+                messages, **_chat_template_options(tools)
+            )
 
         @staticmethod
         def _count_rendered(prompt: str) -> int:

@@ -311,6 +311,9 @@ test("Serve manages a real local OpenAI-compatible host and test request", async
   assert.match(panel, /Copy curl/);
   assert.match(panel, /Send test request/);
   assert.match(panel, /No response yet/);
+  assert.match(panel, /response\.finishReason === "length"/);
+  assert.match(panel, /512-token GUI test limit/);
+  assert.match(api, /finish_reason\?: string \| null/);
   assert.match(panel, /adapterChoiceTouched/);
   assert.match(panel, /Backend resolved output/);
   assert.match(panel, /Loaded output/);

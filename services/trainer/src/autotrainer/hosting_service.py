@@ -386,16 +386,21 @@ class HostingManager:
         )
         choices = result.get("choices")
         content = None
+        finish_reason = None
         if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-            message = choices[0].get("message")
+            choice = choices[0]
+            message = choice.get("message")
             if isinstance(message, Mapping) and isinstance(message.get("content"), str):
                 content = message["content"]
+            if isinstance(choice.get("finish_reason"), str):
+                finish_reason = choice["finish_reason"]
         if content is None:
             raise HostingServiceError("The local model host returned no assistant message.")
         return {
             "status": "completed",
             "model": result.get("model"),
             "content": content,
+            "finish_reason": finish_reason,
             "usage": result.get("usage") if isinstance(result.get("usage"), Mapping) else {},
         }
 

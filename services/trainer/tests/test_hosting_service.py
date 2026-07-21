@@ -134,7 +134,12 @@ class HostingServiceTests(unittest.TestCase):
         }
         completion = {
             "model": "project-grpo",
-            "choices": [{"message": {"role": "assistant", "content": "It works."}}],
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "It works."},
+                    "finish_reason": "length",
+                }
+            ],
             "usage": {"total_tokens": 12},
         }
         with (
@@ -144,8 +149,10 @@ class HostingServiceTests(unittest.TestCase):
             result = manager.test("Explain this repository.")
 
         self.assertEqual(result["content"], "It works.")
+        self.assertEqual(result["finish_reason"], "length")
         self.assertEqual(result["usage"]["total_tokens"], 12)
         self.assertEqual(request.call_args.args[0], "http://127.0.0.1:9876/v1/chat/completions")
+        self.assertEqual(request.call_args.kwargs["payload"]["max_tokens"], 512)
 
     def test_test_rejects_empty_or_oversized_prompts(self) -> None:
         manager = HostingManager(self.config_path)
