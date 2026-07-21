@@ -444,10 +444,19 @@ class EvaluationPlanTests(unittest.TestCase):
             config = _config(root)
             config["grpo"]["max_tool_calling_iterations"] = 3
             config["grpo"]["max_completion_length"] = 256
+            config["evaluation"]["suites"]["model_benchmark"][
+                "max_tool_calling_iterations"
+            ] = 5
             first = build_evaluation_plan(config, root)
             second = build_evaluation_plan(config, root)
             self.assertEqual(first, second)
-            self.assertEqual(first["environment"]["max_tool_calling_iterations"], 3)
+            self.assertNotIn("max_tool_calling_iterations", first["environment"])
+            self.assertEqual(
+                first["suites"]["model_benchmark"][
+                    "max_tool_calling_iterations"
+                ],
+                5,
+            )
             self.assertNotIn("max_completion_tokens", first["environment"])
             self.assertEqual(
                 first["suites"]["model_benchmark"]["max_episode_output_tokens"],
@@ -455,6 +464,8 @@ class EvaluationPlanTests(unittest.TestCase):
             )
             changed_training_budget = json.loads(json.dumps(config))
             changed_training_budget["grpo"]["max_completion_length"] = 512
+            self.assertEqual(first, build_evaluation_plan(changed_training_budget, root))
+            changed_training_budget["grpo"]["max_tool_calling_iterations"] = 12
             self.assertEqual(first, build_evaluation_plan(changed_training_budget, root))
             changed_evaluation_budget = json.loads(json.dumps(config))
             changed_evaluation_budget["evaluation"]["suites"]["model_benchmark"][
@@ -468,6 +479,18 @@ class EvaluationPlanTests(unittest.TestCase):
                 1024,
             )
             self.assertNotEqual(first["plan_id"], changed_evaluation_plan["plan_id"])
+            changed_evaluation_turns = json.loads(json.dumps(config))
+            changed_evaluation_turns["evaluation"]["suites"]["model_benchmark"][
+                "max_tool_calling_iterations"
+            ] = 6
+            changed_turn_plan = build_evaluation_plan(changed_evaluation_turns, root)
+            self.assertEqual(
+                changed_turn_plan["suites"]["model_benchmark"][
+                    "max_tool_calling_iterations"
+                ],
+                6,
+            )
+            self.assertNotEqual(first["plan_id"], changed_turn_plan["plan_id"])
             self.assertEqual(first["holdout"]["unit"], "repository")
             self.assertEqual(
                 first["holdout"]["training_repository_identities"],
@@ -950,17 +973,23 @@ class EvaluationPlanTests(unittest.TestCase):
             _write_compile_provenance(root)
             config_path = write_config(root / "autotrainer.yaml", config)
 
-            with redirect_stdout(io.StringIO()):
-                plan_status = cli_main(
-                    [
-                        "evaluate",
-                        "plan",
-                        "--write",
-                        "--config",
-                        str(config_path),
-                        "--json",
-                    ]
-                )
+            # This fixture exercises immutable plan/export mechanics with
+            # synthetic compiled rows rather than real language repositories.
+            # Language matching has its own service-level coverage.
+            with patch(
+                "autotrainer.evaluation_service.require_language_matched_evaluation"
+            ):
+                with redirect_stdout(io.StringIO()):
+                    plan_status = cli_main(
+                        [
+                            "evaluate",
+                            "plan",
+                            "--write",
+                            "--config",
+                            str(config_path),
+                            "--json",
+                        ]
+                    )
             self.assertEqual(plan_status, 0)
             export = root / "fable-export"
             with redirect_stdout(io.StringIO()):

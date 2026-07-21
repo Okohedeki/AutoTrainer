@@ -371,6 +371,19 @@ class FrontendEnvironment:
 
         return self._finalize().reward
 
+    def _has_patch_for_evaluation(self) -> bool:
+        """Report whether the disposable workspace currently has a tracked diff.
+
+        This method is intentionally private so the policy cannot use it as a
+        tool. The built-in evaluator uses it only to decide whether its final
+        bounded model turn must be restricted to enabled mutation tools.
+        """
+
+        if self._manifest is None:
+            raise RuntimeError("environment reset must run before checking a patch")
+        self._check_deadline()
+        return bool(self._capture_unified_diff())
+
     def _export_patch_for_evaluation(self) -> str:
         """Return the current untrusted diff without running the hidden scorer.
 

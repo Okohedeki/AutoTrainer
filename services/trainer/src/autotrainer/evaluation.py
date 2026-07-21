@@ -23,7 +23,10 @@ import tempfile
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .benchmark import compare_benchmark, render_benchmark_markdown
-from .config import DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS
+from .config import (
+    DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS,
+    DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS,
+)
 from .integrity import (
     IntegrityError,
     resolve_container_image,
@@ -1259,17 +1262,25 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
                     "must be an integer between 1 and 4096"
                 )
             resolved_suite["max_episode_output_tokens"] = max_episode_output_tokens
+            max_tool_calling_iterations = suite.get(
+                "max_tool_calling_iterations",
+                DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS,
+            )
+            if (
+                not isinstance(max_tool_calling_iterations, int)
+                or isinstance(max_tool_calling_iterations, bool)
+                or not 1 <= max_tool_calling_iterations <= 32
+            ):
+                raise EvaluationError(
+                    "evaluation.suites.model_benchmark.max_tool_calling_iterations "
+                    "must be an integer between 1 and 32"
+                )
+            resolved_suite["max_tool_calling_iterations"] = (
+                max_tool_calling_iterations
+            )
         suites[suite_id] = resolved_suite
 
     environment = _mapping(config.get("environment", {}), "environment")
-    grpo = _mapping(config.get("grpo", {}), "grpo")
-    max_tool_iterations = grpo.get("max_tool_calling_iterations", 8)
-    if (
-        not isinstance(max_tool_iterations, int)
-        or isinstance(max_tool_iterations, bool)
-        or not 1 <= max_tool_iterations <= 32
-    ):
-        raise EvaluationError("grpo.max_tool_calling_iterations must be between 1 and 32")
     plan_input: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "project": _mapping(config.get("project", {}), "project").get("name"),
@@ -1321,10 +1332,6 @@ def build_evaluation_plan(config: Mapping[str, Any], project_root: Path) -> dict
             # Human-readable tag remains visible, but execution consumes the
             # immutable runtime_reference frozen alongside it.
             "image_identity": container_image,
-            # Tool-loop depth stays aligned with the refinement protocol. The
-            # benchmark's aggregate output allowance is suite-owned above so
-            # short GRPO completions cannot starve held-out agent work.
-            "max_tool_calling_iterations": max_tool_iterations,
         },
         "scoring": scorer_identity,
         "fairness": _frozen_fairness(fairness),

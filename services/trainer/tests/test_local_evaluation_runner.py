@@ -64,6 +64,14 @@ def _request(arm_id: str = "candidate") -> dict:
                     "id": "held-out-task",
                     "instruction": "Repair the responsive card without changing its copy.",
                 },
+                "tools": [
+                    "list_files",
+                    "read_file",
+                    "search_code",
+                    "apply_patch",
+                    "replace_text",
+                    "run_check",
+                ],
                 "runtime": {
                     "workingDirectory": ".",
                     "build": "npm run build",
@@ -83,6 +91,7 @@ class _FakeGenerator:
     def __init__(self) -> None:
         self.messages: list[list[dict[str, Any]]] = []
         self.max_token_budgets: list[int] = []
+        self.tool_names: list[list[str]] = []
         self.calls = 0
 
     def count_tokens(self, messages: list[dict[str, str]]) -> int:
@@ -137,6 +146,9 @@ class _FakeGenerator:
         input_tokens = self.count_tokens_with_tools(messages, tools)
         self.messages.append(messages)
         self.max_token_budgets.append(max_tokens)
+        self.tool_names.append(
+            [str(schema["function"]["name"]) for schema in tools]
+        )
         call = self.calls
         self.calls += 1
         if call % 2:
@@ -192,6 +204,9 @@ class _FakeEnvironment:
 
     def _export_patch_for_evaluation(self) -> str:
         return self.patch
+
+    def _has_patch_for_evaluation(self) -> bool:
+        return bool(self.patch)
 
     def _cleanup(self) -> None:
         return None
@@ -351,6 +366,7 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             builtin_runner_identity()["runtime_dependencies"],
             DECLARED_RUNTIME_DEPENDENCIES,
         )
+        self.assertEqual(builtin_runner_identity()["version"], "1.3.0")
         detached = builtin_runner_identity()
         detached["source_protocol"]["sha256"] = "sha256:" + "0" * 64
         detached["runtime_dependencies"]["torch"] = "forged"
@@ -520,10 +536,10 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 {
                     "arms": {"candidate": {"id": "candidate", "model": {}}},
                     "suites": {
-                        "model_benchmark": {"max_episode_output_tokens": 128}
-                    },
-                    "environment": {
-                        "max_tool_calling_iterations": 1,
+                        "model_benchmark": {
+                            "max_episode_output_tokens": 128,
+                            "max_tool_calling_iterations": 1,
+                        }
                     },
                 },
                 model_loader=lambda _spec: generator,
@@ -604,7 +620,12 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
                 root,
                 {
                     "arms": {"candidate": {"id": "candidate", "model": {}}},
-                    "environment": {"max_tool_calling_iterations": 3},
+                    "suites": {
+                        "model_benchmark": {
+                            "max_episode_output_tokens": 2048,
+                            "max_tool_calling_iterations": 3,
+                        }
+                    },
                 },
                 model_loader=lambda _spec: generator,
                 runtime_resolver=lambda _config, _root, _arm: runtime,
@@ -616,11 +637,243 @@ class LocalEvaluationRunnerTests(unittest.TestCase):
             result = json.loads((root / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "completed")
             self.assertEqual(generator.calls, 3)
-            self.assertEqual(generator.max_token_budgets, [2048, 2028, 1964])
+            self.assertEqual(generator.max_token_budgets, [1024, 1004, 1964])
             self.assertEqual(result["usage"]["output_tokens"], 85)
             rendered = json.dumps(generator.messages)
             self.assertIn("Tool error (RuntimeError)", rendered)
             self.assertNotIn("private host path must not be exposed", rendered)
+
+    def test_final_turn_is_reserved_for_enabled_mutation_tools(self) -> None:
+        class InspectThenEditGenerator(_FakeGenerator):
+            def generate_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                max_tokens: int,
+                temperature: float,
+                top_p: float,
+                seed: int | None,
+            ) -> tuple[str, int, int]:
+                del temperature, top_p, seed
+                input_tokens = self.count_tokens_with_tools(messages, tools)
+                self.messages.append(messages)
+                self.max_token_budgets.append(max_tokens)
+                self.tool_names.append(
+                    [str(schema["function"]["name"]) for schema in tools]
+                )
+                call = self.calls
+                self.calls += 1
+                if call < 2:
+                    return (
+                        "<tool_call><function=read_file>"
+                        "<parameter=path>src/card.css</parameter>"
+                        "</function></tool_call>",
+                        input_tokens,
+                        16,
+                    )
+                return (
+                    "<tool_call><function=apply_patch><parameter=patch>\n"
+                    "diff --git a/src/card.css b/src/card.css\n"
+                    "--- a/src/card.css\n+++ b/src/card.css\n"
+                    "@@ -1 +1 @@\n-.card{display:block}\n+.card{display:grid}\n"
+                    "</parameter></function></tool_call>",
+                    input_tokens,
+                    64,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = ArmRuntime(
+                arm_id="candidate",
+                model_id="org/candidate-9b",
+                revision=REVISION,
+                snapshot_path=root,
+                adapter_name="base",
+                adapter_path=None,
+                adapter_sha256=None,
+            )
+            generator = InspectThenEditGenerator()
+            request = _request("candidate")
+            request["task"]["manifest"]["tools"] = [
+                "list_files",
+                "read_file",
+                "apply_patch",
+                "run_check",
+            ]
+            producer = BuiltinEvaluationProducer(
+                {"model": {}},
+                root,
+                {
+                    "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "suites": {
+                        "model_benchmark": {
+                            "max_episode_output_tokens": 256,
+                            "max_tool_calling_iterations": 3,
+                        }
+                    },
+                },
+                model_loader=lambda _spec: generator,
+                runtime_resolver=lambda _config, _root, _arm: runtime,
+                environment_factory=_FakeEnvironment,
+            )
+
+            result_path = root / "result.json"
+            producer.produce(request, result_path)
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(generator.calls, 3)
+            self.assertEqual(generator.max_token_budgets, [128, 112, 224])
+            self.assertEqual(generator.tool_names[-1], ["apply_patch"])
+            self.assertIn("Final action:", json.dumps(generator.messages[-1]))
+
+    def test_output_reserve_triggers_bounded_finalization_early(self) -> None:
+        class VerboseThenEditGenerator(_FakeGenerator):
+            def generate_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                max_tokens: int,
+                temperature: float,
+                top_p: float,
+                seed: int | None,
+            ) -> tuple[str, int, int]:
+                del temperature, top_p, seed
+                input_tokens = self.count_tokens_with_tools(messages, tools)
+                self.messages.append(messages)
+                self.max_token_budgets.append(max_tokens)
+                self.tool_names.append(
+                    [str(schema["function"]["name"]) for schema in tools]
+                )
+                call = self.calls
+                self.calls += 1
+                if call == 0:
+                    return (
+                        "<tool_call><function=read_file>"
+                        "<parameter=path>src/card.css</parameter>"
+                        "</function></tool_call>",
+                        input_tokens,
+                        max_tokens,
+                    )
+                return (
+                    "<tool_call><function=apply_patch><parameter=patch>\n"
+                    "diff --git a/src/card.css b/src/card.css\n"
+                    "--- a/src/card.css\n+++ b/src/card.css\n"
+                    "@@ -1 +1 @@\n-.card{display:block}\n+.card{display:grid}\n"
+                    "</parameter></function></tool_call>",
+                    input_tokens,
+                    64,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = ArmRuntime(
+                arm_id="candidate",
+                model_id="org/candidate-9b",
+                revision=REVISION,
+                snapshot_path=root,
+                adapter_name="base",
+                adapter_path=None,
+                adapter_sha256=None,
+            )
+            generator = VerboseThenEditGenerator()
+            producer = BuiltinEvaluationProducer(
+                {"model": {}},
+                root,
+                {
+                    "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "suites": {
+                        "model_benchmark": {
+                            "max_episode_output_tokens": 256,
+                            "max_tool_calling_iterations": 16,
+                        }
+                    },
+                },
+                model_loader=lambda _spec: generator,
+                runtime_resolver=lambda _config, _root, _arm: runtime,
+                environment_factory=_FakeEnvironment,
+            )
+
+            result_path = root / "result.json"
+            producer.produce(_request("candidate"), result_path)
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(generator.calls, 2)
+            self.assertEqual(generator.max_token_budgets, [128, 128])
+            self.assertEqual(
+                set(generator.tool_names[-1]), {"apply_patch", "replace_text"}
+            )
+
+    def test_final_turn_refuses_an_unoffered_inspection_tool(self) -> None:
+        class InspectOnlyGenerator(_FakeGenerator):
+            def generate_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                max_tokens: int,
+                temperature: float,
+                top_p: float,
+                seed: int | None,
+            ) -> tuple[str, int, int]:
+                del temperature, top_p, seed
+                input_tokens = self.count_tokens_with_tools(messages, tools)
+                self.messages.append(messages)
+                self.max_token_budgets.append(max_tokens)
+                self.tool_names.append(
+                    [str(schema["function"]["name"]) for schema in tools]
+                )
+                self.calls += 1
+                return (
+                    "<tool_call><function=read_file>"
+                    "<parameter=path>src/card.css</parameter>"
+                    "</function></tool_call>",
+                    input_tokens,
+                    16,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = ArmRuntime(
+                arm_id="candidate",
+                model_id="org/candidate-9b",
+                revision=REVISION,
+                snapshot_path=root,
+                adapter_name="base",
+                adapter_path=None,
+                adapter_sha256=None,
+            )
+            generator = InspectOnlyGenerator()
+            producer = BuiltinEvaluationProducer(
+                {"model": {}},
+                root,
+                {
+                    "arms": {"candidate": {"id": "candidate", "model": {}}},
+                    "suites": {
+                        "model_benchmark": {
+                            "max_episode_output_tokens": 256,
+                            "max_tool_calling_iterations": 3,
+                        }
+                    },
+                },
+                model_loader=lambda _spec: generator,
+                runtime_resolver=lambda _config, _root, _arm: runtime,
+                environment_factory=_FakeEnvironment,
+            )
+
+            result_path = root / "result.json"
+            producer.produce(_request("candidate"), result_path)
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["output"], {})
+            self.assertEqual(generator.calls, 3)
+            self.assertEqual(
+                set(generator.tool_names[-1]), {"apply_patch", "replace_text"}
+            )
 
     def test_adapter_mutation_after_preflight_is_refused_before_model_load(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

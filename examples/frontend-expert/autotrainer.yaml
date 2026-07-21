@@ -133,6 +133,7 @@ evaluation:
     model_benchmark:
       kind: model_benchmark
       max_episode_output_tokens: 2048
+      max_tool_calling_iterations: 16
       arms:
       - reference_9b
       - autotrainer

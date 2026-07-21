@@ -25,12 +25,13 @@ import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
+from .config import DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS
 from .model_host import HostSpec, TextGenerator
 from .training.common import REFERENCE_DEPENDENCIES, import_factory
 
 
 PRODUCER_NAME = "autotrainer-local-patch"
-PRODUCER_VERSION = "1.2.0"
+PRODUCER_VERSION = "1.3.0"
 MAX_SOURCE_FILES = 40
 MAX_SOURCE_PATHS = 400
 MAX_SOURCE_CHARS = 32_000
@@ -42,7 +43,14 @@ MAX_INPUT_TOKENS = CONTEXT_TOKENS - MAX_NEW_TOKENS
 TEMPERATURE = 0.2
 TOP_P = 0.9
 
-MAX_TOOL_CALLING_ITERATIONS = 8
+MAX_TOOL_CALLING_ITERATIONS = DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS
+MAX_FINALIZATION_OUTPUT_TOKENS = 1024
+_MUTATION_TOOL_NAMES = frozenset({"apply_patch", "replace_text"})
+_FINALIZATION_OBSERVATION = (
+    "\n\nFinal action: no repository patch exists and this is your last model turn. "
+    "Use one of the available editing tools to apply the smallest valid change now. "
+    "Do not inspect files or run checks."
+)
 
 # Keep this schema code-owned and frozen in the runner identity. It mirrors the
 # six public methods on FrontendEnvironment, which TRL exposes during GRPO.
@@ -238,9 +246,16 @@ _ORCHESTRATION_SPEC = {
         "top_p": TOP_P,
         "seed": "frozen-trial-seed-plus-turn-index",
         "tools": _TOOL_SCHEMAS,
-        "max_tool_calling_iterations": "frozen-from-grpo-recipe",
+        "max_tool_calling_iterations": "frozen-from-model-benchmark-suite",
         "thinking": False,
         "tool_errors": "bounded-observation-not-suite-failure",
+        "no_patch_finalization": {
+            "trigger": "last-turn-or-protected-output-reserve",
+            "tools": "task-enabled-mutation-tools-only",
+            "observation": _FINALIZATION_OBSERVATION,
+            "output_token_reserve": "half-episode-capped-at-1024",
+            "extra_turns": 0,
+        },
     },
     "output": "environment-applied-unified-git-diff",
 }
@@ -903,10 +918,68 @@ def _parse_tool_calls(text: str) -> tuple[str, list[_ToolCall]] | None:
     return text[: matches[0].start()].strip(), calls
 
 
+def _enabled_mutation_tool_schemas(
+    task_row: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return only mutation schemas explicitly enabled by the frozen task."""
+
+    manifest = task_row.get("manifest")
+    enabled = manifest.get("tools") if isinstance(manifest, Mapping) else None
+    if not isinstance(enabled, list) or any(
+        not isinstance(name, str) for name in enabled
+    ):
+        raise LocalEvaluationRunnerError(
+            "the frozen evaluation task has no valid enabled-tool declaration"
+        )
+    enabled_names = set(enabled)
+    schemas = [
+        schema
+        for schema in _TOOL_SCHEMAS
+        if schema["function"]["name"] in enabled_names & _MUTATION_TOOL_NAMES
+    ]
+    if not schemas:
+        raise LocalEvaluationRunnerError(
+            "the frozen evaluation task must enable apply_patch or replace_text"
+        )
+    return schemas
+
+
+def _finalization_output_reserve(episode_output_tokens: int) -> int:
+    """Protect a deterministic in-budget allowance for the final edit turn."""
+
+    return min(
+        MAX_FINALIZATION_OUTPUT_TOKENS,
+        max(1, episode_output_tokens // 2),
+    )
+
+
+def _with_finalization_observation(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append the bounded final-action notice without mutating prior history."""
+
+    final_messages = json.loads(json.dumps(messages))
+    if not final_messages or not isinstance(final_messages[-1].get("content"), str):
+        raise LocalEvaluationRunnerError(
+            "the evaluation conversation cannot accept finalization guidance"
+        )
+    if final_messages[-1].get("role") == "user":
+        final_messages[-1]["content"] += _FINALIZATION_OBSERVATION
+    else:
+        final_messages.append(
+            {
+                "role": "user",
+                "content": _FINALIZATION_OBSERVATION.strip(),
+            }
+        )
+    return final_messages
+
+
 def _tool_messages_for_context(
     generator: TextGenerator,
     messages: list[dict[str, Any]],
     *,
+    tool_schemas: list[dict[str, Any]],
     max_input_tokens: int = MAX_INPUT_TOKENS,
 ) -> tuple[list[dict[str, Any]], int]:
     """Fit tool history using exact tokenizer counts and deterministic pruning."""
@@ -917,7 +990,7 @@ def _tool_messages_for_context(
             "the loaded model runtime does not support the GRPO tool chat template"
         )
     fitted = json.loads(json.dumps(messages))
-    token_count = counter(fitted, _TOOL_SCHEMAS)
+    token_count = counter(fitted, tool_schemas)
     if token_count <= max_input_tokens:
         return fitted, token_count
 
@@ -927,7 +1000,7 @@ def _tool_messages_for_context(
     marker = "[Earlier bounded tool output omitted to fit the frozen context.]"
     for index in tool_indexes[:-1]:
         fitted[index]["content"] = marker
-        token_count = counter(fitted, _TOOL_SCHEMAS)
+        token_count = counter(fitted, tool_schemas)
         if token_count <= max_input_tokens:
             return fitted, token_count
 
@@ -939,7 +1012,7 @@ def _tool_messages_for_context(
         while low <= high:
             middle = (low + high) // 2
             fitted[index]["content"] = original[:middle] + "\n[Tool output truncated.]"
-            candidate_tokens = counter(fitted, _TOOL_SCHEMAS)
+            candidate_tokens = counter(fitted, tool_schemas)
             if candidate_tokens <= max_input_tokens:
                 best = (json.loads(json.dumps(fitted)), candidate_tokens)
                 low = middle + 1
@@ -1031,10 +1104,17 @@ class BuiltinEvaluationProducer:
         self._model_loader = model_loader or _default_model_loader
         self._runtime_resolver = runtime_resolver
         self._environment_factory = environment_factory or self._resolve_environment_factory()
-        environment = plan.get("environment")
+        suites = plan.get("suites")
+        model_benchmark = (
+            suites.get("model_benchmark", {})
+            if isinstance(suites, Mapping)
+            else {}
+        )
         iterations = (
-            environment.get("max_tool_calling_iterations", MAX_TOOL_CALLING_ITERATIONS)
-            if isinstance(environment, Mapping)
+            model_benchmark.get(
+                "max_tool_calling_iterations", MAX_TOOL_CALLING_ITERATIONS
+            )
+            if isinstance(model_benchmark, Mapping)
             else MAX_TOOL_CALLING_ITERATIONS
         )
         if (
@@ -1043,15 +1123,9 @@ class BuiltinEvaluationProducer:
             or not 1 <= iterations <= 32
         ):
             raise LocalEvaluationRunnerError(
-                "the frozen evaluation tool-iteration limit is invalid"
+                "the frozen model-benchmark tool-iteration limit is invalid"
             )
         self._max_tool_calling_iterations = iterations
-        suites = plan.get("suites")
-        model_benchmark = (
-            suites.get("model_benchmark", {})
-            if isinstance(suites, Mapping)
-            else {}
-        )
         episode_output_tokens = (
             model_benchmark.get("max_episode_output_tokens", MAX_NEW_TOKENS)
             if isinstance(model_benchmark, Mapping)
@@ -1106,6 +1180,10 @@ class BuiltinEvaluationProducer:
         if not callable(getattr(environment, "_export_patch_for_evaluation", None)):
             raise LocalEvaluationRunnerError(
                 "the evaluation environment cannot export an untrusted patch safely"
+            )
+        if not callable(getattr(environment, "_has_patch_for_evaluation", None)):
+            raise LocalEvaluationRunnerError(
+                "the evaluation environment cannot report pending patch state safely"
             )
         return tools
 
@@ -1201,6 +1279,7 @@ class BuiltinEvaluationProducer:
         environment = self._environment_factory()
         tools = self._validate_environment(environment)
         task_row = self._private_task_row(request)
+        mutation_tool_schemas = _enabled_mutation_tool_schemas(task_row)
         started = time.monotonic()
         try:
             observation = environment.reset(**dict(task_row))
@@ -1213,20 +1292,51 @@ class BuiltinEvaluationProducer:
             total_output_tokens = 0
             tool_calls = 0
             environment_hard_failed = False
+            finalization_reserve = _finalization_output_reserve(
+                self._max_episode_output_tokens
+            )
+            force_finalization = False
+
+            def has_patch() -> bool:
+                value = environment._has_patch_for_evaluation()
+                if not isinstance(value, bool):
+                    raise LocalEvaluationRunnerError(
+                        "the evaluation environment returned invalid patch state"
+                    )
+                return value
+
             for turn in range(self._max_tool_calling_iterations):
-                fitted, expected_input = _tool_messages_for_context(
-                    generator,
-                    messages,
-                    max_input_tokens=self._max_input_tokens,
-                )
+                patch_exists = has_patch()
                 remaining = self._max_episode_output_tokens - total_output_tokens
                 if remaining <= 0:
                     break
+                finalizing = not patch_exists and (
+                    force_finalization
+                    or turn == self._max_tool_calling_iterations - 1
+                    or remaining <= finalization_reserve
+                )
+                turn_tools = mutation_tool_schemas if finalizing else _TOOL_SCHEMAS
+                turn_messages = (
+                    _with_finalization_observation(messages)
+                    if finalizing
+                    else messages
+                )
+                fitted, expected_input = _tool_messages_for_context(
+                    generator,
+                    turn_messages,
+                    tool_schemas=turn_tools,
+                    max_input_tokens=self._max_input_tokens,
+                )
+                generation_budget = (
+                    remaining
+                    if finalizing or patch_exists
+                    else remaining - finalization_reserve
+                )
                 try:
                     output_text, input_tokens, output_tokens = generate_turn(
                         fitted,
-                        _TOOL_SCHEMAS,
-                        max_tokens=remaining,
+                        turn_tools,
+                        max_tokens=generation_budget,
                         temperature=TEMPERATURE,
                         top_p=TOP_P,
                         seed=int(request.get("seed", 0)) + turn,
@@ -1244,8 +1354,8 @@ class BuiltinEvaluationProducer:
                     or output_tokens < 0
                     or input_tokens != expected_input
                     or input_tokens > self._max_input_tokens
-                    or input_tokens + remaining > CONTEXT_TOKENS
-                    or output_tokens > remaining
+                    or input_tokens + generation_budget > CONTEXT_TOKENS
+                    or output_tokens > generation_budget
                 ):
                     raise LocalEvaluationRunnerError(
                         "the local generator exceeded the frozen 8K evaluation context budget"
@@ -1258,15 +1368,28 @@ class BuiltinEvaluationProducer:
                     # A malformed or unavailable tool request is model output,
                     # not an infrastructure outage. Preserve failures-score-zero
                     # semantics and export only work already applied safely.
+                    if not finalizing and not has_patch():
+                        force_finalization = True
+                        continue
                     break
                 if parsed is None:
+                    if not finalizing and not has_patch():
+                        force_finalization = True
+                        continue
                     break
                 prefix, calls = parsed
                 messages = fitted
                 messages.append(_tool_call_message(prefix, calls))
+                allowed_turn_tools = {
+                    str(schema["function"]["name"]) for schema in turn_tools
+                }
                 for call in calls:
                     tool_calls += 1
                     try:
+                        if call.name not in allowed_turn_tools:
+                            raise LocalEvaluationRunnerError(
+                                "the model requested a tool unavailable in this turn"
+                            )
                         result = tools[call.name](**call.arguments)
                     except Exception as error:
                         # Invalid paths, disabled tools, and exhausted tool
@@ -1278,6 +1401,8 @@ class BuiltinEvaluationProducer:
                             getattr(last_result, "hard_gate_reason", None)
                         )
                     messages.append({"role": "tool", "content": str(result)})
+                if finalizing:
+                    break
             try:
                 exported = environment._export_patch_for_evaluation()
             except Exception:

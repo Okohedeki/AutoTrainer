@@ -84,6 +84,12 @@ class ConfigTests(unittest.TestCase):
             evaluation["suites"]["model_benchmark"]["max_episode_output_tokens"],
             2048,
         )
+        self.assertEqual(
+            evaluation["suites"]["model_benchmark"][
+                "max_tool_calling_iterations"
+            ],
+            16,
+        )
         self.assertEqual(config.data["refinement"]["mode"], "adapter_only")
         self.assertEqual(config.data["refinement"]["vram"]["enforcement"], "hard")
 

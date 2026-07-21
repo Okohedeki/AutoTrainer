@@ -49,6 +49,7 @@ EVALUATION_ROLES = {"reference", "control", "candidate"}
 EVALUATION_SUITES = {"model_benchmark", "fable_ab"}
 REQUIRED_EVALUATION_SUITES = {"model_benchmark"}
 DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS = 2048
+DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS = 16
 IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}")
 FAIRNESS_TRUE_FIELDS = (
     "same_task_snapshot",
@@ -397,6 +398,19 @@ def _validate_evaluation(evaluation: Mapping[str, Any], errors: list[str]) -> No
         errors.append(
             "evaluation.suites.model_benchmark.max_episode_output_tokens "
             "must be an integer between 1 and 4096"
+        )
+    max_tool_calling_iterations = model_suite.get(
+        "max_tool_calling_iterations",
+        DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS,
+    )
+    if (
+        not isinstance(max_tool_calling_iterations, int)
+        or isinstance(max_tool_calling_iterations, bool)
+        or not 1 <= max_tool_calling_iterations <= 32
+    ):
+        errors.append(
+            "evaluation.suites.model_benchmark.max_tool_calling_iterations "
+            "must be an integer between 1 and 32"
         )
 
     fable_members = suite_arms.get("fable_ab", [])
@@ -909,6 +923,9 @@ def default_config(
                     "arms": ["reference_9b", "autotrainer"],
                     "max_episode_output_tokens": (
                         DEFAULT_MODEL_BENCHMARK_MAX_EPISODE_OUTPUT_TOKENS
+                    ),
+                    "max_tool_calling_iterations": (
+                        DEFAULT_MODEL_BENCHMARK_MAX_TOOL_CALLING_ITERATIONS
                     ),
                     "runner": {
                         # AutoTrainer owns the exact prompt and local 4-bit

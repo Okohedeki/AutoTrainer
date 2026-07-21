@@ -280,6 +280,7 @@ evaluation:
     model_benchmark:
       kind: model_benchmark
       max_episode_output_tokens: 2048
+      max_tool_calling_iterations: 16
       arms: [reference_9b, autotrainer]
       runner:
         type: builtin
@@ -310,7 +311,7 @@ evaluation:
 
 The candidate adapter path must point to the stage being evaluated. A project that trains only SFT should update the path/stage to its SFT output before freezing a proof plan.
 
-The built-in runner owns its prompt/loader protocol. Its identity includes the installed evaluator code digest and pinned dependency versions. `max_episode_output_tokens` is the shared output allowance across every assistant/tool turn in one held-out trial; it defaults to 2048 independently of `grpo.max_completion_length` and is frozen equally for both benchmark arms. Before planning, AutoTrainer verifies that the selected shipped profile matches the primary training language and that held-out repositories contain that language. The initial profiles are Python, TypeScript/React, C#, and C++; their check/metric design cites HumanEval, MBPP, MultiPL-E, and HumanEval-X as inspiration, while execution remains in AutoTrainer's trusted verifier.
+The built-in runner owns its prompt/loader protocol. Its identity includes the installed evaluator code digest and pinned dependency versions. `max_episode_output_tokens` is the shared output allowance across every assistant/tool turn in one held-out trial; it defaults to 2048 independently of `grpo.max_completion_length`. `max_tool_calling_iterations` defaults to 16 independently of the GRPO rollout depth. The runner reserves a bounded portion of the same output allowance for a deterministic final edit attempt when earlier turns produced no patch. Both limits are frozen equally for both benchmark arms. Before planning, AutoTrainer verifies that the selected shipped profile matches the primary training language and that held-out repositories contain that language. The initial profiles are Python, TypeScript/React, C#, and C++; their check/metric design cites HumanEval, MBPP, MultiPL-E, and HumanEval-X as inspiration, while execution remains in AutoTrainer's trusted verifier.
 
 `evaluate plan --write` also freezes tasks, model revisions, adapter bytes, environment, seeds, fairness settings, and the derived trial matrix. Plan or trial tampering fails closed.
 

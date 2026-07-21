@@ -343,6 +343,7 @@
       "properties": {
         "kind": { "const": "model_benchmark" },
         "max_episode_output_tokens": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "max_tool_calling_iterations": { "type": "integer", "minimum": 1, "maximum": 32 },
         "arms": {
           "type": "array",
           "minItems": 2,
