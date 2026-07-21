@@ -208,6 +208,7 @@ test("Train owns one-click start and plots only observed training systems eviden
   assert.match(panel, /const recipeCopy/);
   assert.match(panel, /await startTraining\(\)/);
   assert.match(panel, /await prepareProject\(\)/);
+  assert.match(panel, /setEvents\(\[\]\);\s+\/\/ Readiness[\s\S]+setPreparation\(null\);\s+setJob\(await startTraining\(\)\)/);
   assert.match(api, /\/api\/v1\/training\/events\?after=/);
   assert.match(panel, /getTrainingEvents\(cursorRef\.current/);
   assert.match(panel, /jobRolledOver/);

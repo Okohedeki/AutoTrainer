@@ -168,6 +168,10 @@ export default function TrainingMonitorPanel({
       cursorRef.current = 0;
       jobIdRef.current = null;
       setEvents([]);
+      // Readiness describes the configuration before this managed run receives
+      // its fresh immutable output paths. Never render that prior snapshot next
+      // to the new job's live or terminal result.
+      setPreparation(null);
       setJob(await startTraining());
     } catch (reason) {
       setError(reason instanceof ApiClientError ? reason.message : "Training could not start.");
