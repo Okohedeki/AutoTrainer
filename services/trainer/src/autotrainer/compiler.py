@@ -228,6 +228,61 @@ def _source_input_paths(config: Mapping[str, Any], root: Path) -> set[Path]:
     return paths
 
 
+def _evaluation_task_pack_selection(
+    config: Mapping[str, Any],
+    sources: list[Any],
+) -> tuple[str | None, list[str]]:
+    """Resolve the one declared task pack allowed to supply held-out rows."""
+
+    evaluation = config.get("evaluation", {})
+    selected = (
+        str(evaluation.get("task_pack", "")).strip()
+        if isinstance(evaluation, Mapping)
+        else ""
+    )
+    task_packs = [
+        source
+        for source in sources
+        if isinstance(source, Mapping) and source.get("kind") == "task_pack"
+    ]
+    evaluation_task_packs = [
+        source for source in task_packs if source.get("partition") == "evaluation"
+    ]
+    matching_sources = [
+        source
+        for source in sources
+        if isinstance(source, Mapping) and str(source.get("id", "")) == selected
+    ]
+
+    if not selected:
+        if evaluation_task_packs:
+            return None, [
+                "evaluation.task_pack is required when evaluation task_pack sources are declared"
+            ]
+        return None, []
+
+    if len(matching_sources) > 1:
+        return selected, [
+            f"evaluation.task_pack {selected!r} is ambiguous because the source id is duplicated"
+        ]
+    if matching_sources:
+        source = matching_sources[0]
+        if source.get("kind") != "task_pack" or source.get("partition") != "evaluation":
+            return selected, [
+                f"evaluation.task_pack {selected!r} must name a task_pack source in the evaluation partition"
+            ]
+        return selected, []
+    if evaluation_task_packs:
+        return selected, [
+            f"evaluation.task_pack {selected!r} is not a declared evaluation task_pack source"
+        ]
+
+    # A fresh training-only project retains the default task-pack reference
+    # before any held-out source exists. Preserve that authoring workflow; as
+    # soon as an evaluation pack is declared, the selection becomes binding.
+    return selected, []
+
+
 def _fingerprint(
     sft_records: Mapping[str, list[Mapping[str, Any]]],
     rl_records: Mapping[str, list[Mapping[str, Any]]],
@@ -286,6 +341,28 @@ def _dataset_repository_provenance(
     return result
 
 
+def _repository_locks_for_compiled_rows(
+    repository_locks: Mapping[str, Mapping[str, Any]],
+    rl_records: Mapping[str, list[Mapping[str, Any]]],
+) -> dict[str, Mapping[str, Any]]:
+    """Keep held-out locks only when the selected pack emitted their tasks."""
+
+    selected_evaluation_sources: set[str] = set()
+    for row in rl_records.get("evaluation", []):
+        manifest = row.get("manifest", {})
+        task = manifest.get("task", {}) if isinstance(manifest, Mapping) else {}
+        if isinstance(task, Mapping):
+            source_id = str(task.get("sourceId", "")).strip()
+            if source_id:
+                selected_evaluation_sources.add(source_id)
+    return {
+        source_id: source
+        for source_id, source in repository_locks.items()
+        if source.get("partition") != "evaluation"
+        or source_id in selected_evaluation_sources
+    }
+
+
 def _report(
     *,
     sft_records: Mapping[str, list[Mapping[str, Any]]],
@@ -298,8 +375,11 @@ def _report(
     artifacts: Mapping[str, str] | None = None,
     artifact_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    reported_repository_locks = _repository_locks_for_compiled_rows(
+        repository_locks, rl_records
+    )
     repository_exposures = _repository_exposures(
-        repository_locks,
+        reported_repository_locks,
         sft_records=sft_records,
         rl_records=rl_records,
     )
@@ -583,6 +663,9 @@ def compile_data(
         )
 
     source_specs = config.get("sources", [])
+    selected_evaluation_pack, selection_errors = _evaluation_task_pack_selection(
+        config, source_specs
+    )
     repositories = {
         str(source["id"]): source
         for source in source_specs
@@ -592,7 +675,7 @@ def compile_data(
     # derived SFT rows are the reviewed records returned by the history core.
     sft_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
     rl_records: dict[str, list[Mapping[str, Any]]] = {"train": [], "evaluation": []}
-    errors: list[str] = []
+    errors: list[str] = list(selection_errors)
     warnings: list[str] = []
     task_ids: set[str] = set()
     group_partitions: dict[str, str] = {}
@@ -657,6 +740,11 @@ def compile_data(
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                 errors.append(f"{source_id}: cannot compile {path}:{line_number}: {error}")
         elif kind == "task_pack":
+            # Training packs remain additive. Held-out packs are different: the
+            # user's explicit evaluation.task_pack selection is the only pack
+            # allowed to contribute benchmark rows or affect their fingerprint.
+            if partition == "evaluation" and source_id != selected_evaluation_pack:
+                continue
             for manifest_path in _task_files(root, uri):
                 try:
                     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -666,6 +754,12 @@ def compile_data(
                     continue
                 if manifest.version != "1.0":
                     errors.append(f"{manifest.task_id}: compile requires task manifest version 1.0")
+                    continue
+                if manifest.split != partition:
+                    errors.append(
+                        f"{manifest.task_id}: task split {manifest.split!r} does not match "
+                        f"task_pack {source_id!r} partition {partition!r}"
+                    )
                     continue
                 if manifest.task_id in task_ids:
                     errors.append(f"duplicate task id: {manifest.task_id}")
@@ -710,7 +804,7 @@ def compile_data(
                         {
                             "role": "system",
                             "content": (
-                                "You are editing a disposable frontend repository. Use only the provided "
+                                "You are editing a disposable code repository. Use only the provided "
                                 "bounded tools. Inspection is not completion: for every repair task, attempt "
                                 "a focused change with apply_patch or replace_text and run the named checks before your final "
                                 "response. Never request network access."
@@ -752,7 +846,11 @@ def compile_data(
         warnings.append("no executable training tasks were compiled for GRPO")
     if not rl_records["evaluation"]:
         warnings.append("no held-out executable evaluation tasks were compiled")
-    warnings.extend(_repository_exposure_warnings(repository_locks))
+    warnings.extend(
+        _repository_exposure_warnings(
+            _repository_locks_for_compiled_rows(repository_locks, rl_records)
+        )
+    )
     warnings.extend(_repository_holdout_warnings(rl_records))
 
     for key, records in (

@@ -183,7 +183,81 @@ def _fixture(root: Path, *, evaluation: bool = False) -> tuple[dict, dict, Path]
 
     config = default_config(name="compiler-test", revision="a" * 40)
     config["sources"] = sources
+    if evaluation:
+        config["evaluation"]["task_pack"] = "tasks-evaluation"
+        config["sft"]["eval_dataset"] = ".autotrainer/compiled/sft/evaluation.jsonl"
     return config, scan_sources(config, root), task_path
+
+
+def _add_evaluation_task_pack(
+    root: Path,
+    config: dict,
+    *,
+    source_id: str,
+    task_id: str,
+    group_id: str,
+    repository_source_id: str = "evaluation-site",
+) -> None:
+    task_root = root / "tasks" / source_id / "one"
+    verifier = task_root / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "verify.mjs").write_text("// hidden verifier\n", encoding="utf-8")
+    (task_root / "task.json").write_text(
+        json.dumps(
+            _task_manifest(
+                task_id=task_id,
+                split="evaluation",
+                group_id=group_id,
+                source_id=repository_source_id,
+            )
+        ),
+        encoding="utf-8",
+    )
+    config["sources"].append(
+        {
+            "id": source_id,
+            "kind": "task_pack",
+            "uri": task_root.parent.relative_to(root).as_posix(),
+            "partition": "evaluation",
+        }
+    )
+
+
+def _add_evaluation_repository(root: Path, config: dict, *, source_id: str) -> Path:
+    repository = root / source_id
+    (repository / "src").mkdir(parents=True)
+    (repository / "src" / "App.tsx").write_text(
+        "export const Secondary = () => null;\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=AutoTrainer Test",
+            "-c",
+            "user.email=test@autotrainer.local",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    config["sources"].append(
+        {
+            "id": source_id,
+            "kind": "repository",
+            "uri": source_id,
+            "revision": "HEAD",
+            "partition": "evaluation",
+            "roles": ["evaluation"],
+            "include": ["src/**"],
+        }
+    )
+    return repository
 
 
 def _reviewable_history_fixture(root: Path) -> tuple[dict, Path, str]:
@@ -397,6 +471,8 @@ class CompilerTests(unittest.TestCase):
             )
             self.assertEqual(rl_row["source_revision"], scan["sources"][0]["commit"])
             system_prompt = rl_row["prompt"][0]["content"]
+            self.assertIn("disposable code repository", system_prompt)
+            self.assertNotIn("disposable frontend repository", system_prompt)
             self.assertIn("Inspection is not completion", system_prompt)
             self.assertIn("apply_patch", system_prompt)
             self.assertIn("run the named checks", system_prompt)
@@ -428,6 +504,154 @@ class CompilerTests(unittest.TestCase):
             self.assertRegex(
                 verifier_identity["files"][0]["sha256"], r"^[0-9a-f]{64}$"
             )
+
+    def test_selected_evaluation_task_pack_controls_rows_and_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _scan, _task_path = _fixture(root, evaluation=True)
+            _add_evaluation_task_pack(
+                root,
+                config,
+                source_id="tasks-evaluation-secondary",
+                task_id="evaluation-task-secondary",
+                group_id="evaluation-family-secondary",
+            )
+
+            first = compile_data(config, root, scan_sources(config, root))
+            first_rows = [
+                json.loads(line)
+                for line in Path(first["artifacts"]["rl_evaluation"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            first_train_rows = [
+                json.loads(line)
+                for line in Path(first["artifacts"]["rl_train"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+            config["evaluation"]["task_pack"] = "tasks-evaluation-secondary"
+            second = compile_data(config, root, scan_sources(config, root))
+            second_rows = [
+                json.loads(line)
+                for line in Path(second["artifacts"]["rl_evaluation"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            second_train_rows = [
+                json.loads(line)
+                for line in Path(second["artifacts"]["rl_train"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+            self.assertEqual(first["errors"], [])
+            self.assertEqual(second["errors"], [])
+            self.assertEqual(first["counts"]["rl_evaluation"], 1)
+            self.assertEqual(second["counts"]["rl_evaluation"], 1)
+            self.assertEqual([row["task_id"] for row in first_rows], ["evaluation-task"])
+            self.assertEqual(
+                [row["task_id"] for row in second_rows],
+                ["evaluation-task-secondary"],
+            )
+            self.assertEqual(
+                [row["task_id"] for row in first_train_rows], ["train-task"]
+            )
+            self.assertEqual(
+                [row["task_id"] for row in second_train_rows], ["train-task"]
+            )
+            self.assertNotEqual(first["fingerprint"], second["fingerprint"])
+
+    def test_unselected_evaluation_pack_repository_does_not_affect_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _scan, _task_path = _fixture(root, evaluation=True)
+
+            baseline = compile_data(config, root, scan_sources(config, root))
+            baseline_fingerprint = baseline["fingerprint"]
+            baseline_exposures = baseline["repository_exposures"]
+
+            secondary_repository = _add_evaluation_repository(
+                root, config, source_id="secondary-evaluation-site"
+            )
+            _add_evaluation_task_pack(
+                root,
+                config,
+                source_id="tasks-evaluation-secondary",
+                task_id="evaluation-task-secondary",
+                group_id="evaluation-family-secondary",
+                repository_source_id="secondary-evaluation-site",
+            )
+            with_unselected_pack = compile_data(
+                config, root, scan_sources(config, root)
+            )
+
+            self.assertEqual(with_unselected_pack["errors"], [])
+            self.assertEqual(with_unselected_pack["fingerprint"], baseline_fingerprint)
+            self.assertEqual(
+                with_unselected_pack["repository_exposures"], baseline_exposures
+            )
+            self.assertNotIn(
+                "secondary-evaluation-site",
+                {
+                    exposure["source_id"]
+                    for exposure in with_unselected_pack["repository_exposures"]
+                },
+            )
+
+            (secondary_repository / "src" / "App.tsx").write_text(
+                "export const Secondary = () => 'changed';\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "-C", str(secondary_repository), "add", "."], check=True
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(secondary_repository),
+                    "-c",
+                    "user.name=AutoTrainer Test",
+                    "-c",
+                    "user.email=test@autotrainer.local",
+                    "commit",
+                    "-qm",
+                    "change unselected repository",
+                ],
+                check=True,
+            )
+            after_unselected_change = compile_data(
+                config, root, scan_sources(config, root)
+            )
+
+            self.assertEqual(after_unselected_change["errors"], [])
+            self.assertEqual(after_unselected_change["fingerprint"], baseline_fingerprint)
+            self.assertEqual(
+                after_unselected_change["repository_exposures"], baseline_exposures
+            )
+
+    def test_missing_or_wrong_evaluation_task_pack_selection_blocks_compile(self) -> None:
+        cases = (
+            (
+                "not-declared",
+                "evaluation.task_pack 'not-declared' is not a declared evaluation task_pack source",
+            ),
+            (
+                "tasks-train",
+                "evaluation.task_pack 'tasks-train' must name a task_pack source in the evaluation partition",
+            ),
+        )
+        for selection, expected_error in cases:
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config, _scan, _task_path = _fixture(root, evaluation=True)
+                config["evaluation"]["task_pack"] = selection
+
+                report = compile_data(config, root, scan_sources(config, root))
+
+                self.assertIn(expected_error, report["errors"])
+                self.assertEqual(report["artifacts"], {})
 
     def test_approved_history_compiles_alone_and_combines_with_explicit_jsonl(
         self,
